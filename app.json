@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "shathi-sheba-temp",
-    "slug": "shathi-sheba-temp",
+    "name": "Shathi Sheba",
+    "slug": "shathi-sheba",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -13,14 +13,22 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Shathi Sheba uses your location to show local weather, rain alerts, and farming advice."
+      }
     },
     "android": {
+      "package": "com.digigram.shathisheba",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
+      "edgeToEdgeEnabled": false,
       "predictiveBackGestureEnabled": false
     },
     "web": {
