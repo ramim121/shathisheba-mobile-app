@@ -127,6 +127,7 @@ const WEATHERAPI_KEY =
   process.env.WEATHERAPI_KEY ||
   '0912cecdd77a45d99d350953261405';
 const WEATHERAPI_LOCATION = process.env.EXPO_PUBLIC_WEATHERAPI_LOCATION || '23.783200747913025,90.3994';
+const SERVER_FALLBACK_MESSAGE = 'We could not load this from current server.';
 
 const bnDigits = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
 
@@ -413,6 +414,97 @@ function ApiStatus({ state, empty }: { state: ApiState<any>; empty?: string }) {
     return <Text style={styles.apiNotice}>{empty}</Text>;
   }
   return null;
+}
+
+function shouldUseFallback<T>(state: ApiState<T>) {
+  return !state.loading && (!!state.error || state.rows.length === 0);
+}
+
+function fallbackWarning<T>(state: ApiState<T>) {
+  return shouldUseFallback(state) ? SERVER_FALLBACK_MESSAGE : null;
+}
+
+const fallbackMarketUpdates: ApiRow[] = [
+  { id: 'fallback-market-1', title_bn: 'আজ গরুর বাজারদর ভালো', title_en: 'Cattle rate is strong today', description_bn: 'ময়মনসিংহ বাজারে জীবন্ত গরুর গড় দর কেজি প্রতি ৬৭০ টাকা।', description_en: 'Live cattle is averaging Tk 670 per kg in Mymensingh markets.', status: 'Live', update_type: 'price' },
+  { id: 'fallback-market-2', title_bn: 'শাধীন ফিড আবার স্টকে এসেছে', title_en: 'Shadhin Feed is back in stock', description_bn: 'পার্টনার কৃষকদের জন্য ৫০ কেজি ক্যাটল ফিডের বস্তা পাওয়া যাচ্ছে।', description_en: '50kg cattle feed sacks are available for partner farmers.', status: 'Stock', update_type: 'stock' },
+  { id: 'fallback-market-3', title_bn: 'নতুন প্রশিক্ষণ ভিডিও প্রকাশিত', title_en: 'New training video published', description_bn: 'ঈদ ব্যাচে তালিকা দেওয়ার আগে গরু মোটাতাজাকরণ চেকলিস্ট দেখে নিন।', description_en: 'Watch the cattle fattening checklist before Eid batch listing.', status: 'Training', update_type: 'training' },
+];
+
+const fallbackSaleCategories: ApiRow[] = [
+  { id: 'fallback-sale-1', slug: 'crops', name_bn: 'ফসল', name_en: 'Crops', description_bn: 'ধান, ভুট্টা ও মৌসুমি ফসল', description_en: 'Rice, maize and seasonal harvests', status: 'soon' },
+  { id: 'fallback-sale-2', slug: 'livestock', name_bn: 'গবাদিপশু', name_en: 'Livestock', description_bn: 'গরু তালিকা এখন সক্রিয়', description_en: 'Cattle listing is active now', status: 'active' },
+  { id: 'fallback-sale-3', slug: 'inputs', name_bn: 'উপকরণ', name_en: 'Inputs', description_bn: 'বীজ, ফিড ও সার', description_en: 'Seeds, feed and fertilizer', status: 'soon' },
+  { id: 'fallback-sale-4', slug: 'machinery', name_bn: 'যন্ত্রপাতি', name_en: 'Machinery', description_bn: 'ভাড়া ও সার্ভিস অনুরোধ', description_en: 'Rental and service requests', status: 'soon' },
+];
+
+const fallbackSaleItems: ApiRow[] = [
+  { id: 'fallback-item-1', slug: 'cattle', name_bn: 'গরু', name_en: 'Cattle', description_bn: 'শাথী যাচাইয়ের মাধ্যমে গরু বা বলদ বিক্রি করুন', description_en: 'Sell cow or bull through Shathi verification', status: 'active' },
+  { id: 'fallback-item-2', slug: 'goat', name_bn: 'ছাগল', name_en: 'Goat', description_bn: 'ছাগল তালিকা শিগগিরই চালু হবে', description_en: 'Goat listing will open soon', status: 'soon' },
+  { id: 'fallback-item-3', slug: 'poultry', name_bn: 'পোল্ট্রি', name_en: 'Poultry', description_bn: 'মুরগি ও হাঁস তালিকা শিগগিরই চালু হবে', description_en: 'Chicken and duck listing will open soon', status: 'soon' },
+  { id: 'fallback-item-4', slug: 'fish', name_bn: 'মৎস্য', name_en: 'Fishery', description_bn: 'মাছ তালিকা শিগগিরই চালু হবে', description_en: 'Fish listing will open soon', status: 'soon' },
+];
+
+const fallbackBuyCategories: ApiRow[] = [
+  { id: 'fallback-buy-cat-1', slug: 'feed', name_bn: 'শাধীন ফিড', name_en: 'Shadhin Feed', description_bn: 'গরু, মাছ ও পোল্ট্রি ফিড', description_en: 'Cattle, fish and poultry feed' },
+  { id: 'fallback-buy-cat-2', slug: 'seeds', name_bn: 'বীজ', name_en: 'Seeds', description_bn: 'ধান ও সবজি বীজ প্যাক', description_en: 'Rice and vegetable seed packs' },
+  { id: 'fallback-buy-cat-3', slug: 'fertilizer', name_bn: 'সার', name_en: 'Fertilizer', description_bn: 'সুষম সার সহায়তা', description_en: 'Balanced fertilizer support' },
+  { id: 'fallback-buy-cat-4', slug: 'medicine', name_bn: 'কৃষি ওষুধ', name_en: 'Agri-medicine', description_bn: 'ফসল ও প্রাণী যত্ন পণ্য', description_en: 'Crop and animal care products' },
+  { id: 'fallback-buy-cat-5', slug: 'tools', name_bn: 'টুলস', name_en: 'Tools', description_bn: 'খামারের টুলস ও এক্সেসরিজ', description_en: 'Farm tools and accessories' },
+  { id: 'fallback-buy-cat-6', slug: 'machinery', name_bn: 'যন্ত্র ভাড়া', name_en: 'Machinery rental', description_bn: 'মাঠের কাজের জন্য যন্ত্র বুক করুন', description_en: 'Book machines for field work' },
+];
+
+const fallbackBuyProducts: ApiRow[] = [
+  { id: 101, sku: 'FALL-FEED-50', name_bn: 'শাধীন ক্যাটল ফিড', name_en: 'Shadhin Cattle Feed', description_bn: 'গরু মোটাতাজাকরণের জন্য উচ্চ প্রোটিন সুষম ফিড।', description_en: 'High protein balanced feed for cattle fattening.', package_size: '50kg', unit: 'sack', price: 1800, status: 'active', stock_qty: 45, low_stock_threshold: 8, metadata: '{"features":["High protein","Verified supplier"]}', delivery_window: '2-3 days' },
+  { id: 102, sku: 'FALL-FISH-25', name_bn: 'শাধীন ফিশ ফিড', name_en: 'Shadhin Fish Feed', description_bn: 'মাছের স্বাস্থ্যকর বৃদ্ধির জন্য ফ্লোটিং ফিড।', description_en: 'Floating feed for healthy fish growth.', package_size: '25kg', unit: 'bag', price: 1250, status: 'active', stock_qty: 18, low_stock_threshold: 5, metadata: '{"features":["Floating feed","Clean packaging"]}', delivery_window: '2-3 days' },
+  { id: 103, sku: 'FALL-POULTRY-50', name_bn: 'শাধীন পোল্ট্রি ফিড', name_en: 'Shadhin Poultry Feed', description_bn: 'দ্রুত ও সুষম বৃদ্ধির জন্য ব্রয়লার ফিড।', description_en: 'Broiler feed for fast and balanced growth.', package_size: '50kg', unit: 'sack', price: 1600, status: 'inactive', stock_qty: 0, low_stock_threshold: 5, metadata: '{"features":["Broiler grade","Fresh batch"]}', delivery_window: 'Coming soon' },
+  { id: 104, sku: 'FALL-SEED-87', name_bn: 'BRRI ধান ৮৭ বীজ', name_en: 'BRRI Rice 87 Seed', description_bn: 'বোরো মৌসুমের সার্টিফায়েড ধান বীজ প্যাক।', description_en: 'Boro season certified rice seed pack.', package_size: '5kg', unit: 'pack', price: 320, status: 'active', stock_qty: 30, low_stock_threshold: 6, metadata: '{"features":["Certified seed","Boro season"]}', delivery_window: '1-2 days' },
+];
+
+const fallbackPartnerProjects: ApiRow[] = [
+  { id: 201, project_code: 'FALL-EID-2024', title_bn: 'গরু মোটাতাজাকরণ ঈদ ব্যাচ ২০২৪', title_en: 'Cattle Fattening Eid Batch 2024', description_bn: 'উপকরণ সহায়তা ও বাজার সংযোগসহ চুক্তিভিত্তিক গবাদিপশু প্রকল্প।', description_en: 'Contract livestock project with input support and market linkage.', district: 'Mymensingh', upazila: 'Sadar', status: 'open', capacity: 120, lender_name: 'Shathi Finance', max_credit_amount: 75000, start_date: '2024-05-01', end_date: '2024-06-15', steps_json: '["Project selection","KYC","Verification","Approval"]', steps_bn_json: '["প্রকল্প নির্বাচন","KYC","যাচাই","অনুমোদন"]' },
+  { id: 202, project_code: 'FALL-BORO-2025', title_bn: 'বোরো ধান চুক্তি প্রকল্প শীত ২০২৫', title_en: 'Boro Rice Contract Winter 2025', description_bn: 'বোরো কৃষকদের জন্য বীজ, পরামর্শ ও ক্রেতা সংযোগ।', description_en: 'Seed, advisory and buyer linkage for Boro farmers.', district: 'Jamalpur', upazila: 'Islampur', status: 'soon', capacity: 180, lender_name: 'Partner Bank', max_credit_amount: 45000, start_date: '2025-01-10', end_date: '2025-04-30' },
+];
+
+const fallbackLedgers: ApiRow[] = [
+  { id: 'fallback-ledger-1', title_bn: 'বীজ ও ফিড উপকরণ', title_en: 'Seed and feed input', entry_type: 'input', amount: 62000 },
+  { id: 'fallback-ledger-2', title_bn: 'সার্ভিস ও ভেট সহায়তা', title_en: 'Service and vet support', entry_type: 'service', amount: 8500 },
+  { id: 'fallback-ledger-3', title_bn: 'আংশিক পেমেন্ট পাওয়া গেছে', title_en: 'Partial payment received', entry_type: 'payment', amount: 18000 },
+  { id: 'fallback-ledger-4', title_bn: 'সম্ভাব্য লাভের অংশ', title_en: 'Projected profit share', entry_type: 'profit', amount: 27000 },
+];
+
+const fallbackOfficers: ApiRow[] = [
+  { id: 'fallback-officer-1', name: 'Rana Hossain', role_bn: 'মাঠ কর্মকর্তা', role: 'Field Officer', district: 'Mymensingh', upazila: 'Sadar' },
+  { id: 'fallback-officer-2', name: 'Sadia Akter', role_bn: 'কমিউনিটি কর্মকর্তা', role: 'Community Officer', district: 'Mymensingh', upazila: 'Sadar' },
+];
+
+const fallbackCommunityPosts: ApiRow[] = [
+  { id: 'fallback-post-1', farmer_name: 'Md Rahim', post_type_bn: 'প্রশ্ন', post_type_en: 'Question', post_type: 'Question', body_bn: 'আমার গরু আজ কম খাচ্ছে। ভেট ডাকবার আগে কোন ফিড মিক্স চেষ্টা করতে পারি?', body_en: 'My cow is eating less today. What feed mix should I try before calling the vet?', like_count: 18, comment_count: 5, district: 'Mymensingh' },
+  { id: 'fallback-post-2', farmer_name: 'Fatema Begum', post_type_bn: 'আপডেট', post_type_en: 'Update', post_type: 'Update', body_bn: 'আমাদের বোরো জমিতে BRRI ধান ৮৭ ভালো ফল দিয়েছে। অন্য কৃষকদের জন্য শেয়ার করলাম।', body_en: 'BRRI Rice 87 seed performed well in our Boro plot. Sharing this for other farmers.', like_count: 24, comment_count: 7, district: 'Jamalpur' },
+];
+
+const fallbackWeatherAlerts: ApiRow[] = [
+  { id: 'fallback-weather-1', title_bn: 'বিকেলের জন্য বৃষ্টি সতর্কতা', title_en: 'Rain alert for afternoon', description_bn: 'মেঘ বাড়লে কাটা ফসল ঢেকে রাখুন এবং শুকানো কিছুটা দেরি করুন।', description_en: 'Keep harvested crops under cover and delay drying if clouds build up.', alert_type: 'rain', severity: 'warning' },
+  { id: 'fallback-weather-2', title_bn: 'সেরা ফসল কাটার সময়', title_en: 'Best harvest window', description_bn: 'আজ সকাল থেকে দুপুর পর্যন্ত সবজি ও ফল কাটার জন্য তুলনামূলক নিরাপদ।', description_en: 'Morning to noon looks safer for cutting vegetables and fruits today.', alert_type: 'field_advice', severity: 'info' },
+  { id: 'fallback-weather-3', title_bn: 'মেরিটাইম সিগন্যাল পর্যবেক্ষণ', title_en: 'Maritime signal watch', description_bn: 'বর্তমান সার্ভার থেকে কোনো গুরুতর মেরিটাইম পোর্ট সিগন্যাল পাওয়া যায়নি।', description_en: 'No critical maritime port signal is available from the current server.', alert_type: 'maritime', severity: 'info' },
+];
+
+const fallbackProfileUser: ApiRow = {
+  id: 'fallback-user',
+  display_name: 'Ramim',
+  full_name: 'Ramim',
+  phone: '01712-345678',
+  district: 'Mymensingh',
+};
+
+function fallbackTrainingModulesFor(tx: (bnText: string, enText: string) => string): TrainingModule[] {
+  return [
+    { icon: '🐄', title: tx('গবাদিপশু পরিচর্যা', 'Livestock Care'), sub: tx('গরুর স্বাস্থ্য, ফিড ও মোটাতাজাকরণ', 'Cattle health, feed and fattening basics'), count: tx('৩টি কনটেন্ট', '3 contents'), article: tx('দৈনিক গরু পরিচর্যা চেকলিস্ট', 'Daily cattle care checklist'), video: tx('সুষম ফিড মেশানোর গাইড', 'Balanced feed mixing guide'), quiz: tx('গবাদিপশু পরিচর্যা কুইজ', 'Livestock care quiz'), progress: tx('শুরু করুন', 'Start'), bg: colors.rose, articleBody: tx('পরিষ্কার পানি, সুষম খাবার, ছায়া, টিকা রেকর্ড এবং প্রতিদিন খাবারের রুচি লক্ষ্য করুন। জ্বর, ফুলে যাওয়া, ডায়রিয়া বা হঠাৎ দুর্বলতা হলে ভেট ডাকুন।', 'Keep clean water, balanced feed, shade, vaccination records and daily appetite checks. Call a vet when fever, swelling, diarrhea or sudden weakness appears.'), videoUrl: tx('নমুনা ভিডিও কনটেন্ট', 'Sample video content') },
+    { icon: '🌾', title: tx('ফসল উৎপাদন', 'Crop Production'), sub: tx('ধান, ভুট্টা ও মাঠ ফসল নির্দেশনা', 'Rice, maize and field crop guidance'), count: tx('৩টি কনটেন্ট', '3 contents'), article: tx('বোরো জমি প্রস্তুতির ধাপ', 'Boro field preparation steps'), video: tx('ধানের সার প্রয়োগের সময়', 'Fertilizer timing for rice'), quiz: tx('ফসল উৎপাদন কুইজ', 'Crop production quiz'), progress: tx('শুরু করুন', 'Start'), bg: colors.goldPale, articleBody: tx('জমি সমান করুন, সার্টিফায়েড বীজ ব্যবহার করুন, সেচ নিয়মিত রাখুন এবং সব সার একসাথে না দিয়ে বৃদ্ধির ধাপ অনুযায়ী দিন।', 'Prepare land evenly, use certified seed, keep irrigation consistent and apply fertilizer by growth stage instead of all at once.'), videoUrl: tx('নমুনা ভিডিও কনটেন্ট', 'Sample video content') },
+    { icon: '🥬', title: tx('সবজি', 'Vegetables'), sub: tx('মৌসুমি সবজি ও পোকা ব্যবস্থাপনা', 'Seasonal vegetable growing and pest care'), count: tx('৩টি কনটেন্ট', '3 contents'), article: tx('নিরাপদ সবজি পোকা নিয়ন্ত্রণ', 'Safe vegetable pest control'), video: tx('উঁচু বেডে সবজি চাষ', 'Raised bed vegetable farming'), quiz: tx('সবজি কুইজ', 'Vegetable quiz'), progress: tx('শুরু করুন', 'Start'), bg: colors.greenPale, articleBody: tx('উঁচু বেড, ভালো পানি নিষ্কাশন, পরিষ্কার চারা ট্রে এবং নিয়মিত পোকা পর্যবেক্ষণ করুন। অপ্রয়োজনীয় কীটনাশক এড়িয়ে নিরাপদ অপেক্ষার সময় মানুন।', 'Use raised beds, good drainage, clean seedling trays and pest scouting. Avoid unnecessary pesticide and follow safe waiting periods.'), videoUrl: tx('নমুনা ভিডিও কনটেন্ট', 'Sample video content') },
+    { icon: '🐟', title: tx('মৎস্য', 'Fishery'), sub: tx('পুকুর প্রস্তুতি, ফিড ও পানির মান', 'Pond preparation, feed and water quality'), count: tx('৩টি কনটেন্ট', '3 contents'), article: tx('পুকুরের পানির মান চেকলিস্ট', 'Pond water quality checklist'), video: tx('মাছের ফিড ব্যবস্থাপনা', 'Fish feed management'), quiz: tx('মৎস্য কুইজ', 'Fishery quiz'), progress: tx('শুরু করুন', 'Start'), bg: colors.bluePale, articleBody: tx('পানির রং, অক্সিজেন, পুকুরের গভীরতা ও খাবারের সাড়া দেখুন। অক্সিজেন কম থাকলে বা ভারী বৃষ্টির পর খাবার কমান।', 'Check water color, oxygen, pond depth and feed response. Reduce feeding during low oxygen and after heavy rain.'), videoUrl: tx('নমুনা ভিডিও কনটেন্ট', 'Sample video content') },
+    { icon: '🍎', title: tx('ফল', 'Fruits'), sub: tx('ফলের বাগান পরিচর্যা ও হারভেস্ট পরিকল্পনা', 'Fruit orchard care and harvest planning'), count: tx('৩টি কনটেন্ট', '3 contents'), article: tx('ফল সংগ্রহ ও হ্যান্ডলিং', 'Fruit harvest handling'), video: tx('আম বাগানের মৌলিক যত্ন', 'Mango orchard care basics'), quiz: tx('ফল চাষ কুইজ', 'Fruit farming quiz'), progress: tx('শুরু করুন', 'Start'), bg: '#FCE7F3', articleBody: tx('সাবধানে ফল সংগ্রহ করুন, আঘাত লাগা এড়ান, আকার ও পরিপক্বতা অনুযায়ী বাছাই করুন এবং পরিবহনের আগে ছায়ায় রাখুন।', 'Harvest carefully, avoid bruising, sort by size and maturity, and keep fruits shaded before transport.'), videoUrl: tx('নমুনা ভিডিও কনটেন্ট', 'Sample video content') },
+    { icon: '☁️', title: tx('আবহাওয়া-স্মার্ট কৃষি', 'Weather Smart Farming'), sub: tx('বৃষ্টি, গরম ও ঝড়ের ঝুঁকি প্রস্তুতি', 'Rain, heat and storm risk preparation'), count: tx('৩টি কনটেন্ট', '3 contents'), article: tx('ভারী বৃষ্টির আগে খামারের কাজ', 'Farm action before heavy rain'), video: tx('আবহাওয়া দেখে ফসল কাটার পরিকল্পনা', 'Weather-based harvest planning'), quiz: tx('আবহাওয়া কুইজ', 'Weather quiz'), progress: tx('শুরু করুন', 'Start'), bg: '#CCFBF1', articleBody: tx('কাটা ফসল ঢেকে রাখুন, গোয়ালঘর শক্ত করুন, নালা পরিষ্কার রাখুন এবং ভারী বৃষ্টির আগে সার প্রয়োগ এড়িয়ে চলুন।', 'Move harvested crops under cover, secure livestock sheds, clean drainage and avoid fertilizer application before heavy rain.'), videoUrl: tx('নমুনা ভিডিও কনটেন্ট', 'Sample video content') },
+  ];
 }
 
 const GEMINI_API_KEY =
@@ -1767,6 +1859,9 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const users = useApiList<ApiRow>('users');
   const liveWeather = useWeatherApi();
   const market = useApiList<ApiRow>('market-updates');
+  const homeUser = shouldUseFallback(users) ? fallbackProfileUser : users.rows[0];
+  const marketRows = shouldUseFallback(market) ? fallbackMarketUpdates : market.rows;
+  const marketWarning = fallbackWarning(market);
   const currentWeather = liveWeather.data?.current;
   const forecastDay = liveWeather.data?.forecast?.forecastday?.[0]?.day;
   const temp = currentWeather?.temp_c ?? 31;
@@ -1778,7 +1873,7 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
       <BrandHeader setScreen={setScreen} />
       <Card style={styles.heroCard}>
         <Text style={styles.heroSmall}>{tx('আসসালামু আলাইকুম', 'Assalamu Alaikum')}</Text>
-        <Text style={styles.heroName}>{users.rows[0]?.display_name || users.rows[0]?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')} 👋</Text>
+        <Text style={styles.heroName}>{homeUser?.display_name || homeUser?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')} 👋</Text>
         <Pressable onPress={() => setScreen('weather')} style={({ pressed }) => [styles.weatherHomeCard, pressed && styles.pressed]}>
           <View style={styles.weatherHomeTop}>
             <View style={styles.weatherHomeIcon}>
@@ -1824,9 +1919,9 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
         </View>
         <Text style={styles.homeApaArrow}>›</Text>
       </Pressable>
-      <SectionTitle title={tx('বাজার আপডেট', 'Market Updates')} right={tx('সব দেখুন', 'See all')} />
-      <ApiStatus state={market} empty={tx('এখন কোনো বাজার আপডেট নেই।', 'No market updates are available right now.')} />
-      {market.rows.slice(0, 3).map((item, index) => (
+      <SectionTitle title={tx('বাজার আপডেট', 'Market Updates')} right={tx('সব দেখুন', 'See all')} warning={marketWarning} />
+      {market.loading ? <ApiStatus state={market} empty={tx('এখন কোনো বাজার আপডেট নেই।', 'No market updates are available right now.')} /> : null}
+      {marketRows.slice(0, 3).map((item, index) => (
         <Alert
           key={item.id || index}
           title={rowTitle(item, lang, tx('বাজার আপডেট', 'Market update'))}
@@ -1863,7 +1958,8 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const wind = current?.wind_kph ?? '--';
   const rain = forecastDay?.daily_chance_of_rain ?? current?.chance_of_rain ?? '--';
   const pm25 = current?.air_quality?.pm2_5;
-  const adminAlerts = adminWeather.rows;
+  const adminAlerts = shouldUseFallback(adminWeather) ? fallbackWeatherAlerts : adminWeather.rows;
+  const weatherFallbackWarning = liveWeather.usingFallback || shouldUseFallback(adminWeather) ? SERVER_FALLBACK_MESSAGE : null;
   const forecastDays: ApiRow[] = weather?.forecast?.forecastday || [];
 
   return (
@@ -1898,7 +1994,7 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <WeatherMetric icon="🌧" value={`${num(rain, lang)}%`} label={tx('বৃষ্টির সম্ভাবনা', 'Rain chance')} />
       </View>
 
-      <SectionTitle title={tx('৩ দিনের পূর্বাভাস', '3-Day Forecast')} />
+      <SectionTitle title={tx('৩ দিনের পূর্বাভাস', '3-Day Forecast')} warning={liveWeather.usingFallback ? SERVER_FALLBACK_MESSAGE : null} />
       <View style={styles.forecastGrid}>
         {forecastDays.slice(0, 3).map((day, index) => (
           <View key={day.date || index} style={styles.forecastCard}>
@@ -1911,7 +2007,7 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
         ))}
       </View>
 
-      <SectionTitle title={tx('গুরুত্বপূর্ণ সতর্কতা', 'Important Updates')} />
+      <SectionTitle title={tx('গুরুত্বপূর্ণ সতর্কতা', 'Important Updates')} warning={weatherFallbackWarning} />
       {weatherAlerts.length ? weatherAlerts.map((alert, index) => (
         <Card key={alert.id || alert.event || index} style={styles.weatherAlert}>
           <View style={styles.weatherAlertIcon}>
@@ -2502,11 +2598,26 @@ function ServiceCard({
   );
 }
 
-function SectionTitle({ title, right }: { title: string; right?: string }) {
+function SectionTitle({ title, right, warning }: { title: string; right?: string; warning?: string | null }) {
+  const [open, setOpen] = useState(false);
   return (
-    <View style={styles.sectionRow}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      {right ? <Text style={styles.sectionRight}>{right}</Text> : null}
+    <View style={styles.sectionBlock}>
+      <View style={styles.sectionRow}>
+        <View style={styles.sectionTitleWrap}>
+          <Text style={styles.sectionTitle}>{title}</Text>
+          {warning ? (
+            <Pressable onPress={() => setOpen((current) => !current)} hitSlop={10} style={styles.sectionWarningButton}>
+              <Text style={styles.sectionWarningIcon}>!</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        {right ? <Text style={styles.sectionRight}>{right}</Text> : null}
+      </View>
+      {warning && open ? (
+        <View style={styles.sectionTooltip}>
+          <Text style={styles.sectionTooltipText}>{warning}</Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -2529,13 +2640,15 @@ function Alert({ title, sub, badge, gold }: { title: string; sub: string; badge:
 function SaleCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const categories = useApiList<ApiRow>('sale/categories');
+  const categoryRows = shouldUseFallback(categories) ? fallbackSaleCategories : categories.rows;
   return (
     <>
       <Header title={tx('বিক্রির তালিকা করুন', 'List for Sale')} onBack={() => setScreen('home')} />
       <Text style={styles.pageHint}>{tx('আপনার পণ্যের বিভাগ বেছে নিন', 'Choose your product category')}</Text>
-      <ApiStatus state={categories} empty={tx('বিক্রির কোনো বিভাগ পাওয়া যায়নি।', 'No sale categories are available.')} />
+      <SectionTitle title={tx('বিভাগ', 'Categories')} warning={fallbackWarning(categories)} />
+      {categories.loading ? <ApiStatus state={categories} empty={tx('বিক্রির কোনো বিভাগ পাওয়া যায়নি।', 'No sale categories are available.')} /> : null}
       <View style={styles.grid}>
-        {categories.rows.map((category) => {
+        {categoryRows.map((category) => {
           const slug = String(category.slug || '').toLowerCase();
           return (
             <Tile
@@ -2555,12 +2668,14 @@ function SaleCategories({ setScreen }: { setScreen: (screen: Screen) => void }) 
 function Livestock({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const items = useApiList<ApiRow>('sale/items');
+  const itemRows = shouldUseFallback(items) ? fallbackSaleItems : items.rows;
   return (
     <>
       <Header title={tx('গবাদিপশু', 'Livestock')} onBack={() => setScreen('saleCategories')} right={tx('সক্রিয়', 'Active')} />
       <Text style={styles.pageHint}>{tx('কোন পশু তালিকা করতে চান?', 'Which animal would you like to list?')}</Text>
-      <ApiStatus state={items} empty={tx('তালিকা করার মতো কোনো আইটেম পাওয়া যায়নি।', 'No sale items are available.')} />
-      {items.rows.map((item) => {
+      <SectionTitle title={tx('তালিকা ধরন', 'Listing type')} warning={fallbackWarning(items)} />
+      {items.loading ? <ApiStatus state={items} empty={tx('তালিকা করার মতো কোনো আইটেম পাওয়া যায়নি।', 'No sale items are available.')} /> : null}
+      {itemRows.map((item) => {
         const slug = String(item.slug || item.name_en || '').toLowerCase();
         const isActive = item.status === 'active' && slug.includes('cattle');
         return (
@@ -2593,6 +2708,7 @@ function CattleForm({
 }) {
   const { tx, lang } = useLanguage();
   const breedState = useApiList<ApiRow>('sale/breeds');
+  const breedWarning = fallbackWarning(breedState);
   const [age, setAge] = useState(num(24, lang));
   const [count, setCount] = useState(num(1, lang));
   const [animalType, setAnimalType] = useState(tx('বলদ', 'Bull'));
@@ -2695,8 +2811,8 @@ function CattleForm({
       </View>
       <FormLabel label={tx('পশুর ধরন', 'Animal Type')} />
       <FakeSelect value={animalType} options={animalTypes} onChange={setAnimalType} disabled={aiAnalyzing} />
-      <FormLabel label={tx('গরুর ধরন / জাত', 'Breed')} />
-      <ApiStatus state={breedState} />
+      <SectionTitle title={tx('গরুর ধরন / জাত', 'Breed')} warning={breedWarning} />
+      {breedState.loading ? <ApiStatus state={breedState} /> : null}
       <FakeSelect value={breed} options={breeds} onChange={setBreed} disabled={aiAnalyzing} />
       <FormLabel label={tx('পশুর সংখ্যা', 'Number of animals')} />
       <TextInput style={[styles.input, aiAnalyzing && styles.inputDisabled]} editable={!aiAnalyzing} value={count} onChangeText={setCount} keyboardType="number-pad" />
@@ -2886,17 +3002,18 @@ function CattleDone({ setScreen, listing }: { setScreen: (screen: Screen) => voi
 function BuyCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const categories = useApiList<ApiRow>('buy/categories');
+  const categoryRows = shouldUseFallback(categories) ? fallbackBuyCategories : categories.rows;
   return (
     <>
       <Header title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} onBack={() => setScreen('home')} />
       <View style={styles.deliveryBanner}>
         <Text style={styles.deliveryText}>{tx('🚚 দ্রুত ডেলিভারি ১-৩ দিন · ৳৫০০+ অর্ডারে বিনামূল্যে', '🚚 Fast delivery 1-3 days · Free over ৳500')}</Text>
       </View>
-      <SectionTitle title={tx('বিভাগ অনুযায়ী কিনুন', 'Shop by category')} />
-      <ApiStatus state={categories} empty={tx('কেনার কোনো বিভাগ পাওয়া যায়নি।', 'No buying categories are available.')} />
+      <SectionTitle title={tx('বিভাগ অনুযায়ী কিনুন', 'Shop by category')} warning={fallbackWarning(categories)} />
+      {categories.loading ? <ApiStatus state={categories} empty={tx('কেনার কোনো বিভাগ পাওয়া যায়নি।', 'No buying categories are available.')} /> : null}
       <View style={styles.grid}>
-        {categories.rows.map((category) => (
-          <Tile key={category.id || category.slug} icon="🌾" title={rowTitle(category, lang, tx('বিভাগ', 'Category'))} subtitle={rowBody(category, lang, '')} onPress={() => setScreen('buyProducts')} />
+        {categoryRows.map((category) => (
+          <Tile key={category.id || category.slug} icon={String(category.slug || '').includes('mach') ? '🚜' : String(category.slug || '').includes('tool') ? '🔧' : String(category.slug || '').includes('medicine') ? '💊' : String(category.slug || '').includes('fertilizer') ? '🧪' : String(category.slug || '').includes('seed') ? '🌱' : '🌾'} title={rowTitle(category, lang, tx('বিভাগ', 'Category'))} subtitle={rowBody(category, lang, '')} onPress={() => setScreen('buyProducts')} />
         ))}
       </View>
     </>
@@ -2906,6 +3023,7 @@ function BuyCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
 function BuyProducts({ setScreen, onSelectProduct }: { setScreen: (screen: Screen) => void; onSelectProduct: (product: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
   const products = useApiList<ApiRow>('buy/products');
+  const productRows = shouldUseFallback(products) ? fallbackBuyProducts : products.rows;
   return (
     <>
       <Header title={tx('শাধীন ফিড', 'Seeds')} onBack={() => setScreen('buyCategories')} />
@@ -2913,8 +3031,9 @@ function BuyProducts({ setScreen, onSelectProduct }: { setScreen: (screen: Scree
         <Text style={styles.segmentActive}>{tx('কিনুন', 'Buy')}</Text>
         <Text style={styles.segmentInactive}>{tx('বিক্রি করুন', 'Sell')}</Text>
       </View>
-      <ApiStatus state={products} empty={tx('কোনো পণ্য পাওয়া যায়নি।', 'No products are available.')} />
-      {products.rows.map((product) => {
+      <SectionTitle title={tx('পণ্য', 'Products')} warning={fallbackWarning(products)} />
+      {products.loading ? <ApiStatus state={products} empty={tx('কোনো পণ্য পাওয়া যায়নি।', 'No products are available.')} /> : null}
+      {productRows.map((product) => {
         const available = product.status === 'active';
         const lowStock = Number(product.stock_qty || 0) <= Number(product.low_stock_threshold || -1);
         return (
@@ -3092,6 +3211,9 @@ function useTrainingModules(): TrainingModule[] {
   const { tx, lang } = useLanguage();
   const modules = useApiList<ApiRow>('learning/modules');
   const contents = useApiList<ApiRow>('learning/contents');
+  if (shouldUseFallback(modules)) {
+    return fallbackTrainingModulesFor(tx);
+  }
   return modules.rows
     .filter((row) => !row.status || row.status === 'published')
     .map((module, index) => {
@@ -3127,7 +3249,8 @@ function Training({ setScreen, setSelectedModule }: { setScreen: (screen: Screen
           <Text key={chip} style={[styles.chip, index === 0 && styles.chipActive]}>{chip}</Text>
         ))}
       </ScrollView>
-      <ApiStatus state={moduleState} empty={tx('এখন কোনো প্রশিক্ষণ মডিউল পাওয়া যায়নি।', 'No training modules are available right now.')} />
+      <SectionTitle title={tx('শেখার বিষয়', 'Learning Topics')} warning={fallbackWarning(moduleState)} />
+      {moduleState.loading ? <ApiStatus state={moduleState} empty={tx('এখন কোনো প্রশিক্ষণ মডিউল পাওয়া যায়নি।', 'No training modules are available right now.')} /> : null}
       <View style={styles.moduleGrid}>
         {modules.map((module, index) => (
           <Pressable
@@ -3275,15 +3398,16 @@ function LearningMaterial({ icon, label, title, onPress }: { icon: string; label
 function PartnerRegister({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const projects = useApiList<ApiRow>('partners/projects');
+  const projectRows = shouldUseFallback(projects) ? fallbackPartnerProjects : projects.rows;
   return (
     <>
       <Header title={tx('শাথী পার্টনার নিবন্ধন', 'Shathi Partner Registration')} onBack={() => setScreen('home')} />
       <View style={styles.notice}>
         <Text style={styles.noticeText}>{tx('চুক্তিভিত্তিক চাষ ও ঋণ সংযোগসম্পন্ন Due Diligence সার্ভে পূরণ করুন।', 'Contract farming & credit linkage. Complete the Due Diligence survey.')}</Text>
       </View>
-      <SectionTitle title={tx('সক্রিয় প্রকল্পসমূহ', 'Active Projects')} />
-      <ApiStatus state={projects} empty={tx('এখন কোনো পার্টনার প্রকল্প নেই।', 'No partner projects are available right now.')} />
-      {projects.rows.map((project) => (
+      <SectionTitle title={tx('সক্রিয় প্রকল্পসমূহ', 'Active Projects')} warning={fallbackWarning(projects)} />
+      {projects.loading ? <ApiStatus state={projects} empty={tx('এখন কোনো পার্টনার প্রকল্প নেই।', 'No partner projects are available right now.')} /> : null}
+      {projectRows.map((project) => (
         <Card key={project.id || project.project_code} style={[styles.projectApply, project.status !== 'open' && styles.coolProject]}>
           <View style={styles.projectApplyHead}>
             <Badge label={project.status === 'open' ? tx('নিবন্ধন চলছে', 'Open') : tx('শীঘ্রই', 'Soon')} tone={project.status === 'open' ? 'green' : 'blue'} />
@@ -3407,6 +3531,8 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState('');
   const [localPosts, setLocalPosts] = useState<ApiRow[]>([]);
+  const officerRows = shouldUseFallback(officers) ? fallbackOfficers : officers.rows;
+  const postRows = shouldUseFallback(posts) && !localPosts.length ? fallbackCommunityPosts : posts.rows;
   async function submitPost() {
     const body = postDraft.trim();
     if (!body) return;
@@ -3430,7 +3556,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
       setPosting(false);
     }
   }
-  const visiblePosts = [...localPosts, ...posts.rows];
+  const visiblePosts = [...localPosts, ...postRows];
   return (
     <>
       <BrandHeader setScreen={setScreen} />
@@ -3445,12 +3571,12 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <TextInput style={styles.searchInput} placeholder={tx('কৃষক বা পোস্ট খুঁজুন...', 'Search farmers or posts...')} placeholderTextColor={colors.muted} />
         <Text style={styles.searchButton}>{tx('খুঁজুন', 'Search')}</Text>
       </View>
-      <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} />
+      <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} warning={fallbackWarning(officers)} />
       <Card>
-        {officers.rows.slice(0, 2).map((officer) => (
-          <Officer key={officer.id || officer.email} name={officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer')} role={[officer.role, officer.district, officer.upazila].filter(Boolean).join(' · ')} action="☎" />
+        {officerRows.slice(0, 2).map((officer) => (
+          <Officer key={officer.id || officer.email} name={officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer')} role={[localized(officer, lang, 'role', officer.role), officer.district, officer.upazila].filter(Boolean).join(' · ')} action="☎" />
         ))}
-        {!officers.loading && !officers.rows.length ? <Text style={styles.apiNotice}>{tx('কর্মকর্তার তথ্য পাওয়া যায়নি।', 'Officer data is not available.')}</Text> : null}
+        {officers.loading ? <Text style={styles.apiNotice}>{tx('কর্মকর্তার তথ্য আনা হচ্ছে...', 'Loading officer data...')}</Text> : null}
       </Card>
       <View style={styles.postBox}>
         <Text style={styles.postAvatar}>♟</Text>
@@ -3460,13 +3586,14 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
         </Pressable>
       </View>
       {postError ? <Text style={styles.apiNotice}>{postError}</Text> : null}
-      <ApiStatus state={posts} empty={tx('এখন কোনো কমিউনিটি পোস্ট নেই।', 'No community posts are available right now.')} />
+      <SectionTitle title={tx('কমিউনিটি পোস্ট', 'Community Posts')} warning={fallbackWarning(posts)} />
+      {posts.loading ? <ApiStatus state={posts} empty={tx('এখন কোনো কমিউনিটি পোস্ট নেই।', 'No community posts are available right now.')} /> : null}
       {visiblePosts.map((post, index) => (
         <Post
           key={post.id || index}
           name={post.farmer_name || post.user_name || tx('শাথী ব্যবহারকারী', 'Shathi user')}
-          tag={post.post_type || tx('পোস্ট', 'Post')}
-          text={post.body || ''}
+          tag={localized(post, lang, 'post_type', post.post_type || tx('পোস্ট', 'Post'))}
+          text={rowBody(post, lang, '')}
           likes={num(post.like_count || 0, lang)}
           comments={num(post.comment_count || 0, lang)}
           meta={[post.created_at, post.district || post.upazila].filter(Boolean).join(' · ')}
@@ -3518,8 +3645,16 @@ function Projects({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const projects = useApiList<ApiRow>('partners/projects');
   const ledgers = useApiList<ApiRow>('partners/ledgers');
-  const project = projects.rows[0];
-  const projectLedgers = ledgers.rows.slice(0, 4);
+  const projectRows = shouldUseFallback(projects) ? fallbackPartnerProjects : projects.rows;
+  const ledgerRows = shouldUseFallback(ledgers) ? fallbackLedgers : ledgers.rows;
+  const project = projectRows[0];
+  const projectLedgers = ledgerRows.slice(0, 4);
+  const rawSteps = (parseMaybeJson(lang === 'bn' ? project?.steps_bn_json : project?.steps_json) as any[]);
+  const projectSteps = rawSteps.length
+    ? rawSteps.map(String)
+    : [tx('প্রকল্প নির্বাচন', 'Project selection'), tx('KYC', 'KYC'), tx('যাচাই', 'Verification'), tx('অনুমোদন', 'Approval')];
+  const currentStepIndex = Math.min(projectSteps.length - 1, Math.max(0, Number(project?.current_step_index ?? 2)));
+  const progressPercent = projectSteps.length > 1 ? Math.round((currentStepIndex / (projectSteps.length - 1)) * 100) : 100;
   return (
     <>
       <BrandHeader setScreen={setScreen} />
@@ -3533,11 +3668,11 @@ function Projects({ setScreen }: { setScreen: (screen: Screen) => void }) {
         </View>
         <Badge label={tx('সক্রিয়', 'Active')} tone="green" />
       </View>
-      <ApiStatus state={projects} empty={tx('এখন কোনো প্রকল্প পাওয়া যায়নি।', 'No projects are available right now.')} />
+      {projects.loading ? <ApiStatus state={projects} empty={tx('এখন কোনো প্রকল্প পাওয়া যায়নি।', 'No projects are available right now.')} /> : null}
 
       <View style={styles.projectStatGrid}>
         <View style={styles.projectStatCard}>
-          <Text style={styles.projectStatValue}>{num(projects.rows.length, lang)}</Text>
+          <Text style={styles.projectStatValue}>{num(projectRows.length, lang)}</Text>
           <Text style={styles.projectStatLabel}>{tx('সক্রিয় প্রকল্প', 'Active Projects')}</Text>
         </View>
         <View style={styles.projectStatCard}>
@@ -3550,7 +3685,7 @@ function Projects({ setScreen }: { setScreen: (screen: Screen) => void }) {
         </View>
       </View>
 
-      <SectionTitle title={tx('সক্রিয় প্রকল্প', 'Active Project')} />
+      <SectionTitle title={tx('সক্রিয় প্রকল্প', 'Active Project')} warning={fallbackWarning(projects)} />
       <View style={styles.projectDetailCard}>
         <View style={styles.projectDetailTop}>
           <View style={styles.flex}>
@@ -3563,33 +3698,39 @@ function Projects({ setScreen }: { setScreen: (screen: Screen) => void }) {
           </View>
         </View>
         <View style={styles.projectHealthBar}>
-          <View style={styles.projectHealthFill} />
+          <View style={[styles.projectHealthFill, { width: `${progressPercent}%` }]} />
         </View>
-        <Text style={styles.projectHealthText}>{project?.status || tx('প্রকল্পের সর্বশেষ অবস্থা সার্ভার থেকে এসেছে।', 'Latest project status loaded from server.')}</Text>
+        <Text style={styles.projectHealthText}>
+          {tx(`চলমান ধাপ: ${projectSteps[currentStepIndex] || ''}`, `Ongoing step: ${projectSteps[currentStepIndex] || ''}`)}
+        </Text>
 
         <View style={styles.projectProgressHead}>
           <Text style={styles.smallUpper}>{tx('প্রকল্পের অগ্রগতি', 'Project Progress')}</Text>
-          <Text style={styles.projectProgressBadge}>{tx('বর্তমান ধাপ ৩/৪', 'Current step 3/4')}</Text>
+          <Text style={styles.projectProgressBadge}>{tx(`ধাপ ${bn(currentStepIndex + 1)}/${bn(projectSteps.length)}`, `Step ${currentStepIndex + 1}/${projectSteps.length}`)}</Text>
         </View>
         <View style={styles.connectedTimeline}>
-          {(parseMaybeJson(project?.steps_json) as any[]).length ? (parseMaybeJson(project?.steps_json) as any[]) : [tx('প্রকল্প নির্বাচন', 'Project selection'), tx('KYC', 'KYC'), tx('ভেরিফিকেশন', 'Verification'), tx('অনুমোদন', 'Approval')].map((item, index) => {
-            const state = index < 2 ? 'done' : index === 2 ? 'current' : 'pending';
+          {projectSteps.map((item, index) => {
+            const state = index < currentStepIndex ? 'done' : index === currentStepIndex ? 'current' : 'pending';
             return (
               <View key={item} style={styles.connectedStep}>
                 <View style={styles.timelineNodeRow}>
-                  {index > 0 ? <View style={[styles.timelineConnector, state === 'pending' ? styles.timelineConnectorPending : styles.timelineConnectorDone]} /> : <View style={styles.timelineConnectorGhost} />}
+                  {index > 0 ? <View style={[styles.timelineConnector, index <= currentStepIndex ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
                   <View style={[styles.timelineNode, state === 'done' && styles.timelineNodeDone, state === 'current' && styles.timelineNodeCurrent]}>
                     <Text style={[styles.timelineNodeText, state === 'pending' && styles.timelineNodeTextPending]}>{state === 'done' ? '✓' : num(index + 1, lang)}</Text>
                   </View>
-                  {index < 3 ? <View style={[styles.timelineConnector, index < 2 ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
+                  {index < projectSteps.length - 1 ? <View style={[styles.timelineConnector, index < currentStepIndex ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
                 </View>
                 <Text style={[styles.timelineText, state === 'current' && styles.timelineTextCurrent]} numberOfLines={2}>{item}</Text>
+                <Text style={[styles.timelineStateText, state === 'done' && styles.timelineStateDone, state === 'current' && styles.timelineStateCurrent]}>
+                  {state === 'done' ? tx('সম্পন্ন', 'Completed') : state === 'current' ? tx('চলমান', 'Ongoing') : tx('বাকি', 'Remaining')}
+                </Text>
               </View>
             );
           })}
         </View>
         <Text style={styles.smallUpper}>{tx('উপকরণ ও হিসাব', 'Inputs & Accounts')}</Text>
-        <ApiStatus state={ledgers} empty={tx('এই প্রকল্পে এখন কোনো লেজার তথ্য নেই।', 'No ledger data is available for this project yet.')} />
+        <SectionTitle title={tx('লেনদেন', 'Ledger')} warning={fallbackWarning(ledgers)} />
+        {ledgers.loading ? <ApiStatus state={ledgers} empty={tx('এই প্রকল্পে এখন কোনো লেজার তথ্য নেই।', 'No ledger data is available for this project yet.')} /> : null}
         {projectLedgers.map((ledger) => (
           <LedgerRow key={ledger.id || ledger.title_en} label={rowTitle(ledger, lang, ledger.entry_type || '')} value={amount(Number(ledger.amount || 0), lang)} green={ledger.entry_type === 'payment'} />
         ))}
@@ -3620,7 +3761,7 @@ function LedgerRow({ label, value, green, strong }: { label: string; value: stri
 function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang, toggleLang } = useLanguage();
   const users = useApiList<ApiRow>('users');
-  const user = users.rows[0];
+  const user = shouldUseFallback(users) ? fallbackProfileUser : users.rows[0];
   const menuRows = [
     ['♙', tx('ব্যক্তিগত তথ্য', 'Personal Info'), tx('নাম, যোগাযোগ, ঠিকানা', 'Name, contact, address')],
     ['▦', tx('ব্যাংকিং বিবরণ', 'Banking Details'), tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking')],
@@ -3643,6 +3784,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
           <Text style={styles.profileBadgeText}>{tx('শাথী পার্টনার ✓', 'Shathi Partner ✓')}</Text>
         </View>
       </View>
+      <SectionTitle title={tx('প্রোফাইল তথ্য', 'Profile Data')} warning={fallbackWarning(users)} />
       <Card style={styles.menuCard}>
         {menuRows.map(([icon, title, sub], index) => (
           <Pressable
@@ -4004,9 +4146,15 @@ const styles = StyleSheet.create({
   heroStat: { alignItems: 'center', minWidth: 80 },
   heroStatValue: { color: colors.goldPale, fontSize: 20, fontWeight: '700' },
   heroStatLabel: { color: 'rgba(255,255,255,0.72)', fontSize: 12 },
-  sectionRow: { paddingHorizontal: 16, marginTop: 18, marginBottom: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  sectionBlock: { marginTop: 18, marginBottom: 8 },
+  sectionRow: { paddingHorizontal: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 },
+  sectionTitleWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
   sectionTitle: { color: colors.ink, fontSize: 19, fontWeight: '700' },
   sectionRight: { color: colors.maroon, fontSize: 13, fontWeight: '700' },
+  sectionWarningButton: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FDBA74' },
+  sectionWarningIcon: { color: '#92400E', fontSize: 13, fontWeight: '900', lineHeight: 16 },
+  sectionTooltip: { marginHorizontal: 16, marginTop: 8, alignSelf: 'flex-start', maxWidth: '92%', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FDBA74' },
+  sectionTooltipText: { color: '#92400E', fontSize: 12, lineHeight: 17, fontWeight: '600' },
   serviceGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, paddingHorizontal: 16 },
   serviceCard: {
     width: '48%',
@@ -4443,26 +4591,26 @@ const styles = StyleSheet.create({
   postText: { color: colors.ink, fontSize: 15, lineHeight: 24, marginTop: 12 },
   postActions: { flexDirection: 'row', justifyContent: 'space-around', borderTopWidth: 1, borderColor: colors.line, marginTop: 12, paddingTop: 10 },
   postAction: { color: colors.muted, fontWeight: '700' },
-  projectHero: { margin: 16, marginBottom: 8, backgroundColor: colors.maroon, borderRadius: 18, padding: 18, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  projectHero: { margin: 16, marginBottom: 8, backgroundColor: colors.maroon, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 },
   projectHeroIcon: { width: 52, height: 52, borderRadius: 15, backgroundColor: 'rgba(255,255,255,0.16)', alignItems: 'center', justifyContent: 'center' },
   projectHeroEmoji: { color: 'white', fontSize: 25 },
   projectHeroTitle: { color: 'white', fontSize: 22, fontWeight: '700' },
   projectHeroSub: { color: 'rgba(255,255,255,0.76)', fontSize: 12, lineHeight: 18, marginTop: 4 },
   projectStatGrid: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, marginTop: 4 },
-  projectStatCard: { width: '31.5%', minHeight: 78, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 8, alignItems: 'center', justifyContent: 'center' },
+  projectStatCard: { width: '31.5%', minHeight: 78, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 8, alignItems: 'center', justifyContent: 'center' },
   projectStatValue: { color: colors.maroon, fontSize: 18, fontWeight: '700' },
   projectStatLabel: { color: colors.muted, fontSize: 9, lineHeight: 12, textAlign: 'center', textTransform: 'uppercase', marginTop: 4 },
-  projectDetailCard: { marginHorizontal: 16, marginTop: 8, backgroundColor: 'white', borderRadius: 18, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
-  projectDetailTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: 16, backgroundColor: '#FFF7FA' },
+  projectDetailCard: { marginHorizontal: 16, marginTop: 8, backgroundColor: 'white', borderRadius: 16, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
+  projectDetailTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: 16, backgroundColor: '#FFF7FA', borderBottomWidth: 1, borderBottomColor: colors.line },
   projectDetailName: { color: colors.ink, fontSize: 18, lineHeight: 23, fontWeight: '700' },
   projectDetailMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
   projectBalance: { alignItems: 'flex-end', minWidth: 76 },
   projectBalanceLabel: { color: colors.muted, fontSize: 11 },
   projectBalanceValue: { color: colors.maroon, fontSize: 17, fontWeight: '700', marginTop: 3 },
-  projectHealthBar: { marginHorizontal: 16, marginTop: 14, height: 8, borderRadius: 8, backgroundColor: colors.rose, overflow: 'hidden' },
-  projectHealthFill: { width: '65%', height: 8, backgroundColor: colors.maroon },
-  projectHealthText: { color: colors.muted, fontSize: 12, marginHorizontal: 16, marginTop: 8, marginBottom: 10 },
-  projectProgressHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 8 },
+  projectHealthBar: { marginHorizontal: 16, marginTop: 16, height: 10, borderRadius: 10, backgroundColor: '#F3E8EE', overflow: 'hidden' },
+  projectHealthFill: { height: 10, backgroundColor: colors.green },
+  projectHealthText: { color: colors.ink, fontSize: 13, lineHeight: 18, marginHorizontal: 16, marginTop: 8, marginBottom: 10, fontWeight: '700' },
+  projectProgressHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 12 },
   projectProgressBadge: { color: colors.maroon, fontSize: 12, fontWeight: '700', backgroundColor: colors.rose, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
   projectStats: { backgroundColor: colors.maroon, flexDirection: 'row', justifyContent: 'space-around', paddingVertical: 18, marginTop: 14 },
   ledgerCard: { padding: 0, overflow: 'hidden' },
@@ -4472,20 +4620,23 @@ const styles = StyleSheet.create({
   timelineDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: '#E7E0E4', marginBottom: 8 },
   timelineDone: { backgroundColor: colors.maroon },
   timelineCurrent: { backgroundColor: colors.gold },
-  connectedTimeline: { flexDirection: 'row', paddingHorizontal: 8, paddingTop: 16, paddingBottom: 18 },
-  connectedStep: { flex: 1, alignItems: 'center' },
+  connectedTimeline: { flexDirection: 'row', paddingHorizontal: 8, paddingTop: 16, paddingBottom: 20 },
+  connectedStep: { flex: 1, alignItems: 'center', minHeight: 86 },
   timelineNodeRow: { flexDirection: 'row', alignItems: 'center', width: '100%', minHeight: 32 },
   timelineConnector: { flex: 1, height: 3, borderRadius: 3 },
   timelineConnectorGhost: { flex: 1, height: 3 },
-  timelineConnectorDone: { backgroundColor: colors.maroon },
+  timelineConnectorDone: { backgroundColor: colors.green },
   timelineConnectorPending: { backgroundColor: '#E7E0E4' },
-  timelineNode: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#F2E8EE', borderWidth: 2, borderColor: '#E7E0E4', alignItems: 'center', justifyContent: 'center' },
-  timelineNodeDone: { backgroundColor: colors.maroon, borderColor: colors.maroon },
+  timelineNode: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F7F3F5', borderWidth: 2, borderColor: '#E7E0E4', alignItems: 'center', justifyContent: 'center' },
+  timelineNodeDone: { backgroundColor: colors.green, borderColor: colors.green },
   timelineNodeCurrent: { backgroundColor: colors.gold, borderColor: '#D97706' },
   timelineNodeText: { color: 'white', fontSize: 12, fontWeight: '700' },
   timelineNodeTextPending: { color: colors.muted },
-  timelineText: { color: colors.muted, fontSize: 10, textAlign: 'center', lineHeight: 14, marginTop: 6, paddingHorizontal: 2 },
+  timelineText: { color: colors.muted, fontSize: 10, textAlign: 'center', lineHeight: 14, marginTop: 7, paddingHorizontal: 2, minHeight: 28 },
   timelineTextCurrent: { color: colors.ink, fontWeight: '700' },
+  timelineStateText: { marginTop: 4, color: colors.muted, fontSize: 9, fontWeight: '700', textAlign: 'center' },
+  timelineStateDone: { color: colors.green },
+  timelineStateCurrent: { color: '#B45309' },
   ledgerRow: { flexDirection: 'row', justifyContent: 'space-between', borderTopWidth: 1, borderColor: colors.line, paddingVertical: 10, paddingHorizontal: 16 },
   ledgerLabel: { color: colors.muted, fontSize: 14 },
   ledgerStrong: { color: colors.ink, fontWeight: '700' },
