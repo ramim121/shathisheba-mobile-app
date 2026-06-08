@@ -3,14 +3,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { Audio } from 'expo-av';
+import { Ionicons } from '@expo/vector-icons';
 import { GoogleGenAI, MediaResolution } from '@google/genai';
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import YoutubePlayer from 'react-native-youtube-iframe';
 import {
   ActivityIndicator,
   Animated,
   Easing,
   Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Pressable,
   RefreshControl,
@@ -55,9 +58,11 @@ type Screen =
   | 'buyOrder'
   | 'buyDone'
   | 'training'
-  | 'trainingDetail'
+  | 'trainingCategory'
+  | 'trainingModule'
   | 'trainingArticle'
   | 'trainingVideo'
+  | 'trainingQuiz'
   | 'partnerRegister'
   | 'kyc'
   | 'regDone'
@@ -1263,14 +1268,15 @@ function Shell({
 }) {
   const { tx } = useLanguage();
   const { user } = useAuth();
-  const tabs: Array<{ id: MainTab; label: string; icon: string; screen: Screen }> = [
-    { id: 'home', label: tx('হোম', 'Home'), icon: '⌂', screen: 'home' },
-    { id: 'community', label: tx('কমিউনিটি', 'Community'), icon: '☷', screen: 'community' },
+  // Uniform line icons (Ionicons) — outline when inactive, filled when active.
+  const tabs: Array<{ id: MainTab; label: string; icon: keyof typeof Ionicons.glyphMap; screen: Screen }> = [
+    { id: 'home', label: tx('হোম', 'Home'), icon: 'home', screen: 'home' },
+    { id: 'community', label: tx('কমিউনিটি', 'Community'), icon: 'people', screen: 'community' },
     // Shathi Partner project tracking is field-officer only.
     ...(hasRole(user, 'field_officer')
-      ? [{ id: 'projects' as MainTab, label: tx('প্রকল্প', 'Projects'), icon: '▣', screen: 'projects' as Screen }]
+      ? [{ id: 'projects' as MainTab, label: tx('প্রকল্প', 'Projects'), icon: 'briefcase' as keyof typeof Ionicons.glyphMap, screen: 'projects' as Screen }]
       : []),
-    { id: 'profile', label: tx('মেনু', 'Menu'), icon: '☰', screen: 'profile' },
+    { id: 'profile', label: tx('মেনু', 'Menu'), icon: 'grid', screen: 'profile' },
   ];
 
   const { refreshing, onRefresh } = usePullRefresh();
@@ -1300,7 +1306,11 @@ function Shell({
               style={styles.navItem}
             >
               <View style={[styles.navIconWrap, activeTab === tab.id && styles.navIconWrapActive]}>
-                <Text style={[styles.navIcon, activeTab === tab.id && styles.navIconActive]}>{tab.icon}</Text>
+                <Ionicons
+                  name={activeTab === tab.id ? tab.icon : (`${tab.icon}-outline` as keyof typeof Ionicons.glyphMap)}
+                  size={23}
+                  color={activeTab === tab.id ? '#FFFFFF' : 'rgba(255,255,255,0.78)'}
+                />
               </View>
               <Text style={[styles.navLabel, activeTab === tab.id && styles.navLabelActive]}>{tab.label}</Text>
             </Pressable>
@@ -1324,8 +1334,9 @@ export default function App() {
   const [fishPrefs, setFishPrefs] = useState<string[]>(['rohu']);
   const [vegetablePrefs, setVegetablePrefs] = useState<string[]>(['tomato']);
   const [fruitPrefs, setFruitPrefs] = useState<string[]>(['mango']);
-  const [selectedTrainingModule, setSelectedTrainingModule] = useState(0);
-  const [trainingContentKind, setTrainingContentKind] = useState<TrainingContentKind>('article');
+  const [learnCategory, setLearnCategory] = useState<LearnCat | null>(null);
+  const [learnModule, setLearnModule] = useState<LearnMod | null>(null);
+  const [learnContentId, setLearnContentId] = useState<string | null>(null);
   const [apaMessages, setApaMessages] = useState<ChatMessage[]>([]);
   const [apaImageUri, setApaImageUri] = useState<string | null>(null);
   const [apaBusy, setApaBusy] = useState(false);
@@ -1695,16 +1706,18 @@ async function sendApaMessage(text: string) {
       buyProducts: <BuyProducts setScreen={go} onSelectProduct={setSelectedProduct} />,
       buyOrder: <BuyOrder setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />,
       buyDone: <BuyDone setScreen={go} qty={qty} product={selectedProduct} order={latestOrder} />,
-      training: <Training setScreen={go} setSelectedModule={setSelectedTrainingModule} />,
-      trainingDetail: (
-        <TrainingModuleDetail
+      training: <TrainingHome setScreen={go} openCategory={(cat) => { setLearnCategory(cat); go('trainingCategory'); }} />,
+      trainingCategory: <TrainingCategory category={learnCategory} setScreen={go} openModule={(mod) => { setLearnModule(mod); go('trainingModule'); }} />,
+      trainingModule: (
+        <TrainingModuleScreen
+          module={learnModule}
           setScreen={go}
-          moduleIndex={selectedTrainingModule}
-          setContentKind={setTrainingContentKind}
+          openContent={(id, type) => { setLearnContentId(id); go(type === 'video' ? 'trainingVideo' : 'trainingArticle'); }}
         />
       ),
-      trainingArticle: <TrainingContentPage setScreen={go} moduleIndex={selectedTrainingModule} kind="article" />,
-      trainingVideo: <TrainingContentPage setScreen={go} moduleIndex={selectedTrainingModule} kind="video" />,
+      trainingArticle: <TrainingArticle contentId={learnContentId} setScreen={go} openQuiz={(id) => { setLearnContentId(id); go('trainingQuiz'); }} />,
+      trainingVideo: <TrainingVideoScreen contentId={learnContentId} setScreen={go} />,
+      trainingQuiz: <TrainingQuiz contentId={learnContentId} setScreen={go} />,
       partnerRegister: <PartnerRegister setScreen={go} />,
       kyc: <Kyc setScreen={go} onSubmitted={setLatestApplication} />,
       regDone: <RegDone setScreen={go} application={latestApplication} />,
@@ -1712,7 +1725,7 @@ async function sendApaMessage(text: string) {
     };
 
     return routes[screen];
-  }, [screen, onboarding, weight, qty, cattleImage, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, selectedTrainingModule, trainingContentKind, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication, authUser, selectedMarketId]);
+  }, [screen, onboarding, weight, qty, cattleImage, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication, authUser, selectedMarketId]);
 
   const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
@@ -2511,12 +2524,12 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
         {isFieldOfficer || isSeller ? (
-          <ServiceCard icon="▣" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" onPress={() => setScreen('saleCategories')} />
+          <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" onPress={() => setScreen('saleCategories')} />
         ) : null}
         <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" onPress={() => setScreen('buyCategories')} />
-        <ServiceCard icon="▱" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} fullWidth={trainingFullWidth} />
+        <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} fullWidth={trainingFullWidth} />
         {isFieldOfficer ? (
-          <ServiceCard icon="♢" title={tx('শাথী পার্টনার', 'Shathi Partner')} sub={tx('চুক্তি চাষ ও ঋণ সংযোগ', 'Contract farming & loans')} tone="green" onPress={() => setScreen('partnerRegister')} />
+          <ServiceCard icon="🤝" title={tx('শাথী পার্টনার', 'Shathi Partner')} sub={tx('চুক্তি চাষ ও ঋণ সংযোগ', 'Contract farming & loans')} tone="green" onPress={() => setScreen('partnerRegister')} />
         ) : null}
       </View>
       <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
@@ -3778,7 +3791,7 @@ function BuyOrder({
         </Text>
         <View style={styles.orderFeatureRow}>
           <OrderFeature icon="⚖" title={product?.package_size || tx('প্যাকেজ', 'Package')} sub={product?.unit || tx('ইউনিট', 'unit')} />
-          <OrderFeature icon="✦" title={features[0] || tx('মানসম্মত', 'Quality')} sub={features[1] || tx('সার্ভার ডাটা', 'server data')} />
+          <OrderFeature icon="✨" title={features[0] || tx('মানসম্মত', 'Quality')} sub={features[1] || tx('সার্ভার ডাটা', 'server data')} />
           <OrderFeature icon="🚚" title={product?.delivery_window || tx('ডেলিভারি', 'Delivery')} sub={tx('সময়', 'window')} />
         </View>
       </Card>
@@ -3837,191 +3850,467 @@ function BuyDone({ setScreen, qty, product, order }: { setScreen: (screen: Scree
   );
 }
 
-function useTrainingModules(): TrainingModule[] {
+// ── Training module (gamified: categories > subcategories > content) ──────────
+
+type LearnCat = { id: string; name: string; emoji?: string };
+type LearnMod = { id: string; title: string; level: number };
+
+async function learnFetch<T = any>(path: string): Promise<T> {
+  const json = await apiRequest<{ data: T }>(path);
+  return json.data;
+}
+
+async function summarizeMarkdown(text: string, lang: Lang): Promise<string> {
+  const response = await requireGenAI().models.generateContent({
+    model: GEMINI_TEXT_MODEL,
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: `Summarize the following farm training content ${lang === 'bn' ? 'in Bengali Bangla' : 'in English'} as concise Markdown: a one-line intro then up to 5 short bullet points of the key practical takeaways. Content:\n\n${text}`,
+          },
+        ],
+      },
+    ],
+  });
+  return response.text || '';
+}
+
+function useUid() {
+  const { user } = useAuth();
+  return Number(user?.id) || 1;
+}
+
+// Training home — points, level, next-up, preference-first categories + all.
+function TrainingHome({ setScreen, openCategory }: { setScreen: (screen: Screen) => void; openCategory: (cat: LearnCat) => void }) {
   const { tx, lang } = useLanguage();
-  const modules = useApiList<ApiRow>('learning/modules');
-  const contents = useApiList<ApiRow>('learning/contents');
-  if (shouldUseFallback(modules)) {
-    return fallbackTrainingModulesFor(tx);
-  }
-  return modules.rows
-    .filter((row) => !row.status || row.status === 'published')
-    .map((module, index) => {
-      const related = contents.rows.filter((content) => Number(content.learning_module_id) === Number(module.id));
-      const article = related.find((content) => content.content_type === 'article');
-      const video = related.find((content) => content.content_type === 'video');
-      const quiz = related.find((content) => content.content_type === 'quiz');
-      return {
-        icon: index % 3 === 0 ? '🐄' : index % 3 === 1 ? '🌾' : '▶',
-        title: rowTitle(module, lang, tx('প্রশিক্ষণ মডিউল', 'Training module')),
-        sub: localized(module, lang, 'subtitle', ''),
-        count: tx(`${bn(related.length)} কনটেন্ট`, `${related.length} contents`),
-        article: rowTitle(article, lang, tx('আর্টিকেল নেই', 'No article')),
-        video: rowTitle(video, lang, tx('ভিডিও নেই', 'No video')),
-        quiz: rowTitle(quiz, lang, tx('কুইজ নেই', 'No quiz')),
-        progress: tx('সার্ভার ডাটা', 'Server data'),
-        bg: [colors.rose, colors.goldPale, colors.bluePale, '#FCE7F3', '#EDE9FE', '#CCFBF1'][index % 6],
-        articleBody: localized(article, lang, 'body', ''),
-        videoUrl: video?.video_url,
-      };
-    });
-}
+  const uid = useUid();
+  const tick = useRefreshTick();
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
 
-function Training({ setScreen, setSelectedModule }: { setScreen: (screen: Screen) => void; setSelectedModule: (index: number) => void }) {
-  const { tx } = useLanguage();
-  const moduleState = useApiList<ApiRow>('learning/modules');
-  const modules = useTrainingModules();
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    learnFetch(`app/learning/overview?user_id=${uid}`)
+      .then((d) => { if (alive) setData(d); })
+      .catch(() => undefined)
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [uid, tick]);
+
+  const cats: any[] = data?.categories ?? [];
+  const points = Number(data?.points ?? 0);
+  const level = Number(data?.level ?? 1);
+  const next = data?.next;
+
   return (
     <>
-      <Header title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} onBack={() => setScreen('home')} />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chips}>
-        {[tx('সব', 'All'), tx('গবাদিপশু', 'Livestock'), tx('কৃষি', 'Agriculture'), tx('জলবায়ু', 'Climate'), tx('নারী', 'Women'), tx('স্বাস্থ্য', 'Health')].map((chip, index) => (
-          <Text key={chip} style={[styles.chip, index === 0 && styles.chipActive]}>{chip}</Text>
-        ))}
-      </ScrollView>
-      <SectionTitle title={tx('শেখার বিষয়', 'Learning Topics')} warning={fallbackWarning(moduleState)} />
-      {moduleState.loading ? <ApiStatus state={moduleState} empty={tx('এখন কোনো প্রশিক্ষণ মডিউল পাওয়া যায়নি।', 'No training modules are available right now.')} /> : null}
-      <View style={styles.moduleGrid}>
-        {modules.map((module, index) => (
-          <Pressable
-            key={module.title}
-            onPress={() => {
-              setSelectedModule(index);
-              setScreen('trainingDetail');
-            }}
-            style={({ pressed }) => [styles.moduleCard, pressed && styles.pressed]}
-          >
-            <View style={[styles.moduleThumb, { backgroundColor: module.bg }]}>
-              <Text style={styles.moduleIcon}>{module.icon}</Text>
-            </View>
-            <Text style={styles.moduleTitle}>{module.title}</Text>
-            <Text style={styles.moduleSub}>{module.sub}</Text>
-            <Text style={styles.moduleCount}>{module.count}</Text>
-          </Pressable>
+      <Header title={tx('প্রশিক্ষণ', 'Training')} onBack={() => setScreen('home')} />
+      <View style={styles.trainPointsCard}>
+        <View style={styles.trainPointsCol}>
+          <Text style={styles.trainPointsValue}>{num(points, lang)}</Text>
+          <Text style={styles.trainPointsLabel}>{tx('পয়েন্ট', 'Points')}</Text>
+        </View>
+        <View style={styles.trainPointsDivider} />
+        <View style={styles.trainPointsCol}>
+          <Text style={styles.trainPointsValue}>{tx('স্তর', 'Lv')} {num(level, lang)}</Text>
+          <Text style={styles.trainPointsLabel}>{tx('লেভেল', 'Level')}</Text>
+        </View>
+        <View style={styles.trainPointsDivider} />
+        <View style={styles.trainPointsCol}>
+          <Text style={styles.trainPointsValue}>{num(Number(data?.completed_content ?? 0), lang)}/{num(Number(data?.total_content ?? 0), lang)}</Text>
+          <Text style={styles.trainPointsLabel}>{tx('সম্পন্ন', 'Done')}</Text>
+        </View>
+      </View>
+
+      {next ? (
+        <Pressable
+          style={({ pressed }) => [styles.trainContinue, pressed && styles.pressed]}
+          onPress={() => openCategory({ id: String(next.category_id), name: String(next.category_name || ''), emoji: '📘' })}
+        >
+          <Ionicons name={next.content_type === 'video' ? 'play-circle' : 'document-text'} size={30} color="#FFFFFF" />
+          <View style={styles.flex}>
+            <Text style={styles.trainContinueLabel}>{tx('পরবর্তী কনটেন্ট', 'Continue learning')}</Text>
+            <Text style={styles.trainContinueTitle}>{rowTitle(next, lang, '')}</Text>
+            <Text style={styles.trainContinueSub}>{String(next.category_name || '')} · {String(next.module_title || '')}</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={22} color="#FFFFFF" />
+        </Pressable>
+      ) : null}
+
+      {loading ? <ActivityIndicator color={colors.maroon} style={{ marginVertical: 18 }} /> : null}
+
+      {cats.some((c) => c.preferred) ? (
+        <>
+          <SectionTitle title={tx('আপনার পছন্দ অনুযায়ী', 'For your preferences')} />
+          <View style={styles.trainCatGrid}>
+            {cats.filter((c) => c.preferred).map((c) => (
+              <TrainCatCard key={c.id} cat={c} highlighted onPress={() => openCategory({ id: String(c.id), name: rowTitle(c, lang, ''), emoji: c.emoji })} />
+            ))}
+          </View>
+        </>
+      ) : null}
+
+      <SectionTitle title={tx('সকল বিষয়', 'All categories')} />
+      <View style={styles.trainCatGrid}>
+        {cats.map((c) => (
+          <TrainCatCard key={`all-${c.id}`} cat={c} onPress={() => openCategory({ id: String(c.id), name: rowTitle(c, lang, ''), emoji: c.emoji })} />
         ))}
       </View>
+      {!loading && cats.length === 0 ? <Text style={styles.apiNotice}>{tx('এখন কোনো প্রশিক্ষণ বিষয় নেই।', 'No training categories yet.')}</Text> : null}
     </>
   );
 }
 
-function TrainingModuleDetail({
-  setScreen,
-  moduleIndex,
-  setContentKind,
-}: {
-  setScreen: (screen: Screen) => void;
-  moduleIndex: number;
-  setContentKind: (kind: TrainingContentKind) => void;
-}) {
-  const { tx } = useLanguage();
-  const modules = useTrainingModules();
-  const module = modules[moduleIndex] ?? modules[0];
-  if (!module) {
-    return (
-      <>
-        <Header title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} onBack={() => setScreen('training')} />
-        <Text style={styles.apiNotice}>{tx('এই মডিউলের কনটেন্ট এখন পাওয়া যাচ্ছে না।', 'This module content is not available right now.')}</Text>
-      </>
-    );
-  }
+function TrainCatCard({ cat, onPress, highlighted }: { cat: any; onPress: () => void; highlighted?: boolean }) {
+  const { tx, lang } = useLanguage();
+  const total = Number(cat.content_count ?? 0);
+  const done = Number(cat.completed_count ?? 0);
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.trainCatCard, highlighted && styles.trainCatCardHi, pressed && styles.pressed]}>
+      <Text style={styles.trainCatEmoji}>{cat.emoji || '📚'}</Text>
+      <Text style={styles.trainCatTitle}>{rowTitle(cat, lang, tx('বিষয়', 'Topic'))}</Text>
+      <Text style={styles.trainCatMeta}>{num(Number(cat.module_count ?? 0), lang)} {tx('উপ-বিষয়', 'sub-topics')} · {num(total, lang)} {tx('কনটেন্ট', 'items')}</Text>
+      <View style={styles.trainProgressTrack}><View style={[styles.trainProgressFill, { width: `${pct}%` }]} /></View>
+      <Text style={styles.trainCatMeta}>{num(done, lang)}/{num(total, lang)} {tx('সম্পন্ন', 'done')}</Text>
+    </Pressable>
+  );
+}
+
+// Category → subcategory (modules with level).
+function TrainingCategory({ category, setScreen, openModule }: { category: LearnCat | null; setScreen: (screen: Screen) => void; openModule: (mod: LearnMod) => void }) {
+  const { tx, lang } = useLanguage();
+  const uid = useUid();
+  const tick = useRefreshTick();
+  const [mods, setMods] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!category) return;
+    let alive = true;
+    setLoading(true);
+    learnFetch<any[]>(`app/learning/modules?category_id=${category.id}&user_id=${uid}`)
+      .then((d) => { if (alive) setMods(d ?? []); })
+      .catch(() => undefined)
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [category?.id, uid, tick]);
+
   return (
     <>
-      <Header title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} onBack={() => setScreen('training')} />
-      <View style={styles.learningList}>
-        <View style={styles.learningCard}>
-          <View style={[styles.learningThumb, { backgroundColor: module.bg }]}>
-            <Text style={styles.moduleIcon}>{module.icon}</Text>
-            <Badge label={module.progress} tone="rose" />
-          </View>
-          <View style={styles.learningBody}>
-            <Text style={styles.moduleTitle}>{module.title}</Text>
-            <Text style={styles.moduleSub}>{module.sub}</Text>
-            <LearningMaterial
-              icon="📄"
-              label={tx('আর্টিকেল', 'Article')}
-              title={module.article}
-              onPress={() => {
-                setContentKind('article');
-                setScreen('trainingArticle');
-              }}
-            />
-            <LearningMaterial
-              icon="▶"
-              label={tx('ভিডিও', 'Video')}
-              title={module.video}
-              onPress={() => {
-                setContentKind('video');
-                setScreen('trainingVideo');
-              }}
-            />
-            <View style={styles.quizBox}>
-              <View style={styles.quizIcon}>
-                <Text style={styles.quizIconText}>?</Text>
-              </View>
+      <Header title={category?.name || tx('বিষয়', 'Category')} onBack={() => setScreen('training')} />
+      <Text style={styles.pageHint}>{tx('একটি উপ-বিষয় বেছে নিন। লেভেল অনুযায়ী সাজানো।', 'Pick a sub-topic. Ordered by level.')}</Text>
+      {loading ? <ActivityIndicator color={colors.maroon} style={{ marginVertical: 18 }} /> : null}
+      <View style={styles.subList}>
+        {mods.map((m) => {
+          const total = Number(m.content_count ?? 0);
+          const done = Number(m.completed_count ?? 0);
+          const complete = total > 0 && done >= total;
+          return (
+            <Pressable key={m.id} onPress={() => openModule({ id: String(m.id), title: rowTitle(m, lang, ''), level: Number(m.level ?? 1) })} style={({ pressed }) => [styles.subCard, pressed && styles.pressed]}>
+              <View style={styles.subEmojiWrap}><Text style={styles.subEmoji}>{m.emoji || '📘'}</Text></View>
               <View style={styles.flex}>
-                <Text style={styles.quizTitle}>{module.quiz}</Text>
-                <Text style={styles.quizSub}>{tx('ভিডিও/আর্টিকেল শেষ হলে আনলক হবে', 'Unlocks after completing material')}</Text>
+                <View style={styles.subTitleRow}>
+                  <Text style={styles.subTitle}>{rowTitle(m, lang, tx('উপ-বিষয়', 'Sub-topic'))}</Text>
+                  <View style={styles.levelChip}><Text style={styles.levelChipText}>{tx('লেভেল', 'Lv')} {num(Number(m.level ?? 1), lang)}</Text></View>
+                </View>
+                <Text style={styles.subSub}>{localized(m, lang, 'subtitle', '')}</Text>
+                <Text style={styles.subMeta}>{num(done, lang)}/{num(total, lang)} {tx('সম্পন্ন', 'done')} · {num(Number(m.total_points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text>
               </View>
-              <Text style={styles.quizStatus}>{tx('কুইজ', 'Quiz')}</Text>
-            </View>
-          </View>
-        </View>
+              {complete ? <Ionicons name="checkmark-circle" size={22} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}
+            </Pressable>
+          );
+        })}
       </View>
+      {!loading && mods.length === 0 ? <Text style={styles.apiNotice}>{tx('এই বিষয়ে কনটেন্ট নেই।', 'No content in this category yet.')}</Text> : null}
     </>
   );
 }
 
-function TrainingContentPage({ setScreen, moduleIndex, kind }: { setScreen: (screen: Screen) => void; moduleIndex: number; kind: TrainingContentKind }) {
-  const { tx } = useLanguage();
-  const modules = useTrainingModules();
-  const module = modules[moduleIndex] ?? modules[0];
-  if (!module) {
-    return (
-      <>
-        <Header title={kind === 'article' ? tx('আর্টিকেল', 'Article') : tx('ভিডিও', 'Video')} onBack={() => setScreen('trainingDetail')} />
-        <Text style={styles.apiNotice}>{tx('এই কনটেন্ট এখন পাওয়া যাচ্ছে না।', 'This content is not available right now.')}</Text>
-      </>
-    );
-  }
-  const title = kind === 'article' ? module.article : module.video;
-  return (
-    <>
-      <Header title={kind === 'article' ? tx('আর্টিকেল', 'Article') : tx('ভিডিও', 'Video')} onBack={() => setScreen('trainingDetail')} />
-      <Card style={styles.trainingContentHero}>
-        <View style={[styles.trainingContentIcon, { backgroundColor: module.bg }]}>
-          <Text style={styles.moduleIcon}>{kind === 'article' ? '📄' : '▶'}</Text>
-        </View>
-        <Text style={styles.trainingContentKicker}>{module.title}</Text>
-        <Text style={styles.trainingContentTitle}>{title}</Text>
-        <Text style={styles.trainingContentMeta}>{kind === 'article' ? tx('৫ মিনিট পড়া', '5 min read') : tx('৮ মিনিট ভিডিও', '8 min video')}</Text>
-      </Card>
-      {kind === 'article' ? (
-        <Card style={styles.trainingContentBody}>
-          <Text style={styles.trainingParagraph}>{module.articleBody || tx('এই আর্টিকেলের বিস্তারিত কনটেন্ট এখন সার্ভারে নেই।', 'The full article content is not available on the server yet.')}</Text>
-        </Card>
-      ) : (
-        <View style={styles.videoLessonCard}>
-          <View style={styles.videoPlayCircle}>
-            <Text style={styles.videoPlayIcon}>▶</Text>
-          </View>
-          <Text style={styles.videoLessonTitle}>{title}</Text>
-          <Text style={styles.videoLessonSub}>{module.videoUrl || tx('ভিডিও লিংক এখন সার্ভারে নেই।', 'Video link is not available on the server yet.')}</Text>
-        </View>
-      )}
-      <AppButton title={tx('সম্পন্ন হিসেবে চিহ্নিত করুন', 'Mark as Complete')} onPress={() => setScreen('trainingDetail')} />
-    </>
-  );
-}
+// Subcategory → content cards (articles + videos in sections).
+function TrainingModuleScreen({ module, setScreen, openContent }: { module: LearnMod | null; setScreen: (screen: Screen) => void; openContent: (id: string, type: 'article' | 'video') => void }) {
+  const { tx, lang } = useLanguage();
+  const uid = useUid();
+  const tick = useRefreshTick();
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
-function LearningMaterial({ icon, label, title, onPress }: { icon: string; label: string; title: string; onPress?: () => void }) {
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.learningMaterial, pressed && styles.pressed]}>
-      <Text style={styles.learningMaterialIcon}>{icon}</Text>
+  useEffect(() => {
+    if (!module) return;
+    let alive = true;
+    setLoading(true);
+    learnFetch<any[]>(`app/learning/contents?module_id=${module.id}&user_id=${uid}`)
+      .then((d) => { if (alive) setItems(d ?? []); })
+      .catch(() => undefined)
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [module?.id, uid, tick]);
+
+  const articles = items.filter((i) => i.content_type === 'article');
+  const videos = items.filter((i) => i.content_type === 'video');
+
+  const renderCard = (c: any) => (
+    <Pressable key={c.id} onPress={() => openContent(String(c.id), c.content_type === 'video' ? 'video' : 'article')} style={({ pressed }) => [styles.contentCard, pressed && styles.pressed]}>
+      {c.image_url ? <Image source={{ uri: String(c.image_url) }} style={styles.contentThumb} /> : <View style={[styles.contentThumb, styles.contentThumbFallback]}><Ionicons name={c.content_type === 'video' ? 'videocam' : 'document-text'} size={26} color={colors.maroon} /></View>}
       <View style={styles.flex}>
-        <Text style={styles.learningMaterialLabel}>{label}</Text>
-        <Text style={styles.learningMaterialTitle}>{title}</Text>
+        <Text style={styles.contentTitle}>{rowTitle(c, lang, '')}</Text>
+        {c.excerpt ? <Text style={styles.contentExcerpt} numberOfLines={2}>{String(c.excerpt).replace(/[#*]/g, '')}</Text> : null}
+        <View style={styles.contentMetaRow}>
+          <View style={styles.pointPill}><Ionicons name="star" size={11} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(c.points ?? 0), lang)}</Text></View>
+          {c.has_quiz ? <View style={styles.quizPill}><Text style={styles.quizPillText}>{tx('কুইজ', 'Quiz')}</Text></View> : null}
+          {c.completed ? <View style={styles.donePill}><Ionicons name="checkmark" size={11} color="#FFFFFF" /><Text style={styles.donePillText}>{tx('সম্পন্ন', 'Done')}</Text></View> : null}
+        </View>
       </View>
     </Pressable>
+  );
+
+  return (
+    <>
+      <Header title={module?.title || tx('উপ-বিষয়', 'Sub-topic')} onBack={() => setScreen('trainingCategory')} />
+      {loading ? <ActivityIndicator color={colors.maroon} style={{ marginVertical: 18 }} /> : null}
+      {articles.length ? (
+        <>
+          <SectionTitle title={tx('আর্টিকেল', 'Articles')} />
+          <View style={styles.contentList}>{articles.map(renderCard)}</View>
+        </>
+      ) : null}
+      {videos.length ? (
+        <>
+          <SectionTitle title={tx('ভিডিও', 'Videos')} />
+          <View style={styles.contentList}>{videos.map(renderCard)}</View>
+        </>
+      ) : null}
+      {!loading && items.length === 0 ? <Text style={styles.apiNotice}>{tx('এখানে কনটেন্ট নেই।', 'No content here yet.')}</Text> : null}
+    </>
+  );
+}
+
+// Article reader → Finished → quiz (or complete if no quiz).
+function TrainingArticle({ contentId, setScreen, openQuiz }: { contentId: string | null; setScreen: (screen: Screen) => void; openQuiz: (id: string) => void }) {
+  const { tx, lang } = useLanguage();
+  const uid = useUid();
+  const [content, setContent] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!contentId) return;
+    learnFetch(`app/learning/content?content_id=${contentId}&user_id=${uid}`).then(setContent).catch(() => undefined);
+  }, [contentId, uid]);
+
+  async function onFinish() {
+    if (!content) return;
+    if (content.has_quiz) { openQuiz(String(content.id)); return; }
+    setBusy(true);
+    try {
+      await apiRequest('app/learning/progress', { method: 'POST', body: JSON.stringify({ user_id: uid, content_id: content.id, progress_pct: 100 }) });
+      refreshStore.trigger();
+    } catch { /* ignore */ } finally { setBusy(false); setScreen('trainingModule'); }
+  }
+
+  const body = localized(content, lang, 'body', '') || (content?.body_en ?? '');
+  return (
+    <>
+      <Header title={tx('আর্টিকেল', 'Article')} onBack={() => setScreen('trainingModule')} />
+      {content?.image_url ? <Image source={{ uri: String(content.image_url) }} style={styles.readerImage} /> : null}
+      <View style={styles.readerBody}>
+        <Text style={styles.readerKicker}>{String(content?.module_title || '')}</Text>
+        <Text style={styles.readerTitle}>{rowTitle(content || undefined, lang, '')}</Text>
+        <View style={styles.pointPillRow}>
+          <View style={styles.pointPill}><Ionicons name="star" size={12} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(content?.points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text></View>
+          {content?.status === 'completed' ? <View style={styles.donePill}><Ionicons name="checkmark" size={12} color="#FFFFFF" /><Text style={styles.donePillText}>{tx('সম্পন্ন', 'Completed')}</Text></View> : null}
+        </View>
+        {content ? <MarkdownText text={body || tx('কনটেন্ট নেই।', 'No content.')} style={styles.readerText} strongStyle={styles.readerStrong} /> : <ActivityIndicator color={colors.maroon} />}
+      </View>
+      {content ? (
+        <AppButton
+          title={content.has_quiz ? tx('শেষ করেছি — কুইজ দিন', 'Finished — take quiz') : (busy ? tx('সংরক্ষণ হচ্ছে...', 'Saving...') : tx('সম্পন্ন হিসেবে চিহ্নিত করুন', 'Mark as complete'))}
+          onPress={onFinish}
+        />
+      ) : null}
+    </>
+  );
+}
+
+// Video player (YouTube) with 90% completion + AI summary + audio read.
+function TrainingVideoScreen({ contentId, setScreen }: { contentId: string | null; setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const uid = useUid();
+  const [content, setContent] = useState<any>(null);
+  const [playing, setPlaying] = useState(false);
+  const [completed, setCompleted] = useState(false);
+  const [summary, setSummary] = useState('');
+  const [summarizing, setSummarizing] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const playerRef = useRef<any>(null);
+  const reportedRef = useRef(false);
+
+  useEffect(() => {
+    if (!contentId) return;
+    learnFetch(`app/learning/content?content_id=${contentId}&user_id=${uid}`).then((c) => {
+      setContent(c);
+      if (c?.status === 'completed') { setCompleted(true); reportedRef.current = true; }
+    }).catch(() => undefined);
+    return () => { stopAiSpeech().catch(() => undefined); };
+  }, [contentId, uid]);
+
+  const duration = Number(content?.duration_seconds) || 0;
+
+  const reportComplete = useCallback(async (pct: number) => {
+    if (reportedRef.current) return;
+    reportedRef.current = true;
+    try {
+      const res: any = await apiRequest('app/learning/progress', { method: 'POST', body: JSON.stringify({ user_id: uid, content_id: contentId, progress_pct: pct }) });
+      if (res?.result?.completed) { setCompleted(true); refreshStore.trigger(); }
+    } catch { reportedRef.current = false; }
+  }, [uid, contentId]);
+
+  const onChangeState = useCallback((state: string) => {
+    setPlaying(state === 'playing');
+    if (state === 'ended') reportComplete(100);
+  }, [reportComplete]);
+
+  useEffect(() => {
+    if (!playing || completed) return;
+    const timer = setInterval(async () => {
+      try {
+        const cur: number = (await playerRef.current?.getCurrentTime?.()) ?? 0;
+        let dur = duration;
+        if (!dur && playerRef.current?.getDuration) dur = await playerRef.current.getDuration();
+        if (dur > 0 && cur / dur >= 0.9) reportComplete(Math.round((cur / dur) * 100));
+      } catch { /* ignore */ }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [playing, completed, duration, reportComplete]);
+
+  async function onSummarize() {
+    if (!content) return;
+    setSummarizing(true);
+    try {
+      const text = `${rowTitle(content, lang, '')}. ${localized(content, lang, 'body', '') || content.body_en || ''}`;
+      setSummary(await summarizeMarkdown(text, lang));
+    } catch { setSummary(tx('সারাংশ তৈরি করা যায়নি।', 'Could not generate a summary.')); } finally { setSummarizing(false); }
+  }
+
+  function toggleRead() {
+    if (speaking) { stopAiSpeech().finally(() => setSpeaking(false)); return; }
+    playAiSpeech(summary, lang, () => setSpeaking(true), () => setSpeaking(false)).catch(() => setSpeaking(false));
+  }
+
+  return (
+    <>
+      <Header title={tx('ভিডিও', 'Video')} onBack={() => { stopAiSpeech().catch(() => undefined); setScreen('trainingModule'); }} />
+      <View style={styles.videoFrame}>
+        {content?.youtube_id ? (
+          <YoutubePlayer ref={playerRef} height={210} play={false} videoId={String(content.youtube_id)} onChangeState={onChangeState} />
+        ) : (
+          <View style={styles.videoFallback}><Text style={styles.apiNotice}>{tx('ভিডিও লিংক সঠিক নয়।', 'Video link is not valid.')}</Text></View>
+        )}
+      </View>
+      <View style={styles.readerBody}>
+        <Text style={styles.readerKicker}>{String(content?.module_title || '')}</Text>
+        <Text style={styles.readerTitle}>{rowTitle(content || undefined, lang, '')}</Text>
+        <View style={styles.pointPillRow}>
+          <View style={styles.pointPill}><Ionicons name="star" size={12} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(content?.points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text></View>
+          {completed ? <View style={styles.donePill}><Ionicons name="checkmark" size={12} color="#FFFFFF" /><Text style={styles.donePillText}>{tx('সম্পন্ন', 'Completed')}</Text></View> : <Text style={styles.videoHint}>{tx('৯০% দেখলে সম্পন্ন হবে', 'Completes at 90% watched')}</Text>}
+        </View>
+        {content?.body_en ? <Text style={styles.readerText}>{localized(content, lang, 'body', '') || content.body_en}</Text> : null}
+
+        <Pressable onPress={onSummarize} disabled={summarizing} style={({ pressed }) => [styles.aiSummaryBtn, pressed && styles.pressed]}>
+          <Ionicons name="sparkles" size={16} color={colors.maroon} />
+          <Text style={styles.aiSummaryBtnText}>{summarizing ? tx('সারাংশ তৈরি হচ্ছে...', 'Generating summary...') : tx('AI সারাংশ', 'AI summary')}</Text>
+        </Pressable>
+
+        {summary ? (
+          <View style={styles.aiSummaryBlock}>
+            <View style={styles.aiSummaryHead}>
+              <Text style={styles.aiSummaryTitle}>{tx('সারাংশ', 'Summary')}</Text>
+              <Pressable onPress={toggleRead} hitSlop={8} style={styles.aiReadBtn}>
+                <Ionicons name={speaking ? 'stop-circle' : 'volume-high'} size={20} color={colors.maroon} />
+              </Pressable>
+            </View>
+            <MarkdownText text={summary} style={styles.readerText} strongStyle={styles.readerStrong} />
+          </View>
+        ) : null}
+      </View>
+      {content ? <AppButton title={tx('শেষ', 'Done')} onPress={() => { stopAiSpeech().catch(() => undefined); setScreen('trainingModule'); }} /> : null}
+    </>
+  );
+}
+
+// Quiz — 80% to pass and complete the article.
+function TrainingQuiz({ contentId, setScreen }: { contentId: string | null; setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const uid = useUid();
+  const [content, setContent] = useState<any>(null);
+  const [answers, setAnswers] = useState<number[]>([]);
+  const [result, setResult] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!contentId) return;
+    learnFetch(`app/learning/content?content_id=${contentId}&user_id=${uid}`).then((c) => {
+      setContent(c);
+      setAnswers(new Array((c?.quiz ?? []).length).fill(-1));
+    }).catch(() => undefined);
+  }, [contentId, uid]);
+
+  const quiz: any[] = content?.quiz ?? [];
+  const allAnswered = quiz.length > 0 && answers.every((a) => a >= 0);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      const res: any = await apiRequest('app/learning/submit-quiz', { method: 'POST', body: JSON.stringify({ user_id: uid, content_id: contentId, answers }) });
+      setResult(res.result);
+      if (res.result?.passed) refreshStore.trigger();
+    } catch { /* ignore */ } finally { setBusy(false); }
+  }
+
+  if (result) {
+    const passed = result.passed;
+    return (
+      <>
+        <Header title={tx('কুইজ ফলাফল', 'Quiz result')} onBack={() => setScreen('trainingModule')} />
+        <View style={styles.quizResult}>
+          <View style={[styles.quizResultIcon, { backgroundColor: passed ? colors.green : colors.gold }]}>
+            <Ionicons name={passed ? 'trophy' : 'refresh'} size={40} color="#FFFFFF" />
+          </View>
+          <Text style={styles.quizResultScore}>{num(Number(result.score ?? 0), lang)}%</Text>
+          <Text style={styles.quizResultText}>{passed ? tx('অভিনন্দন! আপনি পাস করেছেন।', 'Congrats! You passed.') : tx('৮০% দরকার। আবার চেষ্টা করুন।', 'You need 80%. Try again.')}</Text>
+          <Text style={styles.quizResultSub}>{num(Number(result.correct ?? 0), lang)}/{num(Number(result.total ?? 0), lang)} {tx('সঠিক', 'correct')}{passed ? ` · +${num(Number(result.points_awarded ?? 0), lang)} ${tx('পয়েন্ট', 'pts')}` : ''}</Text>
+          {passed ? (
+            <AppButton title={tx('সম্পন্ন', 'Done')} onPress={() => setScreen('trainingModule')} />
+          ) : (
+            <AppButton title={tx('আবার চেষ্টা করুন', 'Try again')} onPress={() => { setResult(null); setAnswers(new Array(quiz.length).fill(-1)); }} />
+          )}
+        </View>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Header title={tx('কুইজ', 'Quiz')} onBack={() => setScreen('trainingArticle')} />
+      <Text style={styles.pageHint}>{tx('৮০% সঠিক হলে আর্টিকেল সম্পন্ন হবে।', 'Score 80% to complete the article.')}</Text>
+      {quiz.map((q, qi) => (
+        <View key={qi} style={styles.quizCard}>
+          <Text style={styles.quizQuestion}>{num(qi + 1, lang)}. {q.q}</Text>
+          {q.options.map((opt: string, oi: number) => {
+            const selected = answers[qi] === oi;
+            return (
+              <Pressable key={oi} onPress={() => setAnswers((prev) => prev.map((a, idx) => (idx === qi ? oi : a)))} style={[styles.quizOption, selected && styles.quizOptionSel]}>
+                <View style={[styles.quizRadio, selected && styles.quizRadioSel]}>{selected ? <Ionicons name="checkmark" size={13} color="#FFFFFF" /> : null}</View>
+                <Text style={[styles.quizOptionText, selected && styles.quizOptionTextSel]}>{opt}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ))}
+      {quiz.length ? <AppButton title={busy ? tx('জমা হচ্ছে...', 'Submitting...') : tx('জমা দিন', 'Submit')} onPress={submit} disabled={!allAnswered || busy} /> : <Text style={styles.apiNotice}>{tx('এই কনটেন্টে কুইজ নেই।', 'This content has no quiz.')}</Text>}
+    </>
   );
 }
 
@@ -4209,25 +4498,37 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   return (
     <>
       <BrandHeader setScreen={setScreen} />
-      <Text style={styles.pageTitle}>☷ {tx('কমিউনিটি', 'Community')}</Text>
+      <View style={styles.communityHero}>
+        <View style={styles.communityHeroIcon}>
+          <Ionicons name="people" size={24} color="#FFFFFF" />
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.communityHeroTitle}>{tx('কমিউনিটি', 'Community')}</Text>
+          <Text style={styles.communityHeroSub}>{tx('প্রশ্ন করুন, অভিজ্ঞতা ভাগ করুন', 'Ask questions, share your experience')}</Text>
+        </View>
+      </View>
       <View style={styles.filterRow}>
         {[tx('আমার উপজেলা', 'My Upazila'), tx('জেলা', 'District'), tx('বাংলাদেশ', 'Bangladesh')].map((filter, index) => (
-          <Text key={filter} style={[styles.filter, index === 0 && styles.filterActive]}>{filter}</Text>
+          <View key={filter} style={[styles.filter, index === 0 && styles.filterActive]}>
+            <Text style={[styles.filterText, index === 0 && styles.filterTextActive]}>{filter}</Text>
+          </View>
         ))}
       </View>
       <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('officers')} warning={fallbackWarning(officers)} />
       <Card>
         {officerRows.slice(0, 2).map((officer, index) => (
-          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')} action="☎" />
+          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')} phone={officer.phone ? String(officer.phone) : undefined} />
         ))}
         {officers.loading ? <Text style={styles.apiNotice}>{tx('কর্মকর্তার তথ্য আনা হচ্ছে...', 'Loading officer data...')}</Text> : null}
       </Card>
       <View style={styles.postBox}>
-        <Text style={styles.postAvatar}>♟</Text>
+        <View style={styles.postAvatar}>
+          <Text style={styles.postAvatarText}>{(user?.display_name || user?.full_name || 'S').slice(0, 1).toUpperCase()}</Text>
+        </View>
         <TextInput style={styles.postInput} value={postDraft} onChangeText={setPostDraft} placeholder={tx('কিছু লিখুন...', 'Write something...')} placeholderTextColor={colors.muted} multiline />
-        <Pressable onPress={pickPostImage} hitSlop={8}><Text style={styles.postImageIcon}>🖼</Text></Pressable>
-        <Pressable onPress={submitPost} disabled={posting}>
-          <Text style={styles.postButton}>{posting ? tx('...', '...') : tx('পোস্ট', 'Post')}</Text>
+        <Pressable onPress={pickPostImage} hitSlop={8} style={styles.postIconBtn}><Ionicons name="image-outline" size={22} color={colors.maroon} /></Pressable>
+        <Pressable onPress={submitPost} disabled={posting} style={styles.postSubmitBtn}>
+          <Text style={styles.postSubmitText}>{posting ? tx('...', '...') : tx('পোস্ট', 'Post')}</Text>
         </Pressable>
       </View>
       {postImage ? (
@@ -4275,17 +4576,23 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   );
 }
 
-function Officer({ name, role, action }: { name: string; role: string; action: string }) {
+function Officer({ name, role, phone }: { name: string; role: string; phone?: string }) {
   return (
     <View style={styles.officerRow}>
       <View style={styles.avatar}>
-        <Text style={styles.avatarText}>{name.slice(0, 1)}</Text>
+        <Text style={styles.avatarText}>{name.slice(0, 1).toUpperCase()}</Text>
       </View>
       <View style={styles.flex}>
         <Text style={styles.officerName}>{name}</Text>
         <Text style={styles.officerMeta}>{role}</Text>
       </View>
-      <Text style={styles.officerAction}>{action}</Text>
+      <Pressable
+        style={styles.officerCallBtn}
+        hitSlop={8}
+        onPress={() => { if (phone) Linking.openURL(`tel:${phone}`); }}
+      >
+        <Ionicons name="call" size={17} color="#FFFFFF" />
+      </Pressable>
     </View>
   );
 }
@@ -4312,9 +4619,9 @@ function Post({ name, tag, text, likes, comments, meta, image, official }: { nam
       {text ? <Text style={styles.postText}>{text}</Text> : null}
       {image ? <Image source={{ uri: image }} style={styles.postImage} /> : null}
       <View style={styles.postActions}>
-        <Text style={styles.postAction}>♡ {likes}</Text>
-        <Text style={styles.postAction}>□ {comments}</Text>
-        <Text style={styles.postAction}>⌯</Text>
+        <View style={styles.postActionItem}><Ionicons name="heart-outline" size={18} color={colors.muted} /><Text style={styles.postActionText}>{likes}</Text></View>
+        <View style={styles.postActionItem}><Ionicons name="chatbubble-outline" size={17} color={colors.muted} /><Text style={styles.postActionText}>{comments}</Text></View>
+        <View style={styles.postActionItem}><Ionicons name="share-social-outline" size={17} color={colors.muted} /></View>
       </View>
     </Card>
   );
@@ -4443,13 +4750,13 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const users = useApiList<ApiRow>('users');
   const user = authedUser || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
   const menuRows: Array<{ icon: string; title: string; sub: string; target?: Screen; action?: () => void; pill?: string }> = [
-    { icon: '♙', title: tx('ব্যক্তিগত তথ্য', 'Personal Info'), sub: tx('নাম, লিঙ্গ, ছবি', 'Name, gender, photo'), target: 'menuPersonal' },
-    { icon: '▦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
-    { icon: '▧', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
-    { icon: '▤', title: tx('KYC ডকুমেন্ট', 'KYC Documents'), sub: tx('NID, কাগজপত্র', 'NID, papers'), target: 'menuKyc' },
-    { icon: '✎', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
-    { icon: '文', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
-    { icon: '?', title: tx('সাহায্য ও FAQ', 'Help & FAQ'), sub: tx('সাধারণ জিজ্ঞাসা', 'Common questions'), target: 'menuFaq' },
+    { icon: '👤', title: tx('ব্যক্তিগত তথ্য', 'Personal Info'), sub: tx('নাম, লিঙ্গ, ছবি', 'Name, gender, photo'), target: 'menuPersonal' },
+    { icon: '🏦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
+    { icon: '🌾', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
+    { icon: '🪪', title: tx('KYC ডকুমেন্ট', 'KYC Documents'), sub: tx('NID, কাগজপত্র', 'NID, papers'), target: 'menuKyc' },
+    { icon: '🗂️', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
+    { icon: '🌐', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
+    { icon: '❓', title: tx('সাহায্য ও FAQ', 'Help & FAQ'), sub: tx('সাধারণ জিজ্ঞাসা', 'Common questions'), target: 'menuFaq' },
   ];
   const roleChips = roleLabelsFor(authedUser, tx);
   return (
@@ -4943,7 +5250,7 @@ function OfficersScreen({ setScreen }: { setScreen: (screen: Screen) => void }) 
               key={String(officer.id ?? index)}
               name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))}
               role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')}
-              action="☎"
+              phone={officer.phone ? String(officer.phone) : undefined}
             />
           ))}
         </Card>
@@ -5224,7 +5531,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   prefOptionIconWrapSelected: { backgroundColor: colors.rose },
-  prefOptionIcon: { fontSize: 33 },
+  prefOptionIcon: { fontSize: 36, lineHeight: 42, textAlign: 'center' },
   prefOptionTitle: { color: colors.ink, fontSize: 16, lineHeight: 21, fontWeight: '600', paddingRight: 16 },
   prefCheck: {
     position: 'absolute',
@@ -5253,7 +5560,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   tileSelected: { borderColor: colors.maroon, backgroundColor: colors.rose, borderWidth: 2 },
-  tileIcon: { fontSize: 27, marginBottom: 8 },
+  tileIcon: { fontSize: 31, lineHeight: 38, marginBottom: 8, textAlign: 'center' },
   tileTitle: { color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
   tileSub: { color: colors.muted, fontSize: 12, marginTop: 3 },
   prefBottom: { marginTop: 'auto', paddingTop: 10, paddingBottom: 18, borderTopWidth: 1, borderColor: colors.line, backgroundColor: colors.cream },
@@ -5365,8 +5672,8 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   serviceCardFull: { width: '100%' },
-  serviceIcon: { width: 44, height: 44, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
-  serviceIconText: { color: colors.maroon, fontSize: 22, fontWeight: '700' },
+  serviceIcon: { width: 50, height: 50, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
+  serviceIconText: { color: colors.maroon, fontSize: 27, lineHeight: 32, textAlign: 'center' },
   serviceTitle: { color: colors.ink, fontSize: 15, lineHeight: 19, fontWeight: '700', flexShrink: 1 },
   serviceSub: { color: colors.muted, fontSize: 11, lineHeight: 15, marginTop: 2 },
   homeApaCard: {
@@ -5419,9 +5726,9 @@ const styles = StyleSheet.create({
     elevation: 12,
   },
   navItem: { flex: 1, alignItems: 'center', justifyContent: 'flex-start', paddingVertical: 2 },
-  navIconWrap: { width: 46, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
+  navIconWrap: { width: 48, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
   navIconWrapActive: { backgroundColor: 'rgba(255,255,255,0.18)' },
-  navIcon: { color: 'rgba(255,255,255,0.75)', fontSize: 22 },
+  navIcon: { color: 'rgba(255,255,255,0.85)', fontSize: 23, lineHeight: 28, textAlign: 'center' },
   navIconActive: { color: 'white' },
   navLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11.5, fontWeight: '700' },
   navLabelActive: { color: 'white' },
@@ -5585,7 +5892,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   listItemInactive: { opacity: 0.72, backgroundColor: '#FBF8FA' },
-  listIcon: { fontSize: 26 },
+  listIcon: { fontSize: 28, lineHeight: 34, textAlign: 'center' },
   listTitle: { color: colors.ink, fontSize: 16, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
   listSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
   chevron: { color: colors.muted, fontSize: 22 },
@@ -5692,7 +5999,7 @@ const styles = StyleSheet.create({
   segmentInactive: { flex: 1, color: colors.muted, padding: 10, textAlign: 'center', fontWeight: '700' },
   productCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 10, padding: 14, flexDirection: 'row', gap: 12, borderWidth: 1, borderColor: colors.line },
   disabledCard: { opacity: 0.55 },
-  productIcon: { width: 58, height: 58, borderRadius: 10, backgroundColor: colors.rose, textAlign: 'center', textAlignVertical: 'center', fontSize: 28, overflow: 'hidden' },
+  productIcon: { width: 58, height: 58, borderRadius: 10, backgroundColor: colors.rose, textAlign: 'center', textAlignVertical: 'center', fontSize: 31, lineHeight: 58, overflow: 'hidden' },
   productTitle: { color: colors.ink, fontSize: 16, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
   productSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
   productPrice: { color: colors.maroon, fontSize: 20, fontWeight: '700', marginTop: 6 },
@@ -5732,7 +6039,77 @@ const styles = StyleSheet.create({
   moduleGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, paddingHorizontal: 14, paddingTop: 10 },
   moduleCard: { width: '48%', backgroundColor: 'white', borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: colors.line },
   moduleThumb: { height: 92, alignItems: 'center', justifyContent: 'center' },
-  moduleIcon: { fontSize: 34 },
+  moduleIcon: { fontSize: 37, lineHeight: 44, textAlign: 'center' },
+  // Training module (gamified) styles
+  trainPointsCard: { flexDirection: 'row', alignItems: 'center', margin: 16, marginBottom: 8, backgroundColor: colors.maroon, borderRadius: 16, paddingVertical: 16 },
+  trainPointsCol: { flex: 1, alignItems: 'center' },
+  trainPointsValue: { color: 'white', fontSize: 22, fontWeight: '800' },
+  trainPointsLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 3 },
+  trainPointsDivider: { width: 1, height: 34, backgroundColor: 'rgba(255,255,255,0.22)' },
+  trainContinue: { flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginBottom: 6, backgroundColor: colors.green, borderRadius: 14, padding: 14 },
+  trainContinueLabel: { color: 'rgba(255,255,255,0.85)', fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  trainContinueTitle: { color: 'white', fontSize: 15, fontWeight: '800', marginTop: 2 },
+  trainContinueSub: { color: 'rgba(255,255,255,0.85)', fontSize: 12, marginTop: 1 },
+  trainCatGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 12, paddingHorizontal: 16, paddingTop: 4 },
+  trainCatCard: { width: '48%', backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  trainCatCardHi: { borderColor: colors.maroon, borderWidth: 2, backgroundColor: colors.rose },
+  trainCatEmoji: { fontSize: 32, lineHeight: 38, marginBottom: 6 },
+  trainCatTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
+  trainCatMeta: { color: colors.muted, fontSize: 11.5, marginTop: 4 },
+  trainProgressTrack: { height: 6, borderRadius: 6, backgroundColor: '#EFE6EC', overflow: 'hidden', marginTop: 8, marginBottom: 4 },
+  trainProgressFill: { height: '100%', backgroundColor: colors.green, borderRadius: 6 },
+  subList: { paddingHorizontal: 16, paddingTop: 4, gap: 10 },
+  subCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 13 },
+  subEmojiWrap: { width: 46, height: 46, borderRadius: 13, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  subEmoji: { fontSize: 24, lineHeight: 30 },
+  subTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  subTitle: { color: colors.ink, fontSize: 15.5, fontWeight: '800', flexShrink: 1 },
+  subSub: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
+  subMeta: { color: colors.maroon, fontSize: 11.5, fontWeight: '700', marginTop: 4 },
+  levelChip: { backgroundColor: colors.goldPale, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2 },
+  levelChipText: { color: '#92610C', fontSize: 10.5, fontWeight: '800' },
+  contentList: { paddingHorizontal: 16, gap: 10 },
+  contentCard: { flexDirection: 'row', gap: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 10 },
+  contentThumb: { width: 70, height: 70, borderRadius: 11 },
+  contentThumbFallback: { backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  contentTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
+  contentExcerpt: { color: colors.muted, fontSize: 12.5, lineHeight: 17, marginTop: 3 },
+  contentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 },
+  pointPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.goldPale, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3 },
+  pointPillText: { color: '#92610C', fontSize: 11, fontWeight: '800' },
+  pointPillRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8, marginBottom: 4 },
+  quizPill: { backgroundColor: colors.bluePale, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3 },
+  quizPillText: { color: '#1D4ED8', fontSize: 11, fontWeight: '800' },
+  donePill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: colors.green, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3 },
+  donePillText: { color: 'white', fontSize: 11, fontWeight: '800' },
+  readerImage: { width: '100%', height: 200 },
+  readerBody: { paddingHorizontal: 18, paddingTop: 14 },
+  readerKicker: { color: colors.maroon, fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
+  readerTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', marginTop: 4, lineHeight: 28 },
+  readerText: { color: colors.ink, fontSize: 15.5, lineHeight: 25, marginTop: 6 },
+  readerStrong: { fontWeight: '800', color: colors.maroon },
+  videoFrame: { backgroundColor: '#000', marginTop: 8 },
+  videoFallback: { height: 210, alignItems: 'center', justifyContent: 'center' },
+  videoHint: { color: colors.muted, fontSize: 12 },
+  aiSummaryBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-start', backgroundColor: colors.rose, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, marginTop: 14 },
+  aiSummaryBtnText: { color: colors.maroon, fontWeight: '800', fontSize: 13.5 },
+  aiSummaryBlock: { backgroundColor: '#FBF6F9', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14, marginTop: 12 },
+  aiSummaryHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  aiSummaryTitle: { color: colors.maroon, fontSize: 15, fontWeight: '800' },
+  aiReadBtn: { width: 36, height: 36, borderRadius: 12, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  quizCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  quizQuestion: { color: colors.ink, fontSize: 15.5, fontWeight: '800', marginBottom: 10, lineHeight: 21 },
+  quizOption: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 11, padding: 12, marginBottom: 8 },
+  quizOptionSel: { borderColor: colors.maroon, backgroundColor: colors.rose },
+  quizRadio: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  quizRadioSel: { borderColor: colors.maroon, backgroundColor: colors.maroon },
+  quizOptionText: { color: colors.ink, fontSize: 14.5, flexShrink: 1 },
+  quizOptionTextSel: { fontWeight: '700', color: colors.maroon },
+  quizResult: { alignItems: 'center', paddingHorizontal: 24, paddingTop: 30 },
+  quizResultIcon: { width: 90, height: 90, borderRadius: 45, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  quizResultScore: { color: colors.ink, fontSize: 40, fontWeight: '900' },
+  quizResultText: { color: colors.ink, fontSize: 17, fontWeight: '700', textAlign: 'center', marginTop: 6 },
+  quizResultSub: { color: colors.muted, fontSize: 14, textAlign: 'center', marginTop: 6, marginBottom: 20 },
   moduleTitle: { color: colors.ink, fontSize: 13, lineHeight: 17, fontWeight: '700', paddingHorizontal: 10, paddingTop: 10 },
   moduleSub: { color: colors.muted, fontSize: 11, paddingHorizontal: 10, marginTop: 2 },
   moduleCount: { color: colors.maroon, fontSize: 12, fontWeight: '700', padding: 10 },
@@ -5741,7 +6118,7 @@ const styles = StyleSheet.create({
   learningThumb: { minHeight: 92, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   learningBody: { padding: 14, paddingTop: 10 },
   learningMaterial: { flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: '#FBF8FA', borderRadius: 12, padding: 10, marginTop: 10 },
-  learningMaterialIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'white', textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', color: colors.maroon, fontSize: 16 },
+  learningMaterialIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'white', textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', color: colors.maroon, fontSize: 18, lineHeight: 36 },
   learningMaterialLabel: { color: colors.muted, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
   learningMaterialTitle: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: '700', marginTop: 1 },
   quizBox: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 10, padding: 12, borderRadius: 14, backgroundColor: colors.maroon },
@@ -5780,8 +6157,21 @@ const styles = StyleSheet.create({
   progressLine: { height: 4, backgroundColor: colors.maroon, width: '40%' },
   pageTitle: { color: colors.ink, fontSize: 24, fontWeight: '700', marginHorizontal: 20, marginTop: 16 },
   filterRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, paddingTop: 14 },
-  filter: { paddingHorizontal: 18, paddingVertical: 8, borderRadius: 20, backgroundColor: '#F0EAEE', color: colors.muted, fontWeight: '700' },
-  filterActive: { backgroundColor: colors.maroon, color: 'white' },
+  filter: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: '#F0EAEE' },
+  filterActive: { backgroundColor: colors.maroon },
+  filterText: { color: colors.muted, fontWeight: '700', fontSize: 13 },
+  filterTextActive: { color: 'white' },
+  communityHero: { margin: 16, marginBottom: 4, backgroundColor: colors.maroon, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 13 },
+  communityHeroIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
+  communityHeroTitle: { color: 'white', fontSize: 20, fontWeight: '800' },
+  communityHeroSub: { color: 'rgba(255,255,255,0.82)', fontSize: 12.5, marginTop: 2 },
+  officerCallBtn: { width: 38, height: 38, borderRadius: 13, backgroundColor: colors.green, alignItems: 'center', justifyContent: 'center' },
+  postAvatarText: { color: colors.maroon, fontWeight: '800', fontSize: 15 },
+  postIconBtn: { width: 38, height: 38, borderRadius: 11, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  postSubmitBtn: { backgroundColor: colors.maroon, paddingHorizontal: 16, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  postSubmitText: { color: 'white', fontWeight: '800', fontSize: 13 },
+  postActionItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  postActionText: { color: colors.muted, fontWeight: '700', fontSize: 13 },
   search: { margin: 16, backgroundColor: 'white', borderRadius: 10, borderWidth: 1, borderColor: colors.line, flexDirection: 'row', alignItems: 'center', padding: 8 },
   searchIcon: { color: colors.muted, marginHorizontal: 8 },
   searchInput: { flex: 1, height: 36, backgroundColor: '#F7F3F5', borderRadius: 10, paddingHorizontal: 12, color: colors.ink },
@@ -5791,7 +6181,7 @@ const styles = StyleSheet.create({
   avatarText: { color: colors.maroon, fontWeight: '700' },
   officerAction: { width: 38, height: 38, borderRadius: 14, backgroundColor: colors.rose, color: colors.maroon, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 19 },
   postBox: { margin: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 10, flexDirection: 'row', gap: 8, alignItems: 'center' },
-  postAvatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.rose, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden' },
+  postAvatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
   postInput: { flex: 1, height: 36, backgroundColor: '#F7F3F5', borderRadius: 10, paddingHorizontal: 12 },
   postButton: { backgroundColor: colors.maroon, color: 'white', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, overflow: 'hidden', fontWeight: '700' },
   postCard: { padding: 14 },
@@ -5860,7 +6250,7 @@ const styles = StyleSheet.create({
   profileBadgeText: { color: 'white', fontWeight: '700' },
   menuCard: { padding: 0, overflow: 'hidden' },
   menuItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderBottomWidth: 1, borderColor: colors.line },
-  menuIcon: { width: 40, height: 40, borderRadius: 10, backgroundColor: '#F0EAEE', color: colors.maroon, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 18 },
+  menuIcon: { width: 42, height: 42, borderRadius: 11, backgroundColor: '#F0EAEE', color: colors.maroon, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 21, lineHeight: 42 },
   menuTitle: { color: colors.ink, fontSize: 15, fontWeight: '700' },
   menuSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
   languagePill: { minWidth: 48, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.maroon, alignItems: 'center' },

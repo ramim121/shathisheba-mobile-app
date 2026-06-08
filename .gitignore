@@ -41,3 +41,8 @@ expo.*.log
 # generated native folders
 /ios
 /android
+
+# agent tooling
+.agents/
+.codex/
+graphify-out/
