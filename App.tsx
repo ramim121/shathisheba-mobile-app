@@ -1,13 +1,19 @@
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { Audio } from 'expo-av';
 import { GoogleGenAI, MediaResolution } from '@google/genai';
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   Easing,
+  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -27,6 +33,7 @@ type Screen =
   | 'apaVoice'
   | 'apaCamera'
   | 'login'
+  | 'personalInfo'
   | 'prefAnimal'
   | 'prefLivestock'
   | 'prefCrops'
@@ -54,6 +61,14 @@ type Screen =
   | 'partnerRegister'
   | 'kyc'
   | 'regDone'
+  | 'menuPersonal'
+  | 'menuBanking'
+  | 'menuFarm'
+  | 'menuKyc'
+  | 'menuFaq'
+  | 'marketUpdates'
+  | 'marketDetail'
+  | 'officers'
   | 'inactive';
 
 const colors = {
@@ -163,6 +178,33 @@ function money(value: number) {
   return `৳${bn(Math.round(value).toLocaleString('en-IN'))}`;
 }
 
+const MONTHS_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_BN = ['জানু', 'ফেব্রু', 'মার্চ', 'এপ্রিল', 'মে', 'জুন', 'জুলাই', 'আগস্ট', 'সেপ্ট', 'অক্টো', 'নভে', 'ডিসে'];
+
+// Formats a DB date/datetime into a readable, language-aware label
+// (avoids raw ISO strings leaking into the UI).
+function formatDate(value: unknown, lang: Lang) {
+  if (!value) return '';
+  const date = new Date(value as string);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const day = date.getDate();
+  const month = date.getMonth();
+  const year = date.getFullYear();
+  return lang === 'bn'
+    ? `${bn(day)} ${MONTHS_BN[month]} ${bn(year)}`
+    : `${day} ${MONTHS_EN[month]} ${year}`;
+}
+
+// Humanizes snake_case / SCREAMING_CASE enum values into Title Case labels.
+function humanizeLabel(value: unknown) {
+  if (value == null) return '';
+  return String(value)
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function amount(value: number, lang: Lang) {
   const formatted = Math.round(value).toLocaleString('en-IN');
   return lang === 'bn' ? `৳${bn(formatted)}` : `৳${formatted}`;
@@ -174,6 +216,56 @@ function num(value: number | string, lang: Lang) {
 
 function useAppLocation() {
   return useContext(LocationContext);
+}
+
+type AppRole = 'field_officer' | 'shathisheba_seller' | 'shathisheba_buyer';
+
+type AuthUser = {
+  id: string;
+  full_name?: string | null;
+  display_name?: string | null;
+  phone?: string | null;
+  gender?: string | null;
+  date_of_birth?: string | null;
+  district?: string | null;
+  upazila?: string | null;
+  profile_image_url?: string | null;
+  status?: string | null;
+  roles?: AppRole[];
+  needs_personal_info?: boolean;
+  needs_preferences?: boolean;
+};
+
+const AUTH_STORAGE_KEY = 'shathi.auth.v1';
+
+const AuthContext = createContext<{
+  user: AuthUser | null;
+  token: string | null;
+  signIn: (user: AuthUser, token: string) => Promise<void>;
+  updateUser: (patch: Partial<AuthUser>) => Promise<void>;
+  signOut: () => Promise<void>;
+}>({
+  user: null,
+  token: null,
+  signIn: async () => {},
+  updateUser: async () => {},
+  signOut: async () => {},
+});
+
+function useAuth() {
+  return useContext(AuthContext);
+}
+
+function hasRole(user: AuthUser | null, role: AppRole) {
+  return Boolean(user?.roles?.includes(role));
+}
+
+// Post-login routing for the onboarding scenarios:
+// personal info first (if missing), then preferences (if missing), else home.
+function routeAfterAuth(user: AuthUser): Screen {
+  if (user.needs_personal_info) return 'personalInfo';
+  if (user.needs_preferences) return 'prefAnimal';
+  return 'home';
 }
 
 function naturalApiError(error: unknown, lang: Lang) {
@@ -204,20 +296,150 @@ function weatherApiUrl(lang: Lang, query: string) {
   return `https://api.weatherapi.com/v1/forecast.json?${params.toString()}`;
 }
 
+// Lightweight global loading store: any in-flight apiRequest increments the
+// counter; the GlobalLoader overlay subscribes and shows a branded spinner.
+const loadingStore = {
+  active: 0,
+  listeners: new Set<(active: number) => void>(),
+  begin() {
+    this.active += 1;
+    this.listeners.forEach((fn) => fn(this.active));
+  },
+  end() {
+    this.active = Math.max(0, this.active - 1);
+    this.listeners.forEach((fn) => fn(this.active));
+  },
+  subscribe(fn: (active: number) => void) {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  },
+};
+
+// Global pull-to-refresh signal: bumping `tick` makes data hooks refetch.
+const refreshStore = {
+  tick: 0,
+  listeners: new Set<(tick: number) => void>(),
+  trigger() {
+    this.tick += 1;
+    this.listeners.forEach((fn) => fn(this.tick));
+  },
+  subscribe(fn: (tick: number) => void) {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  },
+};
+
+function useRefreshTick() {
+  const [tick, setTick] = useState(refreshStore.tick);
+  useEffect(() => refreshStore.subscribe(setTick), []);
+  return tick;
+}
+
+// True while the soft keyboard is visible — used to hide the bottom nav so it
+// stays at the device bottom (keyboard covers it) instead of floating up.
+function useKeyboardVisible() {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, () => setVisible(true));
+    const hide = Keyboard.addListener(hideEvt, () => setVisible(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  return visible;
+}
+
+function usePullRefresh() {
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = () => {
+    setRefreshing(true);
+    refreshStore.trigger();
+    setTimeout(() => setRefreshing(false), 900);
+  };
+  return { refreshing, onRefresh };
+}
+
+// ScrollView preset: pull-to-refresh + keeps taps working while keyboard is open.
+function RefreshScroll({ children, style, contentContainerStyle }: { children: React.ReactNode; style?: any; contentContainerStyle?: any }) {
+  const { refreshing, onRefresh } = usePullRefresh();
+  return (
+    <ScrollView
+      style={style}
+      contentContainerStyle={contentContainerStyle}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag"
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.maroon]} tintColor={colors.maroon} />}
+    >
+      {children}
+    </ScrollView>
+  );
+}
+
 async function apiRequest<T = any>(resource: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(resource), {
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(options?.headers || {}),
-    },
-    ...options,
-  });
-  const json = await response.json().catch(() => ({}));
-  if (!response.ok || json.ok === false) {
-    throw new Error(json.message || `Server responded with ${response.status}`);
+  loadingStore.begin();
+  try {
+    const response = await fetch(apiUrl(resource), {
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(options?.headers || {}),
+      },
+      ...options,
+    });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok || json.ok === false) {
+      throw new Error(json.message || `Server responded with ${response.status}`);
+    }
+    return json as T;
+  } finally {
+    loadingStore.end();
   }
-  return json as T;
+}
+
+async function uploadImage(uri: string, folder: string): Promise<string> {
+  const name = uri.split('/').pop() || `photo-${Date.now()}.jpg`;
+  const match = /\.(\w+)$/.exec(name);
+  const ext = (match ? match[1] : 'jpg').toLowerCase();
+  const type = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+  const form = new FormData();
+  form.append('folder', folder);
+  // React Native FormData file shape.
+  form.append('file', { uri, name, type } as any);
+  loadingStore.begin();
+  try {
+    const base = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
+    const response = await fetch(`${base}/api/upload`, { method: 'POST', body: form as any });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok || json.ok === false) {
+      throw new Error(json.message || `Upload failed (${response.status})`);
+    }
+    // Build the URL from the app's own base so the host is always reachable
+    // from the device (the server's request origin can resolve to 0.0.0.0).
+    return json.path ? `${base}${json.path}` : (json.url as string);
+  } finally {
+    loadingStore.end();
+  }
+}
+
+function GlobalLoader() {
+  const [active, setActive] = useState(loadingStore.active);
+  useEffect(() => loadingStore.subscribe(setActive), []);
+  if (active <= 0) return null;
+  return (
+    <View pointerEvents="none" style={styles.loaderOverlay}>
+      <View style={styles.loaderCard}>
+        <ActivityIndicator size="large" color={colors.maroon} />
+      </View>
+    </View>
+  );
 }
 
 async function apiList<T = ApiRow>(resource: string): Promise<T[]> {
@@ -234,6 +456,7 @@ async function apiCreate(resource: string, payload: ApiRow) {
 
 function useApiList<T = ApiRow>(resource: string): ApiState<T> {
   const { lang } = useLanguage();
+  const refreshTick = useRefreshTick();
   const [state, setState] = useState<ApiState<T>>({ rows: [], loading: true, error: null });
   useEffect(() => {
     let alive = true;
@@ -248,7 +471,29 @@ function useApiList<T = ApiRow>(resource: string): ApiState<T> {
     return () => {
       alive = false;
     };
-  }, [resource, lang]);
+  }, [resource, lang, refreshTick]);
+  return state;
+}
+
+function useAppHome(userId?: string | null) {
+  const { lang } = useLanguage();
+  const refreshTick = useRefreshTick();
+  const [state, setState] = useState<{ data: ApiRow | null; loading: boolean }>({ data: null, loading: true });
+  useEffect(() => {
+    let alive = true;
+    setState((current) => ({ ...current, loading: true }));
+    const resource = userId ? `app/home?user_id=${encodeURIComponent(String(userId))}` : 'app/home';
+    apiRequest<{ data?: ApiRow }>(resource)
+      .then((json) => {
+        if (alive) setState({ data: json.data ?? null, loading: false });
+      })
+      .catch(() => {
+        if (alive) setState({ data: null, loading: false });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [userId, lang, refreshTick]);
   return state;
 }
 
@@ -849,10 +1094,12 @@ function Header({
   title,
   onBack,
   right,
+  onRightPress,
 }: {
   title: string;
   onBack?: () => void;
   right?: string;
+  onRightPress?: () => void;
 }) {
   return (
     <View style={styles.header}>
@@ -862,7 +1109,11 @@ function Header({
         </Pressable>
       ) : null}
       <Text style={styles.headerTitle}>{title}</Text>
-      {right ? <Text style={styles.headerRight}>{right}</Text> : <View style={styles.headerSpacer} />}
+      {right ? (
+        <Text style={styles.headerRight} onPress={onRightPress}>{right}</Text>
+      ) : (
+        <View style={styles.headerSpacer} />
+      )}
     </View>
   );
 }
@@ -1011,31 +1262,51 @@ function Shell({
   fixedAccessory?: React.ReactNode;
 }) {
   const { tx } = useLanguage();
+  const { user } = useAuth();
   const tabs: Array<{ id: MainTab; label: string; icon: string; screen: Screen }> = [
     { id: 'home', label: tx('হোম', 'Home'), icon: '⌂', screen: 'home' },
     { id: 'community', label: tx('কমিউনিটি', 'Community'), icon: '☷', screen: 'community' },
-    { id: 'projects', label: tx('প্রকল্প', 'Projects'), icon: '▣', screen: 'projects' },
+    // Shathi Partner project tracking is field-officer only.
+    ...(hasRole(user, 'field_officer')
+      ? [{ id: 'projects' as MainTab, label: tx('প্রকল্প', 'Projects'), icon: '▣', screen: 'projects' as Screen }]
+      : []),
     { id: 'profile', label: tx('মেনু', 'Menu'), icon: '☰', screen: 'profile' },
   ];
 
+  const { refreshing, onRefresh } = usePullRefresh();
+  const keyboardVisible = useKeyboardVisible();
   return (
     <View style={styles.shell}>
-      <ScrollView contentContainerStyle={[styles.shellContent, fixedAccessory ? styles.shellContentWithAccessory : null]} showsVerticalScrollIndicator={false}>
-        {children}
-      </ScrollView>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView
+          contentContainerStyle={[styles.shellContent, fixedAccessory ? styles.shellContentWithAccessory : null]}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.maroon]} tintColor={colors.maroon} />}
+        >
+          {children}
+        </ScrollView>
+      </KeyboardAvoidingView>
       {fixedAccessory ? <View style={styles.fixedAccessory}>{fixedAccessory}</View> : null}
-      <View style={styles.navBar}>
-        {tabs.map((tab) => (
-          <Pressable
-            key={tab.id}
-            onPress={() => setScreen(tab.screen)}
-            style={[styles.navItem, activeTab === tab.id && styles.navItemActive]}
-          >
-            <Text style={styles.navIcon}>{tab.icon}</Text>
-            <Text style={styles.navLabel}>{tab.label}</Text>
-          </Pressable>
-        ))}
-      </View>
+      {/* Bottom nav stays pinned at the device bottom; hidden while the keyboard
+          is open so it never floats above the keyboard. */}
+      {keyboardVisible ? null : (
+        <View style={styles.navBar}>
+          {tabs.map((tab) => (
+            <Pressable
+              key={tab.id}
+              onPress={() => setScreen(tab.screen)}
+              style={styles.navItem}
+            >
+              <View style={[styles.navIconWrap, activeTab === tab.id && styles.navIconWrapActive]}>
+                <Text style={[styles.navIcon, activeTab === tab.id && styles.navIconActive]}>{tab.icon}</Text>
+              </View>
+              <Text style={[styles.navLabel, activeTab === tab.id && styles.navLabelActive]}>{tab.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -1063,6 +1334,7 @@ export default function App() {
   const [latestOrder, setLatestOrder] = useState<ApiRow | null>(null);
   const [latestListing, setLatestListing] = useState<ApiRow | null>(null);
   const [latestApplication, setLatestApplication] = useState<ApiRow | null>(null);
+  const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
   const [appLocation, setAppLocation] = useState<LocationState>({
     query: WEATHERAPI_LOCATION,
     label: 'Default location',
@@ -1071,6 +1343,66 @@ export default function App() {
     error: null,
     fallback: true,
   });
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
+        if (!alive || !stored) return;
+        const parsed = JSON.parse(stored) as { user: AuthUser; token: string };
+        if (!parsed?.user?.id) return;
+        setAuthUser(parsed.user);
+        setAuthToken(parsed.token ?? null);
+        // Refresh onboarding gates from the server, then route accordingly.
+        try {
+          const me = await apiRequest<{ data?: AuthUser }>(`app/me?user_id=${parsed.user.id}`);
+          if (!alive) return;
+          const merged = me.data ? { ...parsed.user, ...me.data } : parsed.user;
+          setAuthUser(merged);
+          await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user: merged, token: parsed.token }));
+          setScreen(routeAfterAuth(merged));
+        } catch {
+          if (alive) setScreen(routeAfterAuth(parsed.user));
+        }
+      } catch {
+        // ignore corrupt storage; user just logs in again
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const authValue = useMemo(
+    () => ({
+      user: authUser,
+      token: authToken,
+      signIn: async (user: AuthUser, token: string) => {
+        setAuthUser(user);
+        setAuthToken(token);
+        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user, token }));
+      },
+      updateUser: async (patch: Partial<AuthUser>) => {
+        setAuthUser((current) => {
+          if (!current) return current;
+          const next = { ...current, ...patch };
+          AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user: next, token: authToken })).catch(() => {});
+          return next;
+        });
+      },
+      signOut: async () => {
+        setAuthUser(null);
+        setAuthToken(null);
+        await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
+        setScreen('onboarding');
+        setOnboarding(0);
+      },
+    }),
+    [authUser, authToken],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -1179,6 +1511,49 @@ async function sendApaMessage(text: string) {
   }
 
   const go = (next: Screen) => setScreen(next);
+  const persistPreferences = async () => {
+    if (!authUser?.id) return;
+    const selection = [
+      ...selectedPreferenceCategories,
+      ...livestockPrefs,
+      ...cropPrefs,
+      ...fishPrefs,
+      ...vegetablePrefs,
+      ...fruitPrefs,
+    ];
+    try {
+      await apiCreate('app/preferences', {
+        user_id: authUser.id,
+        selection,
+        snapshot: {
+          categories: selectedPreferenceCategories,
+          items: {
+            livestock: livestockPrefs,
+            crops: cropPrefs,
+            fishery: fishPrefs,
+            vegetables: vegetablePrefs,
+            fruits: fruitPrefs,
+          },
+        },
+      });
+      setAuthUser((current) => {
+        if (!current) return current;
+        const next = { ...current, needs_preferences: false };
+        AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user: next, token: authToken })).catch(() => {});
+        return next;
+      });
+    } catch {
+      // Non-blocking: preferences also live locally; user still reaches home.
+    }
+  };
+  const finishPreferences = (next: Screen) => {
+    if (next === 'home') {
+      void persistPreferences();
+      go('home');
+    } else {
+      go(next);
+    }
+  };
   const routeForPreference = (key: PreferenceKey): Screen => {
     const routes: Record<PreferenceKey, Screen> = {
       cattle: 'prefLivestock',
@@ -1229,13 +1604,18 @@ async function sendApaMessage(text: string) {
       shathiApa: <ShathiApa setScreen={go} messages={apaMessages} busy={apaBusy} onAsk={sendApaMessage} setDraftSuggestion={setApaDraftSuggestion} />,
       apaVoice: <ApaVoice setScreen={go} />,
       apaCamera: <ApaCamera setScreen={go} />,
-      login: <Login onLogin={() => go('prefAnimal')} />,
+      login: <Login onAuthed={(user) => go(routeAfterAuth(user))} />,
+      personalInfo: (
+        <PersonalInfo
+          onDone={() => go(authUser?.needs_preferences === false ? 'home' : 'prefAnimal')}
+        />
+      ),
       prefAnimal: (
         <PreferenceAnimal
           selected={selectedPreferenceCategories}
           onChange={setSelectedPreferenceCategories}
-          onNext={() => go(nextPreferenceScreen())}
-          onSkip={() => go('home')}
+          onNext={() => finishPreferences(nextPreferenceScreen())}
+          onSkip={() => finishPreferences('home')}
           step={preferenceStep()}
         />
       ),
@@ -1243,9 +1623,9 @@ async function sendApaMessage(text: string) {
         <PreferenceLivestock
           selected={livestockPrefs}
           onChange={setLivestockPrefs}
-          onNext={() => go(nextPreferenceScreen('cattle'))}
+          onNext={() => finishPreferences(nextPreferenceScreen('cattle'))}
           onBack={() => go(previousPreferenceScreen('cattle'))}
-          onSkip={() => go('home')}
+          onSkip={() => finishPreferences('home')}
           step={preferenceStep('cattle')}
           isFinal={nextPreferenceScreen('cattle') === 'home'}
         />
@@ -1254,9 +1634,9 @@ async function sendApaMessage(text: string) {
         <PreferenceCrops
           selected={cropPrefs}
           onChange={setCropPrefs}
-          onNext={() => go(nextPreferenceScreen('crops'))}
+          onNext={() => finishPreferences(nextPreferenceScreen('crops'))}
           onBack={() => go(previousPreferenceScreen('crops'))}
-          onSkip={() => go('home')}
+          onSkip={() => finishPreferences('home')}
           step={preferenceStep('crops')}
           isFinal={nextPreferenceScreen('crops') === 'home'}
         />
@@ -1265,9 +1645,9 @@ async function sendApaMessage(text: string) {
         <PreferenceFish
           selected={fishPrefs}
           onChange={setFishPrefs}
-          onNext={() => go(nextPreferenceScreen('fishery'))}
+          onNext={() => finishPreferences(nextPreferenceScreen('fishery'))}
           onBack={() => go(previousPreferenceScreen('fishery'))}
-          onSkip={() => go('home')}
+          onSkip={() => finishPreferences('home')}
           step={preferenceStep('fishery')}
           isFinal={nextPreferenceScreen('fishery') === 'home'}
         />
@@ -1276,9 +1656,9 @@ async function sendApaMessage(text: string) {
         <PreferenceVegetable
           selected={vegetablePrefs}
           onChange={setVegetablePrefs}
-          onNext={() => go(nextPreferenceScreen('vegetables'))}
+          onNext={() => finishPreferences(nextPreferenceScreen('vegetables'))}
           onBack={() => go(previousPreferenceScreen('vegetables'))}
-          onSkip={() => go('home')}
+          onSkip={() => finishPreferences('home')}
           step={preferenceStep('vegetables')}
           isFinal={nextPreferenceScreen('vegetables') === 'home'}
         />
@@ -1287,7 +1667,7 @@ async function sendApaMessage(text: string) {
         <PreferenceFruits
           selected={fruitPrefs}
           onChange={setFruitPrefs}
-          onNext={() => go('home')}
+          onNext={() => finishPreferences('home')}
           onBack={() => go(previousPreferenceScreen('fruits'))}
           step={preferenceStep('fruits')}
           isFinal
@@ -1298,6 +1678,14 @@ async function sendApaMessage(text: string) {
       community: <Community setScreen={go} />,
       projects: <Projects setScreen={go} />,
       profile: <Profile setScreen={go} />,
+      menuPersonal: <PersonalInfo onDone={() => go('profile')} />,
+      menuBanking: <BankingScreen setScreen={go} />,
+      menuFarm: <FarmScreen setScreen={go} />,
+      menuKyc: <KycScreen setScreen={go} />,
+      menuFaq: <FaqScreen setScreen={go} />,
+      marketUpdates: <MarketUpdates setScreen={go} onSelect={(id) => { setSelectedMarketId(id); go('marketDetail'); }} />,
+      marketDetail: <MarketDetail setScreen={go} id={selectedMarketId} />,
+      officers: <OfficersScreen setScreen={go} />,
       saleCategories: <SaleCategories setScreen={go} />,
       livestock: <Livestock setScreen={go} />,
       cattleForm: <CattleForm setScreen={go} weight={weight} setWeight={setWeight} imageUri={cattleImage} setImageUri={setCattleImage} />,
@@ -1324,13 +1712,14 @@ async function sendApaMessage(text: string) {
     };
 
     return routes[screen];
-  }, [screen, onboarding, weight, qty, cattleImage, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, selectedTrainingModule, trainingContentKind, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication]);
+  }, [screen, onboarding, weight, qty, cattleImage, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, selectedTrainingModule, trainingContentKind, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication, authUser, selectedMarketId]);
 
-  const authScreens: Screen[] = ['onboarding', 'login', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
+  const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
   return (
-    <LanguageContext.Provider value={languageValue}>
-      <LocationContext.Provider value={appLocation}>
+    <AuthContext.Provider value={authValue}>
+      <LanguageContext.Provider value={languageValue}>
+        <LocationContext.Provider value={appLocation}>
         <SafeAreaView
           style={[
             styles.safe,
@@ -1344,15 +1733,19 @@ async function sendApaMessage(text: string) {
             translucent={false}
           />
           {authScreens.includes(screen) ? (
-            content
+            <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+              {content}
+            </KeyboardAvoidingView>
           ) : (
             <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaInputBar onAsk={sendApaMessage} onImage={sendApaImage} onVoice={sendApaVoice} busy={apaBusy} draftSuggestion={apaDraftSuggestion} clearDraftSuggestion={() => setApaDraftSuggestion('')} /> : undefined}>
               {content}
             </Shell>
           )}
+          <GlobalLoader />
         </SafeAreaView>
-      </LocationContext.Provider>
-    </LanguageContext.Provider>
+        </LocationContext.Provider>
+      </LanguageContext.Provider>
+    </AuthContext.Provider>
   );
 }
 
@@ -1404,8 +1797,60 @@ function Onboarding({ step, onNext, onBack }: { step: number; onNext: () => void
   );
 }
 
-function Login({ onLogin }: { onLogin: () => void }) {
-  const { tx } = useLanguage();
+function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
+  const { tx, lang } = useLanguage();
+  const { signIn } = useAuth();
+  const [step, setStep] = useState<'phone' | 'otp'>('phone');
+  const [phone, setPhone] = useState('');
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [hint, setHint] = useState('');
+
+  async function sendCode() {
+    const phoneValue = phone.trim();
+    if (!/^01[0-9]{9}$/.test(phoneValue)) {
+      setError(tx('সঠিক ১১ ডিজিটের মোবাইল নম্বর দিন (01XXXXXXXXX)।', 'Enter a valid 11-digit mobile number (01XXXXXXXXX).'));
+      return;
+    }
+    setError('');
+    setHint('');
+    try {
+      const response = await apiRequest<{ result?: { dev_otp?: string } }>('app/auth/request-otp', {
+        method: 'POST',
+        body: JSON.stringify({ phone: phoneValue }),
+      });
+      setStep('otp');
+      if (response.result?.dev_otp) {
+        setHint(tx(`টেস্ট কোড: ${response.result.dev_otp}`, `Test code: ${response.result.dev_otp}`));
+      }
+    } catch (sendError) {
+      setError(naturalApiError(sendError, lang));
+    }
+  }
+
+  async function verify() {
+    const codeValue = code.trim();
+    if (codeValue.length < 4) {
+      setError(tx('৪ ডিজিটের কোড দিন।', 'Enter the 4-digit code.'));
+      return;
+    }
+    setError('');
+    try {
+      const response = await apiRequest<{ result?: { token: string; user: AuthUser } }>('app/auth/verify-otp', {
+        method: 'POST',
+        body: JSON.stringify({ phone: phone.trim(), code: codeValue }),
+      });
+      const result = response.result;
+      if (!result?.user?.id || !result.token) {
+        throw new Error(tx('যাচাই ব্যর্থ হয়েছে। আবার চেষ্টা করুন।', 'Verification failed. Please try again.'));
+      }
+      await signIn(result.user, result.token);
+      onAuthed(result.user);
+    } catch (verifyError) {
+      setError(naturalApiError(verifyError, lang));
+    }
+  }
+
   return (
     <View style={styles.authScreen}>
       <View style={styles.authLang}>
@@ -1413,13 +1858,172 @@ function Login({ onLogin }: { onLogin: () => void }) {
       </View>
       <Card style={styles.loginCard}>
         <Text style={styles.loginTitle}>{tx('শাথী সেবায় স্বাগতম', 'Welcome to Shathi Sheba')}</Text>
-        <Text style={styles.loginSub}>{tx('চলিয়ে যেতে তথ্য দিন', 'Enter your credentials to continue')}</Text>
-        <Text style={styles.label}>{tx('ইউজার নাম', 'Username')}</Text>
-        <TextInput style={styles.input} placeholder={tx('ইউজার নাম লিখুন', 'Enter username')} placeholderTextColor={colors.muted} />
-        <Text style={styles.label}>{tx('পাসওয়ার্ড', 'Password')}</Text>
-        <TextInput style={styles.input} secureTextEntry placeholder={tx('পাসওয়ার্ড লিখুন', 'Enter password')} placeholderTextColor={colors.muted} />
-        <AppButton title={tx('লগইন', 'Login')} onPress={onLogin} />
+        {step === 'phone' ? (
+          <>
+            <Text style={styles.loginSub}>{tx('চালিয়ে যেতে মোবাইল নম্বর দিন', 'Enter your mobile number to continue')}</Text>
+            <Text style={styles.label}>{tx('মোবাইল নম্বর', 'Mobile number')}</Text>
+            <TextInput
+              style={styles.input}
+              value={phone}
+              onChangeText={setPhone}
+              keyboardType="phone-pad"
+              maxLength={11}
+              autoCapitalize="none"
+              placeholder={tx('০১XXXXXXXXX', '01XXXXXXXXX')}
+              placeholderTextColor={colors.muted}
+            />
+            {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+            <AppButton title={tx('কোড পাঠান', 'Send Code')} onPress={sendCode} />
+          </>
+        ) : (
+          <>
+            <Text style={styles.loginSub}>{tx(`${phone} নম্বরে পাঠানো কোডটি দিন`, `Enter the code sent to ${phone}`)}</Text>
+            <Text style={styles.label}>{tx('OTP কোড', 'OTP code')}</Text>
+            <TextInput
+              style={styles.input}
+              value={code}
+              onChangeText={setCode}
+              keyboardType="number-pad"
+              maxLength={6}
+              placeholder={tx('৪ ডিজিটের কোড', '4-digit code')}
+              placeholderTextColor={colors.muted}
+            />
+            {hint ? <Text style={styles.otpEditPhone}>{hint}</Text> : null}
+            {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+            <AppButton title={tx('যাচাই করুন', 'Verify')} onPress={verify} />
+            <Text style={styles.otpResend} onPress={sendCode}>{tx('কোড আবার পাঠান', 'Resend code')}</Text>
+            <Text
+              style={styles.otpEditPhone}
+              onPress={() => {
+                setStep('phone');
+                setCode('');
+                setError('');
+                setHint('');
+              }}
+            >
+              {tx('নম্বর পরিবর্তন করুন', 'Change number')}
+            </Text>
+          </>
+        )}
       </Card>
+    </View>
+  );
+}
+
+function PersonalInfo({ onDone }: { onDone: () => void }) {
+  const { tx, lang } = useLanguage();
+  const { user, updateUser } = useAuth();
+  const initialName = user?.full_name && user.full_name !== 'Shathi user' ? user.full_name : '';
+  const [fullName, setFullName] = useState(initialName ?? '');
+  const [gender, setGender] = useState<string>(user?.gender ?? '');
+  const initialDob = user?.date_of_birth ? String(user.date_of_birth).slice(0, 10).split('-') : [];
+  const [dobYear, setDobYear] = useState(initialDob[0] || '');
+  const [dobMonth, setDobMonth] = useState(initialDob[1] || '');
+  const [dobDay, setDobDay] = useState(initialDob[2] || '');
+  const [imageUri, setImageUri] = useState<string | null>(user?.profile_image_url ?? null);
+  const [uploadedUrl, setUploadedUrl] = useState<string | null>(user?.profile_image_url ?? null);
+  const [error, setError] = useState('');
+
+  const genders: Array<{ key: string; label: string }> = [
+    { key: 'male', label: tx('পুরুষ', 'Male') },
+    { key: 'female', label: tx('নারী', 'Female') },
+    { key: 'other', label: tx('অন্যান্য', 'Other') },
+  ];
+
+  async function pickPhoto() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return;
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.7 });
+    if (result.canceled) return;
+    const uri = result.assets[0].uri;
+    setImageUri(uri);
+    try {
+      const url = await uploadImage(uri, 'profiles');
+      setUploadedUrl(url);
+    } catch (uploadError) {
+      setError(naturalApiError(uploadError, lang));
+    }
+  }
+
+  async function save() {
+    if (!fullName.trim()) {
+      setError(tx('নাম দিন।', 'Please enter your name.'));
+      return;
+    }
+    if (!gender) {
+      setError(tx('লিঙ্গ নির্বাচন করুন।', 'Please select your gender.'));
+      return;
+    }
+    setError('');
+    try {
+      const response = await apiRequest<{ result?: { user: AuthUser } }>('app/profile', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: user?.id,
+          full_name: fullName.trim(),
+          gender,
+          date_of_birth: dobYear && dobMonth && dobDay ? `${dobYear}-${dobMonth}-${dobDay}` : null,
+          profile_image_url: uploadedUrl || undefined,
+        }),
+      });
+      if (response.result?.user) await updateUser(response.result.user);
+      onDone();
+    } catch (saveError) {
+      setError(naturalApiError(saveError, lang));
+    }
+  }
+
+  return (
+    <View style={styles.prefScreen}>
+      <Header title={tx('ব্যক্তিগত তথ্য', 'Personal Information')} right={tx('এড়িয়ে যান', 'Skip')} onRightPress={onDone} />
+      <View style={styles.prefLangCenter}><LangToggle subtle /></View>
+      <RefreshScroll>
+        <Pressable style={styles.avatarPick} onPress={pickPhoto}>
+          {imageUri ? <Image source={{ uri: imageUri }} style={styles.avatarPickImage} /> : <Text style={styles.avatarPickIcon}>＋</Text>}
+        </Pressable>
+        <Text style={styles.otpEditPhone}>{tx('প্রোফাইল ছবি (ঐচ্ছিক)', 'Profile photo (optional)')}</Text>
+
+        <Text style={styles.label}>{tx('পুরো নাম', 'Full name')} *</Text>
+        <TextInput style={styles.input} value={fullName} onChangeText={setFullName} placeholder={tx('আপনার নাম লিখুন', 'Enter your name')} placeholderTextColor={colors.muted} />
+
+        <Text style={styles.label}>{tx('লিঙ্গ', 'Gender')} *</Text>
+        <View style={styles.genderRow}>
+          {genders.map((g) => (
+            <Pressable key={g.key} style={[styles.genderPill, gender === g.key && styles.genderPillActive]} onPress={() => setGender(g.key)}>
+              <Text style={[styles.genderPillText, gender === g.key && styles.genderPillTextActive]}>{g.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={styles.label}>{tx('জন্ম তারিখ (ঐচ্ছিক)', 'Date of birth (optional)')}</Text>
+        <View style={styles.dobRow}>
+          <DropdownField
+            value={dobDay}
+            placeholder={tx('দিন', 'Day')}
+            onSelect={setDobDay}
+            options={Array.from({ length: 31 }, (_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: num(i + 1, lang) }; })}
+          />
+          <DropdownField
+            value={dobMonth}
+            placeholder={tx('মাস', 'Month')}
+            flexBasis={1.3}
+            onSelect={setDobMonth}
+            options={MONTHS_EN.map((_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: lang === 'bn' ? MONTHS_BN[i] : MONTHS_EN[i] }; })}
+          />
+          <DropdownField
+            value={dobYear}
+            placeholder={tx('সাল', 'Year')}
+            flexBasis={1.2}
+            onSelect={setDobYear}
+            options={Array.from({ length: 75 }, (_, i) => { const y = new Date().getFullYear() - 10 - i; return { value: String(y), label: num(y, lang) }; })}
+          />
+        </View>
+
+        {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+        <View style={{ height: 12 }} />
+        <AppButton title={tx('সংরক্ষণ করুন', 'Save')} onPress={save} />
+        <Text style={styles.otpResend} onPress={onDone}>{tx('এখন এড়িয়ে যান', 'Skip for now')}</Text>
+      </RefreshScroll>
     </View>
   );
 }
@@ -1856,10 +2460,17 @@ function PreferenceOptionCard({
 
 function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const isFieldOfficer = hasRole(user, 'field_officer');
+  const isSeller = hasRole(user, 'shathisheba_seller');
+  // Scenario 2: a seller (partner) who is not a field officer gets a full-width Training tile.
+  const trainingFullWidth = isSeller && !isFieldOfficer;
+  const home = useAppHome(user?.id);
   const users = useApiList<ApiRow>('users');
   const liveWeather = useWeatherApi();
   const market = useApiList<ApiRow>('market-updates');
-  const homeUser = shouldUseFallback(users) ? fallbackProfileUser : users.rows[0];
+  const homeUser = user || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
+  const homeStats = home.data?.stats as ApiRow | undefined;
   const marketRows = shouldUseFallback(market) ? fallbackMarketUpdates : market.rows;
   const marketWarning = fallbackWarning(market);
   const currentWeather = liveWeather.data?.current;
@@ -1892,17 +2503,21 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
           <WeatherSourceBadge fallback={liveWeather.usingFallback} error={liveWeather.error} />
         </Pressable>
         <View style={styles.heroStats}>
-          <HeroStat value={num(12, lang)} label={tx('তালিকা', 'Listings')} />
-          <HeroStat value={num(3, lang)} label={tx('অর্ডার', 'Orders')} />
-          <HeroStat value={tx('৳৪.২L', '৳4.2L')} label={tx('মোট আয়', 'Earnings')} />
+          <HeroStat value={num(Number(homeStats?.listings ?? 0), lang)} label={tx('তালিকা', 'Listings')} />
+          <HeroStat value={num(Number(homeStats?.orders ?? 0), lang)} label={tx('অর্ডার', 'Orders')} />
+          <HeroStat value={amount(Number(homeStats?.earnings ?? 0), lang)} label={tx('মোট আয়', 'Earnings')} />
         </View>
       </Card>
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
-        <ServiceCard icon="▣" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" onPress={() => setScreen('saleCategories')} />
+        {isFieldOfficer || isSeller ? (
+          <ServiceCard icon="▣" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" onPress={() => setScreen('saleCategories')} />
+        ) : null}
         <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" onPress={() => setScreen('buyCategories')} />
-        <ServiceCard icon="▱" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} />
-        <ServiceCard icon="♢" title={tx('শাথী পার্টনার', 'Shathi Partner')} sub={tx('চুক্তি চাষ ও ঋণ সংযোগ', 'Contract farming & loans')} tone="green" onPress={() => setScreen('partnerRegister')} />
+        <ServiceCard icon="▱" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} fullWidth={trainingFullWidth} />
+        {isFieldOfficer ? (
+          <ServiceCard icon="♢" title={tx('শাথী পার্টনার', 'Shathi Partner')} sub={tx('চুক্তি চাষ ও ঋণ সংযোগ', 'Contract farming & loans')} tone="green" onPress={() => setScreen('partnerRegister')} />
+        ) : null}
       </View>
       <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
         <View style={styles.homeApaIcon}>
@@ -1919,14 +2534,14 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
         </View>
         <Text style={styles.homeApaArrow}>›</Text>
       </Pressable>
-      <SectionTitle title={tx('বাজার আপডেট', 'Market Updates')} right={tx('সব দেখুন', 'See all')} warning={marketWarning} />
+      <SectionTitle title={tx('বাজার আপডেট', 'Market Updates')} right={tx('সব দেখুন', 'See all')} warning={marketWarning} onRightPress={() => setScreen('marketUpdates')} />
       {market.loading ? <ApiStatus state={market} empty={tx('এখন কোনো বাজার আপডেট নেই।', 'No market updates are available right now.')} /> : null}
       {marketRows.slice(0, 3).map((item, index) => (
         <Alert
           key={item.id || index}
           title={rowTitle(item, lang, tx('বাজার আপডেট', 'Market update'))}
           sub={rowBody(item, lang, item.district || '')}
-          badge={item.status || item.update_type || ''}
+          badge={humanizeLabel(item.status || item.update_type || '')}
           gold={item.update_type === 'stock' || item.update_type === 'training'}
         />
       ))}
@@ -2579,16 +3194,18 @@ function ServiceCard({
   sub,
   tone,
   onPress,
+  fullWidth,
 }: {
   icon: string;
   title: string;
   sub: string;
   tone: 'rose' | 'gold' | 'blue' | 'green';
   onPress: () => void;
+  fullWidth?: boolean;
 }) {
   const bg = tone === 'gold' ? colors.goldPale : tone === 'blue' ? colors.bluePale : tone === 'green' ? colors.greenPale : colors.rose;
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.serviceCard, pressed && styles.pressed]}>
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.serviceCard, fullWidth && styles.serviceCardFull, pressed && styles.pressed]}>
       <View style={[styles.serviceIcon, { backgroundColor: bg }]}>
         <Text style={styles.serviceIconText}>{icon}</Text>
       </View>
@@ -2598,7 +3215,7 @@ function ServiceCard({
   );
 }
 
-function SectionTitle({ title, right, warning }: { title: string; right?: string; warning?: string | null }) {
+function SectionTitle({ title, right, warning, onRightPress }: { title: string; right?: string; warning?: string | null; onRightPress?: () => void }) {
   const [open, setOpen] = useState(false);
   return (
     <View style={styles.sectionBlock}>
@@ -2611,7 +3228,7 @@ function SectionTitle({ title, right, warning }: { title: string; right?: string
             </Pressable>
           ) : null}
         </View>
-        {right ? <Text style={styles.sectionRight}>{right}</Text> : null}
+        {right ? <Text style={styles.sectionRight} onPress={onRightPress}>{right}</Text> : null}
       </View>
       {warning && open ? (
         <View style={styles.sectionTooltip}>
@@ -2832,17 +3449,28 @@ function FormLabel({ label }: { label: string }) {
 }
 
 function FakeSelect({ value, options, onChange, disabled = false }: { value: string; options?: string[]; onChange?: (value: string) => void; disabled?: boolean }) {
-  function cycleValue() {
-    if (disabled || !options?.length || !onChange) return;
-    const currentIndex = options.indexOf(value);
-    onChange(options[(currentIndex + 1) % options.length]);
-  }
-
+  const [open, setOpen] = useState(false);
+  const interactive = !disabled && !!options?.length && !!onChange;
   return (
-    <Pressable disabled={disabled} onPress={cycleValue} style={({ pressed }) => [styles.fakeSelect, disabled && styles.inputDisabled, pressed && !disabled && styles.pressed]}>
-      <Text style={styles.fakeSelectText}>{value}</Text>
-      <Text style={styles.chevron}>⌄</Text>
-    </Pressable>
+    <>
+      <Pressable disabled={!interactive} onPress={() => setOpen(true)} style={({ pressed }) => [styles.fakeSelect, disabled && styles.inputDisabled, pressed && interactive && styles.pressed]}>
+        <Text style={styles.fakeSelectText}>{value}</Text>
+        <Text style={styles.chevron}>⌄</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
+          <View style={styles.dropdownCard}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {(options || []).map((opt) => (
+                <Pressable key={opt} style={[styles.dropdownOption, opt === value && styles.dropdownOptionActive]} onPress={() => { onChange?.(opt); setOpen(false); }}>
+                  <Text style={[styles.dropdownOptionText, opt === value && styles.dropdownOptionTextActive]}>{opt}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 
@@ -2858,6 +3486,7 @@ function CattlePrice({
   onSubmitted: (listing: ApiRow) => void;
 }) {
   const { tx, lang } = useLanguage();
+  const { user } = useAuth();
   const pricing = useApiList<ApiRow>('sale/pricing');
   const saleItems = useApiList<ApiRow>('sale/items');
   const breeds = useApiList<ApiRow>('sale/breeds');
@@ -2889,7 +3518,7 @@ function CattlePrice({
       const listingCode = `SAL-APP-${Date.now()}`;
       const response = await apiCreate('sale/listings', {
         listing_code: listingCode,
-        user_id: 1,
+        user_id: Number(user?.id) || 1,
         sale_item_id: Number(cattleItem?.id || 1),
         breed_id: breed?.id ? Number(breed.id) : undefined,
         title_en: 'Cattle listing from mobile app',
@@ -3073,6 +3702,7 @@ function BuyOrder({
   onOrdered: (order: ApiRow) => void;
 }) {
   const { tx, lang } = useLanguage();
+  const { user } = useAuth();
   const [address, setAddress] = useState(tx('চর নিলক্ষ্মিয়া, ময়মনসিংহ সদর', 'Char Nilakkhmiya, Mymensingh Sadar'));
   const [paymentMethod, setPaymentMethod] = useState('bkash');
   const [submitting, setSubmitting] = useState(false);
@@ -3092,7 +3722,7 @@ function BuyOrder({
       const orderCode = `ORD-APP-${Date.now()}`;
       const orderResponse = await apiCreate('buy/orders', {
         order_code: orderCode,
-        user_id: 1,
+        user_id: Number(user?.id) || 1,
         total_amount: total,
         delivery_fee: 0,
         payable_amount: total,
@@ -3438,6 +4068,7 @@ function PartnerRegister({ setScreen }: { setScreen: (screen: Screen) => void })
 
 function Kyc({ setScreen, onSubmitted }: { setScreen: (screen: Screen) => void; onSubmitted: (application: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
+  const { user } = useAuth();
   const projects = useApiList<ApiRow>('partners/projects');
   const [fullName, setFullName] = useState('');
   const [nid, setNid] = useState('');
@@ -3454,7 +4085,7 @@ function Kyc({ setScreen, onSubmitted }: { setScreen: (screen: Screen) => void; 
       const applicationCode = `KYC-APP-${Date.now()}`;
       const response = await apiCreate('partners/applications', {
         application_code: applicationCode,
-        user_id: 1,
+        user_id: Number(user?.id) || 1,
         partner_project_id: Number(project?.id || 1),
         current_step: 'personal_kyc',
         full_name_per_nid: fullName,
@@ -3525,31 +4156,49 @@ function RegDone({ setScreen, application }: { setScreen: (screen: Screen) => vo
 
 function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
   const posts = useApiList<ApiRow>('community/posts');
-  const officers = useApiList<ApiRow>('admin/users');
+  const officers = useApiList<ApiRow>(`community/officers${district}`);
+  const marketUpdates = useApiList<ApiRow>(`app/market-updates${district}`);
   const [postDraft, setPostDraft] = useState('');
+  const [postImage, setPostImage] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState('');
   const [localPosts, setLocalPosts] = useState<ApiRow[]>([]);
   const officerRows = shouldUseFallback(officers) ? fallbackOfficers : officers.rows;
   const postRows = shouldUseFallback(posts) && !localPosts.length ? fallbackCommunityPosts : posts.rows;
+  // Top market updates surface in the feed as highlighted official Shathi Sheba cards.
+  const highlightUpdates = (shouldUseFallback(marketUpdates) ? [] : marketUpdates.rows).slice(0, 2);
+
+  async function pickPostImage() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return;
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+    if (!result.canceled) setPostImage(result.assets[0].uri);
+  }
+
   async function submitPost() {
     const body = postDraft.trim();
-    if (!body) return;
+    if (!body && !postImage) return;
     setPosting(true);
     setPostError('');
     try {
+      let imageUrl: string | undefined;
+      if (postImage) imageUrl = await uploadImage(postImage, 'community');
       await apiCreate('community/posts', {
-        user_id: 1,
+        user_id: Number(user?.id) || 1,
         scope: 'upazila',
         post_type: 'general',
         body,
-        district: 'Mymensingh',
-        upazila: 'Mymensingh Sadar',
+        image_url: imageUrl,
+        district: user?.district || 'Mymensingh',
+        upazila: user?.upazila || 'Mymensingh Sadar',
         status: 'visible',
       });
-      setLocalPosts((current) => [{ body, post_type: 'general', like_count: 0, comment_count: 0 }, ...current]);
+      setLocalPosts((current) => [{ farmer_name: user?.display_name || user?.full_name, body, image_url: imageUrl, post_type: 'general', like_count: 0, comment_count: 0, created_at: new Date().toISOString() }, ...current]);
       setPostDraft('');
+      setPostImage(null);
     } catch (error) {
       setPostError(naturalApiError(error, lang));
     } finally {
@@ -3566,37 +4215,60 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
           <Text key={filter} style={[styles.filter, index === 0 && styles.filterActive]}>{filter}</Text>
         ))}
       </View>
-      <View style={styles.search}>
-        <Text style={styles.searchIcon}>⌕</Text>
-        <TextInput style={styles.searchInput} placeholder={tx('কৃষক বা পোস্ট খুঁজুন...', 'Search farmers or posts...')} placeholderTextColor={colors.muted} />
-        <Text style={styles.searchButton}>{tx('খুঁজুন', 'Search')}</Text>
-      </View>
-      <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} warning={fallbackWarning(officers)} />
+      <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('officers')} warning={fallbackWarning(officers)} />
       <Card>
-        {officerRows.slice(0, 2).map((officer) => (
-          <Officer key={officer.id || officer.email} name={officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer')} role={[localized(officer, lang, 'role', officer.role), officer.district, officer.upazila].filter(Boolean).join(' · ')} action="☎" />
+        {officerRows.slice(0, 2).map((officer, index) => (
+          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')} action="☎" />
         ))}
         {officers.loading ? <Text style={styles.apiNotice}>{tx('কর্মকর্তার তথ্য আনা হচ্ছে...', 'Loading officer data...')}</Text> : null}
       </Card>
       <View style={styles.postBox}>
         <Text style={styles.postAvatar}>♟</Text>
-        <TextInput style={styles.postInput} value={postDraft} onChangeText={setPostDraft} placeholder={tx('কিছু লিখুন...', 'Write something...')} placeholderTextColor={colors.muted} />
+        <TextInput style={styles.postInput} value={postDraft} onChangeText={setPostDraft} placeholder={tx('কিছু লিখুন...', 'Write something...')} placeholderTextColor={colors.muted} multiline />
+        <Pressable onPress={pickPostImage} hitSlop={8}><Text style={styles.postImageIcon}>🖼</Text></Pressable>
         <Pressable onPress={submitPost} disabled={posting}>
           <Text style={styles.postButton}>{posting ? tx('...', '...') : tx('পোস্ট', 'Post')}</Text>
         </Pressable>
       </View>
+      {postImage ? (
+        <View style={styles.postPreviewWrap}>
+          <Image source={{ uri: postImage }} style={styles.postPreview} />
+          <Pressable onPress={() => setPostImage(null)} hitSlop={8}><Text style={styles.postPreviewRemove}>{tx('ছবি সরান ✕', 'Remove ✕')}</Text></Pressable>
+        </View>
+      ) : null}
       {postError ? <Text style={styles.apiNotice}>{postError}</Text> : null}
+
+      {highlightUpdates.length ? (
+        <>
+          <SectionTitle title={tx('শাথী সেবা আপডেট', 'Shathi Sheba Updates')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('marketUpdates')} />
+          {highlightUpdates.map((row, index) => (
+            <Pressable key={`mk-${row.id ?? index}`} onPress={() => setScreen('marketUpdates')}>
+              <Card style={styles.officialCard}>
+                <View style={styles.officialRibbon}>
+                  <Text style={styles.officialRibbonText}>{tx('শাথী সেবা ✓', 'Shathi Sheba ✓')}</Text>
+                </View>
+                {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.officialImage} /> : null}
+                <Text style={styles.postName}>{rowTitle(row, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
+                <Text style={styles.postText} numberOfLines={2}>{rowBody(row, lang, '')}</Text>
+              </Card>
+            </Pressable>
+          ))}
+        </>
+      ) : null}
+
       <SectionTitle title={tx('কমিউনিটি পোস্ট', 'Community Posts')} warning={fallbackWarning(posts)} />
       {posts.loading ? <ApiStatus state={posts} empty={tx('এখন কোনো কমিউনিটি পোস্ট নেই।', 'No community posts are available right now.')} /> : null}
       {visiblePosts.map((post, index) => (
         <Post
-          key={post.id || index}
-          name={post.farmer_name || post.user_name || tx('শাথী ব্যবহারকারী', 'Shathi user')}
-          tag={localized(post, lang, 'post_type', post.post_type || tx('পোস্ট', 'Post'))}
+          key={String(post.id ?? `local-${index}`)}
+          name={String(post.farmer_name || post.user_name || tx('শাথী ব্যবহারকারী', 'Shathi user'))}
+          tag={humanizeLabel(post.post_type || tx('পোস্ট', 'Post'))}
           text={rowBody(post, lang, '')}
+          image={post.image_url ? String(post.image_url) : undefined}
+          official={Number(post.is_official ?? 0) === 1}
           likes={num(post.like_count || 0, lang)}
           comments={num(post.comment_count || 0, lang)}
-          meta={[post.created_at, post.district || post.upazila].filter(Boolean).join(' · ')}
+          meta={[formatDate(post.created_at, lang), post.district || post.upazila].filter(Boolean).join(' · ')}
         />
       ))}
     </>
@@ -3618,20 +4290,27 @@ function Officer({ name, role, action }: { name: string; role: string; action: s
   );
 }
 
-function Post({ name, tag, text, likes, comments, meta }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string }) {
+function Post({ name, tag, text, likes, comments, meta, image, official }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean }) {
+  const { tx } = useLanguage();
   return (
-    <Card style={styles.postCard}>
+    <Card style={[styles.postCard, official && styles.officialCard]}>
+      {official ? (
+        <View style={styles.officialRibbon}>
+          <Text style={styles.officialRibbonText}>{tx('শাথী সেবা ✓', 'Shathi Sheba ✓')}</Text>
+        </View>
+      ) : null}
       <View style={styles.postHeader}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{name.slice(0, 1)}</Text>
+        <View style={[styles.avatar, official && { backgroundColor: colors.maroon }]}>
+          <Text style={styles.avatarText}>{(name || 'S').slice(0, 1)}</Text>
         </View>
         <View style={styles.flex}>
           <Text style={styles.postName}>{name}</Text>
           <Text style={styles.productSub}>{meta || ''}</Text>
         </View>
-        <Badge label={tag} tone={tag === 'প্রশ্ন' ? 'gold' : 'green'} />
+        <Badge label={tag} tone={official ? 'rose' : tag === 'প্রশ্ন' || tag === 'Question' ? 'gold' : 'green'} />
       </View>
-      <Text style={styles.postText}>{text}</Text>
+      {text ? <Text style={styles.postText}>{text}</Text> : null}
+      {image ? <Image source={{ uri: image }} style={styles.postImage} /> : null}
       <View style={styles.postActions}>
         <Text style={styles.postAction}>♡ {likes}</Text>
         <Text style={styles.postAction}>□ {comments}</Text>
@@ -3690,7 +4369,7 @@ function Projects({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <View style={styles.projectDetailTop}>
           <View style={styles.flex}>
             <Text style={styles.projectDetailName}>{rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
-            <Text style={styles.projectDetailMeta}>{[project?.start_date, project?.end_date].filter(Boolean).join(' to ')}</Text>
+            <Text style={styles.projectDetailMeta}>{[formatDate(project?.start_date, lang), formatDate(project?.end_date, lang)].filter(Boolean).join(' — ')}</Text>
           </View>
           <View style={styles.projectBalance}>
             <Text style={styles.projectBalanceLabel}>{tx('বাকি', 'Balance')}</Text>
@@ -3760,46 +4439,55 @@ function LedgerRow({ label, value, green, strong }: { label: string; value: stri
 
 function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang, toggleLang } = useLanguage();
+  const { user: authedUser, signOut } = useAuth();
   const users = useApiList<ApiRow>('users');
-  const user = shouldUseFallback(users) ? fallbackProfileUser : users.rows[0];
-  const menuRows = [
-    ['♙', tx('ব্যক্তিগত তথ্য', 'Personal Info'), tx('নাম, যোগাযোগ, ঠিকানা', 'Name, contact, address')],
-    ['▦', tx('ব্যাংকিং বিবরণ', 'Banking Details'), tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking')],
-    ['▧', tx('খামারের তথ্য', 'Farm Info'), tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock')],
-    ['▤', tx('KYC ডকুমেন্ট', 'KYC Documents'), tx('NID, কাগজপত্র', 'NID, papers')],
-    ['✎', tx('ক্যাটাগরি আপডেট', 'Update Categories'), tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences')],
-    ['文', tx('ভাষা: বাংলা', `Language: ${lang === 'bn' ? 'Bangla' : 'English'}`), tx('ভাষা পরিবর্তন করুন', 'Switch language')],
-    ['?', tx('সাহায্য ও FAQ', 'Help & FAQ'), tx('সাধারণ জিজ্ঞাসা', 'Common questions')],
-    ['⚙', tx('সেটিংস', 'Settings'), tx('নোটিফিকেশন', 'Notifications')],
+  const user = authedUser || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
+  const menuRows: Array<{ icon: string; title: string; sub: string; target?: Screen; action?: () => void; pill?: string }> = [
+    { icon: '♙', title: tx('ব্যক্তিগত তথ্য', 'Personal Info'), sub: tx('নাম, লিঙ্গ, ছবি', 'Name, gender, photo'), target: 'menuPersonal' },
+    { icon: '▦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
+    { icon: '▧', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
+    { icon: '▤', title: tx('KYC ডকুমেন্ট', 'KYC Documents'), sub: tx('NID, কাগজপত্র', 'NID, papers'), target: 'menuKyc' },
+    { icon: '✎', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
+    { icon: '文', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
+    { icon: '?', title: tx('সাহায্য ও FAQ', 'Help & FAQ'), sub: tx('সাধারণ জিজ্ঞাসা', 'Common questions'), target: 'menuFaq' },
   ];
+  const roleChips = roleLabelsFor(authedUser, tx);
   return (
     <>
       <View style={styles.profileHead}>
         <View style={styles.profileAvatar}>
-          <Text style={styles.profileAvatarText}>{String(user?.display_name || user?.full_name || 'SS').slice(0, 2).toUpperCase()}</Text>
+          {user?.profile_image_url ? (
+            <Image source={{ uri: user.profile_image_url }} style={styles.profileAvatarImage} />
+          ) : (
+            <Text style={styles.profileAvatarText}>{String(user?.display_name || user?.full_name || 'SS').slice(0, 2).toUpperCase()}</Text>
+          )}
         </View>
         <Text style={styles.profileName}>{user?.display_name || user?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')}</Text>
-        <Text style={styles.profileMeta}>☎ {user?.phone || ''}   ⌖ {user?.district || ''}</Text>
-        <View style={styles.profileBadge}>
-          <Text style={styles.profileBadgeText}>{tx('শাথী পার্টনার ✓', 'Shathi Partner ✓')}</Text>
+        <Text style={styles.profileMeta}>☎ {user?.phone || ''}{user?.district ? `   ⌖ ${user.district}` : ''}</Text>
+        <View style={styles.roleChipRow}>
+          {roleChips.map((label) => (
+            <View key={label} style={styles.roleChip}>
+              <Text style={styles.roleChipText}>{label}</Text>
+            </View>
+          ))}
         </View>
       </View>
-      <SectionTitle title={tx('প্রোফাইল তথ্য', 'Profile Data')} warning={fallbackWarning(users)} />
+      <SectionTitle title={tx('মেনু', 'Menu')} />
       <Card style={styles.menuCard}>
-        {menuRows.map(([icon, title, sub], index) => (
+        {menuRows.map((row, index) => (
           <Pressable
-            key={title}
-            onPress={index === 4 ? () => setScreen('prefAnimal') : index === 5 ? toggleLang : undefined}
-            style={styles.menuItem}
+            key={row.title}
+            onPress={row.action ? row.action : row.target ? () => setScreen(row.target as Screen) : undefined}
+            style={({ pressed }) => [styles.menuItem, index === menuRows.length - 1 && styles.menuItemLast, pressed && styles.menuItemPressed]}
           >
-            <Text style={styles.menuIcon}>{icon}</Text>
+            <View style={styles.menuIconWrap}><Text style={styles.menuIcon}>{row.icon}</Text></View>
             <View style={styles.flex}>
-              <Text style={styles.menuTitle}>{title}</Text>
-              <Text style={styles.menuSub}>{sub}</Text>
+              <Text style={styles.menuTitle}>{row.title}</Text>
+              <Text style={styles.menuSub}>{row.sub}</Text>
             </View>
-            {index === 5 ? (
+            {row.pill ? (
               <View style={styles.languagePill}>
-                <Text style={styles.languagePillText}>{lang === 'bn' ? 'BN' : 'EN'}</Text>
+                <Text style={styles.languagePillText}>{row.pill}</Text>
               </View>
             ) : (
               <Text style={styles.chevron}>›</Text>
@@ -3807,14 +4495,459 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
           </Pressable>
         ))}
       </Card>
-      <Card style={styles.logout}>
-        <Text style={styles.logoutIcon}>↪</Text>
-        <View>
-          <Text style={styles.logoutTitle}>{tx('লগআউট', 'Logout')}</Text>
-          <Text style={styles.menuSub}>{tx('অ্যাকাউন্ট থেকে বের হন', 'Sign out of account')}</Text>
-        </View>
-      </Card>
+      <Pressable onPress={() => { void signOut(); }} style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]}>
+        <Text style={styles.logoutButtonIcon}>↪</Text>
+        <Text style={styles.logoutButtonText}>{tx('লগআউট', 'Logout')}</Text>
+      </Pressable>
       <Text style={styles.version}>{tx('Shathi Sheba v1.0 · প্রস্তুতকারী Digigram Ventures Ltd.', 'Shathi Sheba v1.0 · Powered by Digigram Ventures Ltd.')}</Text>
+    </>
+  );
+}
+
+// Human role labels for the app (a user can hold several roles).
+function roleLabelsFor(user: AuthUser | null, tx: (bn: string, en: string) => string): string[] {
+  const labels: string[] = [];
+  if (hasRole(user, 'field_officer')) labels.push(tx('মাঠ কর্মকর্তা', 'Field Officer'));
+  if (hasRole(user, 'shathisheba_seller')) labels.push(tx('শাথী সেবা পার্টনার', 'Shathi Sheba Partner'));
+  if (hasRole(user, 'shathisheba_buyer')) labels.push(tx('শাথী ক্রেতা', 'Shathi Buyer'));
+  return labels.length ? labels : [tx('শাথী ক্রেতা', 'Shathi Buyer')];
+}
+
+function DropdownField({ value, placeholder, options, onSelect, flexBasis }: { value: string; placeholder: string; options: Array<{ value: string; label: string }>; onSelect: (v: string) => void; flexBasis?: number }) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((o) => o.value === value);
+  return (
+    <View style={{ flex: flexBasis ?? 1 }}>
+      <Pressable style={styles.dropdownField} onPress={() => setOpen(true)}>
+        <Text style={[styles.dropdownValue, !selected && { color: colors.muted }]} numberOfLines={1}>{selected ? selected.label : placeholder}</Text>
+        <Text style={styles.dropdownCaret}>▾</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
+          <View style={styles.dropdownCard}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {options.map((o) => (
+                <Pressable key={o.value} style={[styles.dropdownOption, o.value === value && styles.dropdownOptionActive]} onPress={() => { onSelect(o.value); setOpen(false); }}>
+                  <Text style={[styles.dropdownOptionText, o.value === value && styles.dropdownOptionTextActive]}>{o.label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+function MenuField({ label, value, onChangeText, placeholder, keyboardType, multiline }: { label: string; value: string; onChangeText: (v: string) => void; placeholder?: string; keyboardType?: 'default' | 'number-pad' | 'phone-pad'; multiline?: boolean }) {
+  return (
+    <>
+      <Text style={styles.label}>{label}</Text>
+      <TextInput
+        style={[styles.input, multiline && { height: 84, textAlignVertical: 'top', paddingTop: 10 }]}
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.muted}
+        keyboardType={keyboardType || 'default'}
+        multiline={multiline}
+      />
+    </>
+  );
+}
+
+function BankingScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [bankName, setBankName] = useState('');
+  const [branch, setBranch] = useState('');
+  const [accountName, setAccountName] = useState('');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [provider, setProvider] = useState('');
+  const [mobileAccount, setMobileAccount] = useState('');
+  const [saved, setSaved] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    if (!user?.id) return;
+    apiRequest<{ data?: ApiRow }>(`app/banking?user_id=${user.id}`)
+      .then((res) => {
+        const d = res.data;
+        if (!alive || !d || Array.isArray(d)) return;
+        setBankName(d.bank_name || '');
+        setBranch(d.branch_name || '');
+        setAccountName(d.account_name || '');
+        setAccountNumber(d.account_number || '');
+        setProvider(d.mobile_provider || '');
+        setMobileAccount(d.mobile_account || '');
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [user?.id]);
+
+  async function save() {
+    setError('');
+    setSaved('');
+    try {
+      await apiCreate('app/banking', {
+        user_id: user?.id,
+        bank_name: bankName,
+        branch_name: branch,
+        account_name: accountName,
+        account_number: accountNumber,
+        mobile_provider: provider || null,
+        mobile_account: mobileAccount,
+      });
+      setSaved(tx('ব্যাংকিং তথ্য সংরক্ষণ হয়েছে।', 'Banking details saved.'));
+    } catch (saveError) {
+      setError(naturalApiError(saveError, lang));
+    }
+  }
+
+  const providers = ['bkash', 'nagad', 'rocket', 'upay'];
+  return (
+    <>
+      <Header title={tx('ব্যাংকিং বিবরণ', 'Banking Details')} onBack={() => setScreen('profile')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        <MenuField label={tx('ব্যাংকের নাম', 'Bank name')} value={bankName} onChangeText={setBankName} placeholder={tx('যেমন: ডাচ্-বাংলা ব্যাংক', 'e.g. Dutch-Bangla Bank')} />
+        <MenuField label={tx('শাখা', 'Branch')} value={branch} onChangeText={setBranch} />
+        <MenuField label={tx('অ্যাকাউন্টের নাম', 'Account name')} value={accountName} onChangeText={setAccountName} />
+        <MenuField label={tx('অ্যাকাউন্ট নম্বর', 'Account number')} value={accountNumber} onChangeText={setAccountNumber} keyboardType="number-pad" />
+        <Text style={styles.label}>{tx('মোবাইল ব্যাংকিং', 'Mobile banking')}</Text>
+        <View style={styles.kycChipRow}>
+          {providers.map((p) => (
+            <Pressable key={p} style={[styles.genderPill, { flex: 0, paddingHorizontal: 16 }, provider === p && styles.genderPillActive]} onPress={() => setProvider(provider === p ? '' : p)}>
+              <Text style={[styles.genderPillText, provider === p && styles.genderPillTextActive]}>{p}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <MenuField label={tx('মোবাইল অ্যাকাউন্ট নম্বর', 'Mobile account number')} value={mobileAccount} onChangeText={setMobileAccount} keyboardType="phone-pad" />
+        {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+        {saved ? <Text style={[styles.apiNotice, { color: colors.green }]}>{saved}</Text> : null}
+        <View style={{ height: 10 }} />
+        <AppButton title={tx('সংরক্ষণ করুন', 'Save')} onPress={save} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+function FarmScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [land, setLand] = useState('');
+  const [focus, setFocus] = useState('');
+  const [crops, setCrops] = useState('');
+  const [livestock, setLivestock] = useState('');
+  const [ponds, setPonds] = useState('');
+  const [address, setAddress] = useState('');
+  const [saved, setSaved] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    if (!user?.id) return;
+    apiRequest<{ data?: ApiRow }>(`app/farm?user_id=${user.id}`)
+      .then((res) => {
+        const d = res.data;
+        if (!alive || !d || Array.isArray(d)) return;
+        setLand(d.total_land_decimals != null ? String(d.total_land_decimals) : '');
+        setFocus(d.primary_focus || '');
+        setCrops(d.crop_types || '');
+        setLivestock(d.livestock_count != null ? String(d.livestock_count) : '');
+        setPonds(d.pond_count != null ? String(d.pond_count) : '');
+        setAddress(d.farm_address || '');
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [user?.id]);
+
+  async function save() {
+    setError('');
+    setSaved('');
+    try {
+      await apiCreate('app/farm', {
+        user_id: user?.id,
+        total_land_decimals: land ? Number(land) : null,
+        primary_focus: focus,
+        crop_types: crops,
+        livestock_count: livestock ? Number(livestock) : null,
+        pond_count: ponds ? Number(ponds) : null,
+        farm_address: address,
+      });
+      setSaved(tx('খামারের তথ্য সংরক্ষণ হয়েছে।', 'Farm info saved.'));
+    } catch (saveError) {
+      setError(naturalApiError(saveError, lang));
+    }
+  }
+
+  return (
+    <>
+      <Header title={tx('খামারের তথ্য', 'Farm Info')} onBack={() => setScreen('profile')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        <MenuField label={tx('মোট জমি (শতাংশ)', 'Total land (decimals)')} value={land} onChangeText={setLand} keyboardType="number-pad" />
+        <MenuField label={tx('প্রধান কাজ', 'Primary focus')} value={focus} onChangeText={setFocus} placeholder={tx('যেমন: গবাদিপশু, ফসল', 'e.g. livestock, crops')} />
+        <MenuField label={tx('ফসলের ধরন', 'Crop types')} value={crops} onChangeText={setCrops} placeholder={tx('ধান, ভুট্টা', 'rice, maize')} />
+        <MenuField label={tx('পশুর সংখ্যা', 'Livestock count')} value={livestock} onChangeText={setLivestock} keyboardType="number-pad" />
+        <MenuField label={tx('পুকুরের সংখ্যা', 'Pond count')} value={ponds} onChangeText={setPonds} keyboardType="number-pad" />
+        <MenuField label={tx('খামারের ঠিকানা', 'Farm address')} value={address} onChangeText={setAddress} multiline />
+        {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+        {saved ? <Text style={[styles.apiNotice, { color: colors.green }]}>{saved}</Text> : null}
+        <View style={{ height: 10 }} />
+        <AppButton title={tx('সংরক্ষণ করুন', 'Save')} onPress={save} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [docs, setDocs] = useState<ApiRow[]>([]);
+  const [docType, setDocType] = useState('nid_front');
+  const [pickedUri, setPickedUri] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  const docTypes: Array<{ key: string; label: string; icon: string; sample: string; guide: string }> = [
+    { key: 'nid_front', label: tx('NID সামনে', 'NID front'), icon: '🪪', sample: tx('NID-এর সামনের অংশ', 'NID front side'), guide: tx('ছবি, নাম ও NID নম্বর স্পষ্ট দেখা যাবে এমনভাবে ফ্রেমের ভেতরে রাখুন।', 'Place inside the frame so photo, name and NID number are clearly readable.') },
+    { key: 'nid_back', label: tx('NID পিছনে', 'NID back'), icon: '🪪', sample: tx('NID-এর পিছনের অংশ', 'NID back side'), guide: tx('পুরো পিছনের অংশ ফ্রেমে রাখুন, কোনো অংশ কাটা যাবে না।', 'Fit the whole back side in the frame, no corners cut.') },
+    { key: 'selfie', label: tx('সেলফি', 'Selfie'), icon: '🤳', sample: tx('আপনার সেলফি', 'Your selfie'), guide: tx('মুখ স্পষ্ট ও ভালো আলোতে, চশমা/টুপি ছাড়া।', 'Face clear, good light, no glasses/cap.') },
+    { key: 'trade_license', label: tx('ট্রেড লাইসেন্স', 'Trade license'), icon: '📄', sample: tx('ট্রেড লাইসেন্স', 'Trade license'), guide: tx('সম্পূর্ণ ডকুমেন্ট পড়া যায় এমনভাবে তুলুন।', 'Capture the full document, fully readable.') },
+    { key: 'passbook', label: tx('পাসবই', 'Passbook'), icon: '📒', sample: tx('ব্যাংক পাসবই', 'Bank passbook'), guide: tx('অ্যাকাউন্ট তথ্যসহ প্রথম পৃষ্ঠা তুলুন।', 'Capture the first page showing account details.') },
+  ];
+  const activeType = docTypes.find((d) => d.key === docType) || docTypes[0];
+
+  async function load() {
+    if (!user?.id) return;
+    try {
+      const res = await apiRequest<{ data?: ApiRow[] }>(`app/kyc-documents?user_id=${user.id}`);
+      setDocs(Array.isArray(res.data) ? res.data : []);
+    } catch {
+      setDocs([]);
+    }
+  }
+  useEffect(() => { load(); }, [user?.id]);
+
+  async function pick() {
+    setError('');
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return;
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+    if (!result.canceled) setPickedUri(result.assets[0].uri);
+  }
+
+  async function confirmUpload() {
+    if (!pickedUri) return;
+    setError('');
+    try {
+      const url = await uploadImage(pickedUri, 'kyc');
+      await apiCreate('app/kyc-documents', { user_id: user?.id, doc_type: docType, document_url: url });
+      setPickedUri(null);
+      load();
+    } catch (uploadError) {
+      setError(naturalApiError(uploadError, lang));
+    }
+  }
+
+  function statusLabel(status: string) {
+    if (status === 'verified') return tx('যাচাইকৃত', 'Verified');
+    if (status === 'rejected') return tx('বাতিল', 'Rejected');
+    return tx('অপেক্ষমাণ', 'Pending');
+  }
+
+  return (
+    <>
+      <Header title={tx('KYC ডকুমেন্ট', 'KYC Documents')} onBack={() => setScreen('profile')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        <Text style={styles.pageHint}>{tx('ডকুমেন্টের ধরন নির্বাচন করে নমুনা দেখে ছবি তুলুন।', 'Pick a document type, check the sample, then add a photo.')}</Text>
+        <View style={styles.kycChipRow}>
+          {docTypes.map((d) => (
+            <Pressable key={d.key} style={[styles.genderPill, { flex: 0, paddingHorizontal: 14 }, docType === d.key && styles.genderPillActive]} onPress={() => { setDocType(d.key); setPickedUri(null); }}>
+              <Text style={[styles.genderPillText, docType === d.key && styles.genderPillTextActive]}>{d.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        {/* Sample placement guide for the selected document type */}
+        <View style={styles.kycSampleBox}>
+          <View style={styles.kycSampleFrame}>
+            <Text style={styles.kycSampleIcon}>{activeType.icon}</Text>
+            <Text style={styles.kycSampleTag}>{tx('নমুনা', 'Sample')} · {activeType.sample}</Text>
+          </View>
+          <Text style={styles.kycSampleText}>{activeType.guide}</Text>
+        </View>
+
+        {/* Selected image preview before upload */}
+        {pickedUri ? (
+          <View style={styles.kycPreviewWrap}>
+            <Text style={styles.label}>{tx('নির্বাচিত ছবি (প্রিভিউ)', 'Selected image (preview)')}</Text>
+            <Image source={{ uri: pickedUri }} style={styles.kycPreviewImage} resizeMode="cover" />
+            <View style={styles.kycPreviewActions}>
+              <AppButton title={tx('আপলোড নিশ্চিত করুন', 'Confirm upload')} onPress={confirmUpload} />
+              <Text style={styles.otpResend} onPress={pick}>{tx('অন্য ছবি বেছে নিন', 'Choose another')}</Text>
+            </View>
+          </View>
+        ) : (
+          <>
+            <View style={{ height: 6 }} />
+            <AppButton title={tx('ছবি বেছে নিন', 'Select photo')} onPress={pick} />
+          </>
+        )}
+
+        {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+
+        <SectionTitle title={tx('আপলোড করা ডকুমেন্ট', 'Uploaded documents')} />
+        <Card style={{ marginHorizontal: 16 }}>
+          {docs.length === 0 ? (
+            <Text style={styles.menuSub}>{tx('এখনো কোনো ডকুমেন্ট আপলোড করা হয়নি।', 'No documents uploaded yet.')}</Text>
+          ) : (
+            docs.map((d) => (
+              <View key={String(d.id)} style={styles.kycDocRow}>
+                <Image source={{ uri: String(d.document_url) }} style={styles.kycDocThumb} />
+                <View style={styles.flex}>
+                  <Text style={styles.menuTitle}>{docTypes.find((t) => t.key === d.doc_type)?.label || humanizeLabel(d.doc_type)}</Text>
+                  <Text style={styles.menuSub}>{formatDate(d.created_at, lang)}</Text>
+                </View>
+                <Badge label={statusLabel(String(d.status))} tone={d.status === 'verified' ? 'green' : d.status === 'rejected' ? 'rose' : 'gold'} />
+              </View>
+            ))
+          )}
+        </Card>
+      </RefreshScroll>
+    </>
+  );
+}
+
+function FaqScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const faqs = useApiList<ApiRow>('faq');
+  const [open, setOpen] = useState<string | null>(null);
+  return (
+    <>
+      <Header title={tx('সাহায্য ও FAQ', 'Help & FAQ')} onBack={() => setScreen('profile')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        {faqs.loading ? <ApiStatus state={faqs} empty={tx('এখন কোনো প্রশ্ন পাওয়া যায়নি।', 'No FAQs available right now.')} /> : null}
+        {faqs.rows.map((row) => {
+          const id = String(row.id);
+          const question = localized(row, lang, 'question', String(row.question || row.question_en || ''));
+          const answer = localized(row, lang, 'answer', String(row.answer || row.answer_en || ''));
+          const isOpen = open === id;
+          return (
+            <Pressable key={id} onPress={() => setOpen(isOpen ? null : id)}>
+              <Card style={styles.faqCard}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Text style={[styles.faqQuestion, styles.flex]}>{question}</Text>
+                  <Text style={styles.chevron}>{isOpen ? '−' : '+'}</Text>
+                </View>
+                {isOpen ? <Text style={styles.faqAnswer}>{answer}</Text> : null}
+              </Card>
+            </Pressable>
+          );
+        })}
+      </RefreshScroll>
+    </>
+  );
+}
+
+function MarketUpdates({ setScreen, onSelect }: { setScreen: (screen: Screen) => void; onSelect: (id: string) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
+  const updates = useApiList<ApiRow>(`app/market-updates${district}`);
+  const rows = shouldUseFallback(updates) ? fallbackMarketUpdates : updates.rows;
+  return (
+    <>
+      <Header title={tx('বাজার আপডেট', 'Market Updates')} onBack={() => setScreen('home')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        {updates.loading ? <ApiStatus state={updates} empty={tx('এখন কোনো আপডেট নেই।', 'No updates right now.')} /> : null}
+        {rows.map((row, index) => {
+          const id = String(row.id ?? index);
+          const hasDetail = Number(row.has_detail ?? 0) === 1 || !!row.detail_en || !!row.detail_bn || !!row.image_url;
+          const area = [row.district, row.upazila].filter(Boolean).join(' · ');
+          return (
+            <Pressable key={id} onPress={() => hasDetail && onSelect(id)} style={({ pressed }) => [styles.marketCard, pressed && hasDetail && styles.pressed]}>
+              {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketCardImage} /> : null}
+              <View style={styles.marketCardBody}>
+                <View style={styles.marketCardTop}>
+                  <Badge label={humanizeLabel(row.category || row.update_type || 'update')} tone="gold" />
+                  {row.created_at ? <Text style={styles.menuSub}>{formatDate(row.created_at, lang)}</Text> : null}
+                </View>
+                <Text style={styles.marketCardTitle}>{rowTitle(row, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
+                <Text style={styles.marketCardSub} numberOfLines={2}>{rowBody(row, lang, '')}</Text>
+                {area ? <Text style={styles.menuSub}>⌖ {area}</Text> : null}
+                {hasDetail ? <Text style={styles.marketReadMore}>{tx('বিস্তারিত দেখুন ›', 'Read details ›')}</Text> : null}
+              </View>
+            </Pressable>
+          );
+        })}
+      </RefreshScroll>
+    </>
+  );
+}
+
+function MarketDetail({ setScreen, id }: { setScreen: (screen: Screen) => void; id: string | null }) {
+  const { tx, lang } = useLanguage();
+  const [row, setRow] = useState<ApiRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    if (!id) { setLoading(false); return; }
+    apiRequest<{ data?: ApiRow }>(`app/market-updates?id=${encodeURIComponent(id)}`)
+      .then((res) => { if (alive) { setRow(res.data ?? null); setLoading(false); } })
+      .catch(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [id]);
+
+  const detail = localized(row || undefined, lang, 'detail', '') || rowBody(row || undefined, lang, '');
+  const area = [row?.district, row?.upazila].filter(Boolean).join(' · ');
+  return (
+    <>
+      <Header title={tx('বাজার আপডেট', 'Market Update')} onBack={() => setScreen('marketUpdates')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        {loading ? <Text style={styles.apiNotice}>{tx('লোড হচ্ছে...', 'Loading...')}</Text> : null}
+        {!loading && !row ? <Text style={styles.apiNotice}>{tx('এই আপডেট পাওয়া যায়নি।', 'This update was not found.')}</Text> : null}
+        {row ? (
+          <>
+            {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketDetailImage} /> : null}
+            <View style={{ paddingHorizontal: 16, paddingTop: 14 }}>
+              <View style={styles.marketCardTop}>
+                <Badge label={humanizeLabel(row.category || row.update_type || 'update')} tone="gold" />
+                {row.created_at ? <Text style={styles.menuSub}>{formatDate(row.created_at, lang)}</Text> : null}
+              </View>
+              <Text style={styles.marketDetailTitle}>{rowTitle(row, lang, '')}</Text>
+              {area ? <Text style={styles.menuSub}>⌖ {area}</Text> : null}
+              <Text style={styles.marketDetailBody}>{detail || rowBody(row, lang, '')}</Text>
+            </View>
+          </>
+        ) : null}
+      </RefreshScroll>
+    </>
+  );
+}
+
+function OfficersScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
+  const officers = useApiList<ApiRow>(`community/officers${district}`);
+  const rows = shouldUseFallback(officers) ? fallbackOfficers : officers.rows;
+  return (
+    <>
+      <Header title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} onBack={() => setScreen('community')} />
+      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
+        <Text style={styles.pageHint}>{tx('আপনার এলাকার নিকটবর্তী কর্মকর্তাগণ।', 'Officers nearby in your area.')}</Text>
+        {officers.loading ? <ApiStatus state={officers} empty={tx('কোনো কর্মকর্তা পাওয়া যায়নি।', 'No officers found.')} /> : null}
+        <Card style={{ marginHorizontal: 16 }}>
+          {rows.map((officer, index) => (
+            <Officer
+              key={String(officer.id ?? index)}
+              name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))}
+              role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')}
+              action="☎"
+            />
+          ))}
+        </Card>
+      </RefreshScroll>
     </>
   );
 }
@@ -3945,6 +5078,72 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     elevation: 2,
   },
+  profileAvatarImage: { width: '100%', height: '100%' },
+  roleChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginTop: 10 },
+  roleChip: { backgroundColor: 'rgba(255,255,255,0.22)', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5 },
+  roleChipText: { color: 'white', fontSize: 12.5, fontWeight: '800' },
+  menuIconWrap: { width: 38, height: 38, borderRadius: 10, backgroundColor: '#FBEAF1', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  menuItemLast: { borderBottomWidth: 0 },
+  menuItemPressed: { backgroundColor: '#FAFAFA' },
+  logoutButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginHorizontal: 16, marginTop: 16, height: 52, borderRadius: 12, backgroundColor: '#FEF2F2', borderWidth: 1.5, borderColor: colors.danger },
+  logoutButtonIcon: { color: colors.danger, fontSize: 18, fontWeight: '900' },
+  logoutButtonText: { color: colors.danger, fontSize: 16, fontWeight: '800' },
+  dobRow: { flexDirection: 'row', gap: 8, marginHorizontal: 20, marginTop: 6 },
+  dropdownField: { height: 48, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  dropdownValue: { color: colors.ink, fontSize: 14, fontWeight: '600', flex: 1 },
+  dropdownCaret: { color: colors.muted, fontSize: 12, marginLeft: 6 },
+  dropdownBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center', padding: 32 },
+  dropdownCard: { width: '100%', maxHeight: 360, backgroundColor: 'white', borderRadius: 14, paddingVertical: 6 },
+  dropdownOption: { paddingVertical: 13, paddingHorizontal: 18, borderBottomWidth: 1, borderBottomColor: '#F1F1F1' },
+  dropdownOptionActive: { backgroundColor: '#FBEAF1' },
+  dropdownOptionText: { color: colors.ink, fontSize: 15 },
+  dropdownOptionTextActive: { color: colors.maroon, fontWeight: '800' },
+  menuFormScroll: { paddingBottom: 28 },
+  kycDocRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
+  kycDocThumb: { width: 44, height: 44, borderRadius: 8, backgroundColor: '#FBEAF1' },
+  kycChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 20, marginTop: 6 },
+  kycSampleBox: { marginHorizontal: 16, marginTop: 14, backgroundColor: '#FBF7F9', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  kycSampleFrame: { height: 150, borderRadius: 12, borderWidth: 2, borderStyle: 'dashed', borderColor: '#D9A8C0', alignItems: 'center', justifyContent: 'center', backgroundColor: 'white' },
+  kycSampleIcon: { fontSize: 54 },
+  kycSampleTag: { color: colors.maroon, fontSize: 12.5, fontWeight: '800', marginTop: 8 },
+  kycSampleText: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 10 },
+  kycPreviewWrap: { marginHorizontal: 16, marginTop: 14 },
+  kycPreviewImage: { width: '100%', height: 220, borderRadius: 12, borderWidth: 1, borderColor: colors.line, marginTop: 6 },
+  kycPreviewActions: { marginTop: 8 },
+  marketCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
+  marketCardImage: { width: '100%', height: 150 },
+  marketCardBody: { padding: 14 },
+  marketCardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  marketCardTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', lineHeight: 22 },
+  marketCardSub: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
+  marketReadMore: { color: colors.maroon, fontSize: 13, fontWeight: '700', marginTop: 8 },
+  marketDetailImage: { width: '100%', height: 220 },
+  marketDetailTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', lineHeight: 30, marginTop: 10 },
+  marketDetailBody: { color: colors.ink, fontSize: 15, lineHeight: 24, marginTop: 14 },
+  postImageIcon: { fontSize: 20, marginHorizontal: 6 },
+  postPreviewWrap: { marginHorizontal: 16, marginTop: 8, alignItems: 'flex-start' },
+  postPreview: { width: 120, height: 90, borderRadius: 10, borderWidth: 1, borderColor: colors.line },
+  postPreviewRemove: { color: colors.danger, fontSize: 12, fontWeight: '700', marginTop: 4 },
+  postImage: { width: '100%', height: 180, borderRadius: 10, marginTop: 8 },
+  officialCard: { borderColor: colors.maroon, borderWidth: 1.5, backgroundColor: '#FFF6FB' },
+  officialRibbon: { alignSelf: 'flex-start', backgroundColor: colors.maroon, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, marginBottom: 8 },
+  officialRibbonText: { color: 'white', fontSize: 11, fontWeight: '800' },
+  officialImage: { width: '100%', height: 160, borderRadius: 10, marginBottom: 8 },
+  faqCard: { marginHorizontal: 16, marginTop: 10, padding: 16 },
+  faqQuestion: { color: colors.ink, fontSize: 15, fontWeight: '700', lineHeight: 21 },
+  faqAnswer: { color: colors.muted, fontSize: 13.5, lineHeight: 20, marginTop: 8 },
+  loaderOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
+  loaderCard: { width: 76, height: 76, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.96)', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 8, borderWidth: 1, borderColor: colors.line },
+  otpResend: { color: colors.maroon, fontSize: 14, fontWeight: '700', textAlign: 'center', marginTop: 14 },
+  otpEditPhone: { color: colors.muted, fontSize: 13, textAlign: 'center', marginTop: 8 },
+  genderRow: { flexDirection: 'row', gap: 10, marginHorizontal: 20, marginTop: 6 },
+  genderPill: { flex: 1, height: 46, borderRadius: 10, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
+  genderPillActive: { borderColor: colors.maroon, backgroundColor: '#FBEAF1' },
+  genderPillText: { color: colors.ink, fontSize: 14, fontWeight: '600' },
+  genderPillTextActive: { color: colors.maroon, fontWeight: '800' },
+  avatarPick: { alignSelf: 'center', width: 96, height: 96, borderRadius: 48, backgroundColor: '#FBEAF1', alignItems: 'center', justifyContent: 'center', marginTop: 6, marginBottom: 4, overflow: 'hidden', borderWidth: 1, borderColor: colors.line },
+  avatarPickImage: { width: 96, height: 96 },
+  avatarPickIcon: { fontSize: 34, color: colors.maroon },
   loginCard: { marginHorizontal: 0, padding: 32, borderRadius: 18 },
   loginTitle: { color: colors.maroon, fontSize: 29, lineHeight: 36, fontWeight: '700', textAlign: 'center' },
   loginSub: { color: colors.muted, fontSize: 18, textAlign: 'center', marginBottom: 22 },
@@ -4165,6 +5364,7 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     padding: 14,
   },
+  serviceCardFull: { width: '100%' },
   serviceIcon: { width: 44, height: 44, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
   serviceIconText: { color: colors.maroon, fontSize: 22, fontWeight: '700' },
   serviceTitle: { color: colors.ink, fontSize: 15, lineHeight: 19, fontWeight: '700', flexShrink: 1 },
@@ -4203,19 +5403,28 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    height: 72 + androidNavigationInset,
+    paddingTop: 8,
+    paddingBottom: 8 + androidNavigationInset,
     backgroundColor: colors.maroon,
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingBottom: androidNavigationInset,
-    borderTopLeftRadius: 2,
-    borderTopRightRadius: 2,
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    paddingHorizontal: 6,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: -3 },
+    elevation: 12,
   },
-  navItem: { alignItems: 'center', justifyContent: 'center', width: 72, height: 54, borderRadius: 13 },
-  navItemActive: { backgroundColor: '#74113F' },
-  navIcon: { color: 'white', fontSize: 24 },
-  navLabel: { color: 'white', fontSize: 13, marginTop: 1, fontWeight: '700' },
+  navItem: { flex: 1, alignItems: 'center', justifyContent: 'flex-start', paddingVertical: 2 },
+  navIconWrap: { width: 46, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
+  navIconWrapActive: { backgroundColor: 'rgba(255,255,255,0.18)' },
+  navIcon: { color: 'rgba(255,255,255,0.75)', fontSize: 22 },
+  navIconActive: { color: 'white' },
+  navLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11.5, fontWeight: '700' },
+  navLabelActive: { color: 'white' },
   weatherHero: {
     margin: 16,
     borderRadius: 18,
