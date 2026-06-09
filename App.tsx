@@ -5,7 +5,7 @@ import * as Location from 'expo-location';
 import { Audio } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { GoogleGenAI, MediaResolution } from '@google/genai';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import YoutubePlayer from 'react-native-youtube-iframe';
 import {
   ActivityIndicator,
@@ -32,6 +32,7 @@ type MainTab = 'home' | 'community' | 'projects' | 'profile';
 type Lang = 'bn' | 'en';
 type Screen =
   | 'onboarding'
+  | 'gpsGrant'
   | 'shathiApa'
   | 'apaVoice'
   | 'apaCamera'
@@ -51,6 +52,7 @@ type Screen =
   | 'saleCategories'
   | 'livestock'
   | 'cattleForm'
+  | 'cattleMeasure'
   | 'cattlePrice'
   | 'cattleDone'
   | 'buyCategories'
@@ -124,6 +126,38 @@ type TrainingModule = {
 };
 type ApiRow = Record<string, any>;
 type ApiState<T> = { rows: T[]; loading: boolean; error: string | null };
+// Draft for the livestock "List for Sale" flow (form -> measure -> price).
+type ListingDraft = {
+  animalId: string | null;
+  animalName: string;
+  species: string | null;
+  breedId: string | null;
+  breedName: string;
+  ageMonths: string;
+  weightKg: string;
+  quantity: string;
+  images: string[];
+  divisionId: string | null;
+  divisionName: string;
+  districtId: string | null;
+  districtName: string;
+  thanaId: string | null;
+  thanaName: string;
+  contactName: string;
+  contactPhone: string;
+  addressText: string;
+  measure: { girth: string; length: string; height: string; weightKg: number } | null;
+};
+function makeListingDraft(): ListingDraft {
+  return {
+    animalId: null, animalName: '', species: null,
+    breedId: null, breedName: '',
+    ageMonths: '24', weightKg: '', quantity: '1', images: [],
+    divisionId: null, divisionName: '', districtId: null, districtName: '',
+    thanaId: null, thanaName: '',
+    contactName: '', contactPhone: '', addressText: '', measure: null,
+  };
+}
 type WeatherApiState = { data: ApiRow | null; loading: boolean; error: string | null; usingFallback: boolean };
 type LocationState = {
   query: string;
@@ -132,6 +166,9 @@ type LocationState = {
   granted: boolean;
   error: string | null;
   fallback: boolean;
+  latitude?: number | null;
+  longitude?: number | null;
+  detected?: { division?: string; district?: string; thana?: string } | null;
 };
 
 const preferenceOrder: PreferenceKey[] = ['cattle', 'crops', 'fishery', 'vegetables', 'fruits'];
@@ -210,6 +247,29 @@ function humanizeLabel(value: unknown) {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Bilingual labels for backend enum values (status / step / type) so bn mode
+// never shows raw English tokens.
+const ENUM_LABELS: Record<string, [string, string]> = {
+  draft: ['খসড়া', 'Draft'], submitted: ['জমা হয়েছে', 'Submitted'], needs_document: ['ডকুমেন্ট দরকার', 'Needs document'],
+  officer_verification: ['কর্মকর্তা যাচাই', 'Officer verification'], ready_to_approve: ['অনুমোদনের অপেক্ষায়', 'Ready to approve'],
+  approved: ['অনুমোদিত', 'Approved'], rejected: ['বাতিল', 'Rejected'], pending: ['অপেক্ষমাণ', 'Pending'],
+  project_selection: ['প্রকল্প নির্বাচন', 'Project selection'], personal_kyc: ['ব্যক্তিগত KYC', 'Personal KYC'],
+  banking_info: ['ব্যাংকিং তথ্য', 'Banking info'], farm_assessment: ['খামার মূল্যায়ন', 'Farm assessment'],
+  field_verification: ['মাঠ যাচাই', 'Field verification'], approval: ['অনুমোদন', 'Approval'],
+  open: ['চলমান', 'Open'], opening_soon: ['শীঘ্রই', 'Soon'], closed: ['বন্ধ', 'Closed'], completed: ['সম্পন্ন', 'Completed'],
+  price: ['দর', 'Price'], stock: ['স্টক', 'Stock'], training: ['প্রশিক্ষণ', 'Training'], notice: ['নোটিশ', 'Notice'], weather: ['আবহাওয়া', 'Weather'],
+  active: ['সক্রিয়', 'Active'], sold: ['বিক্রিত', 'Sold'], cancelled: ['বাতিল', 'Cancelled'],
+  livestock: ['গবাদিপশু', 'Livestock'], poultry: ['পোল্ট্রি', 'Poultry'], crops: ['ফসল', 'Crops'],
+  fishery: ['মৎস্য', 'Fishery'], vegetables: ['সবজি', 'Vegetables'], fruits: ['ফল', 'Fruits'],
+  field_officer: ['মাঠ কর্মকর্তা', 'Field officer'], ho_query_officer: ['এইচও কর্মকর্তা', 'HO officer'], community_officer: ['কমিউনিটি কর্মকর্তা', 'Community officer'],
+  question: ['প্রশ্ন', 'Question'], update: ['আপডেট', 'Update'], general: ['সাধারণ', 'General'], complaint: ['অভিযোগ', 'Complaint'], crop: ['ফসল', 'Crop'],
+};
+function tEnum(value: unknown, lang: Lang) {
+  const key = String(value ?? '').toLowerCase().trim();
+  const pair = ENUM_LABELS[key];
+  return pair ? (lang === 'bn' ? pair[0] : pair[1]) : humanizeLabel(value);
+}
+
 function amount(value: number, lang: Lang) {
   const formatted = Math.round(value).toLocaleString('en-IN');
   return lang === 'bn' ? `৳${bn(formatted)}` : `৳${formatted}`;
@@ -237,6 +297,10 @@ type AuthUser = {
   profile_image_url?: string | null;
   status?: string | null;
   roles?: AppRole[];
+  division?: string | null;
+  is_kyc_verified?: boolean;
+  nid_number?: string | null;
+  preferences?: { categories?: string[]; items?: Record<string, string[]> } | null;
   needs_personal_info?: boolean;
   needs_preferences?: boolean;
 };
@@ -275,6 +339,11 @@ function routeAfterAuth(user: AuthUser): Screen {
 
 function naturalApiError(error: unknown, lang: Lang) {
   const message = error instanceof Error ? error.message : String(error);
+  if (/^TIMEOUT|timed out|took too long/i.test(message)) {
+    return lang === 'bn'
+      ? 'সার্ভার সাড়া দিতে দেরি করছে। ইন্টারনেট সংযোগ দেখে আবার চেষ্টা করুন।'
+      : 'The server is taking too long to respond. Check your connection and try again.';
+  }
   if (/network request failed|failed to fetch|load failed/i.test(message)) {
     return lang === 'bn'
       ? 'এখন সার্ভার থেকে তথ্য আনা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।'
@@ -388,8 +457,12 @@ function RefreshScroll({ children, style, contentContainerStyle }: { children: R
   );
 }
 
+const REQUEST_TIMEOUT_MS = 15000;
+
 async function apiRequest<T = any>(resource: string, options?: RequestInit): Promise<T> {
   loadingStore.begin();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(apiUrl(resource), {
       headers: {
@@ -397,6 +470,7 @@ async function apiRequest<T = any>(resource: string, options?: RequestInit): Pro
         'Content-Type': 'application/json',
         ...(options?.headers || {}),
       },
+      signal: controller.signal,
       ...options,
     });
     const json = await response.json().catch(() => ({}));
@@ -404,7 +478,14 @@ async function apiRequest<T = any>(resource: string, options?: RequestInit): Pro
       throw new Error(json.message || `Server responded with ${response.status}`);
     }
     return json as T;
+  } catch (error) {
+    // Normalise an aborted (timed-out) request into a friendly timeout error.
+    if (error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))) {
+      throw new Error('TIMEOUT: request took too long');
+    }
+    throw error;
   } finally {
+    clearTimeout(timer);
     loadingStore.end();
   }
 }
@@ -478,6 +559,55 @@ function useApiList<T = ApiRow>(resource: string): ApiState<T> {
     };
   }, [resource, lang, refreshTick]);
   return state;
+}
+
+// Onboarding interest tree (roots + children) from the backend — drives the
+// DB-backed preference selection screens.
+function useOnboardingTree() {
+  const refreshTick = useRefreshTick();
+  const [state, setState] = useState<{ roots: ApiRow[]; loading: boolean }>({ roots: [], loading: true });
+  useEffect(() => {
+    let alive = true;
+    setState((s) => ({ ...s, loading: true }));
+    apiRequest<{ data?: ApiRow[] }>('app/onboarding')
+      .then((j) => { if (alive) setState({ roots: j.data ?? [], loading: false }); })
+      .catch(() => { if (alive) setState({ roots: [], loading: false }); });
+    return () => { alive = false; };
+  }, [refreshTick]);
+  return state;
+}
+
+const PREF_ROOT_SLUG: Record<PreferenceKey, string> = {
+  cattle: 'livestock-poultry',
+  crops: 'crops',
+  fishery: 'fishery',
+  vegetables: 'vegetables',
+  fruits: 'fruits',
+};
+
+function safeEmoji(emoji: unknown, fallback: string) {
+  const e = typeof emoji === 'string' ? emoji : '';
+  return e && !e.includes('?') ? e : fallback;
+}
+
+// Builds the PreferenceSetupStep sections for a root slug from the onboarding
+// tree, grouping children by step_group (e.g. livestock vs poultry).
+function prefSectionsForRoot(roots: ApiRow[], rootSlug: string, lang: Lang, fallbackIcon: string): PreferenceSection[] {
+  const root = roots.find((r) => String(r.slug) === rootSlug);
+  const children = (root?.children ?? []) as ApiRow[];
+  if (!children.length) return [];
+  const groups = new Map<string, PreferenceOption[]>();
+  for (const c of children) {
+    const key = String(c.step_group || rootSlug);
+    const opt: PreferenceOption = {
+      id: String(c.slug),
+      icon: safeEmoji(c.emoji, fallbackIcon),
+      label: rowTitle(c, lang, c.name_en || c.name_bn || 'Item'),
+    };
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(opt);
+  }
+  return Array.from(groups.entries()).map(([g, items]) => ({ title: tEnum(g, lang), items }));
 }
 
 function useAppHome(userId?: string | null) {
@@ -655,13 +785,31 @@ function rowBody(row: ApiRow | undefined, lang: Lang, fallback = '') {
 function ApiStatus({ state, empty }: { state: ApiState<any>; empty?: string }) {
   const { tx } = useLanguage();
   if (state.loading) {
-    return <Text style={styles.apiNotice}>{tx('সার্ভার থেকে তথ্য আনা হচ্ছে...', 'Loading latest data from server...')}</Text>;
+    return (
+      <View style={styles.statusLoading}>
+        <ActivityIndicator color={colors.maroon} />
+        <Text style={styles.statusLoadingText}>{tx('সার্ভার থেকে তথ্য আনা হচ্ছে...', 'Loading latest data…')}</Text>
+      </View>
+    );
   }
   if (state.error) {
-    return <Text style={styles.apiNotice}>{state.error}</Text>;
+    return (
+      <View style={styles.statusError}>
+        <Text style={styles.statusErrorIcon}>⚠️</Text>
+        <Text style={styles.statusErrorTitle}>{tx('তথ্য আনা যায়নি', 'Could not load data')}</Text>
+        <Text style={styles.statusErrorText}>{state.error}</Text>
+        <Pressable onPress={() => refreshStore.trigger()} style={({ pressed }) => [styles.statusRetryBtn, pressed && styles.pressed]}>
+          <Text style={styles.statusRetryText}>↻ {tx('আবার চেষ্টা করুন', 'Retry')}</Text>
+        </Pressable>
+      </View>
+    );
   }
   if (!state.rows.length && empty) {
-    return <Text style={styles.apiNotice}>{empty}</Text>;
+    return (
+      <View style={styles.statusEmpty}>
+        <Text style={styles.statusEmptyText}>{empty}</Text>
+      </View>
+    );
   }
   return null;
 }
@@ -1239,16 +1387,18 @@ function Tile({
   subtitle,
   onPress,
   selected,
+  dimmed,
 }: {
   icon: string;
   title: string;
   subtitle?: string;
   onPress: () => void;
   selected?: boolean;
+  dimmed?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.tile, selected && styles.tileSelected, pressed && styles.pressed]}>
-      <Text style={styles.tileIcon}>{icon}</Text>
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.tile, selected && styles.tileSelected, dimmed && styles.tileDimmed, pressed && styles.pressed]}>
+      <Text style={[styles.tileIcon, dimmed && styles.tileIconDimmed]}>{icon}</Text>
       <Text style={styles.tileTitle}>{title}</Text>
       {subtitle ? <Text style={styles.tileSub}>{subtitle}</Text> : null}
     </Pressable>
@@ -1272,10 +1422,8 @@ function Shell({
   const tabs: Array<{ id: MainTab; label: string; icon: keyof typeof Ionicons.glyphMap; screen: Screen }> = [
     { id: 'home', label: tx('হোম', 'Home'), icon: 'home', screen: 'home' },
     { id: 'community', label: tx('কমিউনিটি', 'Community'), icon: 'people', screen: 'community' },
-    // Shathi Partner project tracking is field-officer only.
-    ...(hasRole(user, 'field_officer')
-      ? [{ id: 'projects' as MainTab, label: tx('প্রকল্প', 'Projects'), icon: 'briefcase' as keyof typeof Ionicons.glyphMap, screen: 'projects' as Screen }]
-      : []),
+    // Shathi Partner projects: area projects + the user's own enrolled projects.
+    { id: 'projects' as MainTab, label: tx('প্রকল্প', 'Projects'), icon: 'briefcase' as keyof typeof Ionicons.glyphMap, screen: 'projects' as Screen },
     { id: 'profile', label: tx('মেনু', 'Menu'), icon: 'grid', screen: 'profile' },
   ];
 
@@ -1321,6 +1469,43 @@ function Shell({
   );
 }
 
+// Full-screen crash fallback so a render error never leaves a blank screen.
+function CrashScreen({ message, onRetry, onHome }: { message: string; onRetry: () => void; onHome?: () => void }) {
+  return (
+    <View style={styles.crashScreen}>
+      <View style={styles.crashCard}>
+        <Text style={styles.crashIcon}>😕</Text>
+        <Text style={styles.crashTitle}>কিছু একটা সমস্যা হয়েছে</Text>
+        <Text style={styles.crashTitleEn}>Something went wrong</Text>
+        <Text style={styles.crashMsg}>{message || 'Unexpected error'}</Text>
+        <Pressable onPress={onRetry} style={({ pressed }) => [styles.crashBtn, pressed && styles.pressed]}>
+          <Text style={styles.crashBtnText}>↻ আবার চেষ্টা করুন / Try again</Text>
+        </Pressable>
+        {onHome ? (
+          <Pressable onPress={onHome} style={({ pressed }) => [styles.crashBtnOutline, pressed && styles.pressed]}>
+            <Text style={styles.crashBtnOutlineText}>হোমে ফিরুন / Go home</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+class ErrorBoundary extends Component<{ children: React.ReactNode; onHome?: () => void }, { hasError: boolean; message: string }> {
+  state = { hasError: false, message: '' };
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, message: error?.message ? String(error.message) : 'Unexpected error' };
+  }
+  componentDidCatch() { /* could log to a service here */ }
+  reset = () => this.setState({ hasError: false, message: '' });
+  render() {
+    if (this.state.hasError) {
+      return <CrashScreen message={this.state.message} onRetry={this.reset} onHome={this.props.onHome ? () => { this.reset(); this.props.onHome?.(); } : undefined} />;
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('onboarding');
   const [onboarding, setOnboarding] = useState(0);
@@ -1328,6 +1513,9 @@ export default function App() {
   const [qty, setQty] = useState(2);
   const [lang, setLang] = useState<Lang>('bn');
   const [cattleImage, setCattleImage] = useState<string | null>(null);
+  const [listingDraft, setListingDraft] = useState<ListingDraft>(makeListingDraft);
+  const patchDraft = (p: Partial<ListingDraft>) => setListingDraft((d) => ({ ...d, ...p }));
+  const prefsSeeded = useRef(false);
   const [selectedPreferenceCategories, setSelectedPreferenceCategories] = useState<PreferenceKey[]>(['cattle']);
   const [livestockPrefs, setLivestockPrefs] = useState<string[]>(['cow']);
   const [cropPrefs, setCropPrefs] = useState<string[]>(['rice']);
@@ -1345,6 +1533,8 @@ export default function App() {
   const [latestOrder, setLatestOrder] = useState<ApiRow | null>(null);
   const [latestListing, setLatestListing] = useState<ApiRow | null>(null);
   const [latestApplication, setLatestApplication] = useState<ApiRow | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [projectsInitialTab, setProjectsInitialTab] = useState<'all' | 'area' | 'mine'>('area');
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
   const [appLocation, setAppLocation] = useState<LocationState>({
     query: WEATHERAPI_LOCATION,
@@ -1415,9 +1605,9 @@ export default function App() {
     [authUser, authToken],
   );
 
-  useEffect(() => {
+  const refreshLocation = useCallback(async () => {
     let alive = true;
-    async function requestLocation() {
+    {
       try {
         const permission = await Location.requestForegroundPermissionsAsync();
         if (!alive) return;
@@ -1435,13 +1625,32 @@ export default function App() {
         const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         if (!alive) return;
         const { latitude, longitude } = position.coords;
+        // Reverse geocode to pre-fill the user's Division / District / Thana.
+        let detected: { division?: string; district?: string; thana?: string } | null = null;
+        try {
+          const places = await Location.reverseGeocodeAsync({ latitude, longitude });
+          const place = places[0];
+          if (place) {
+            detected = {
+              division: (place.region || undefined) as string | undefined,
+              district: (place.subregion || place.city || undefined) as string | undefined,
+              thana: (place.district || place.city || place.name || undefined) as string | undefined,
+            };
+          }
+        } catch {
+          // reverse geocode is best-effort; user can still pick manually
+        }
+        if (!alive) return;
         setAppLocation({
           query: `${latitude},${longitude}`,
-          label: `${latitude.toFixed(3)}, ${longitude.toFixed(3)}`,
+          label: detected?.district ? `${detected.thana ? detected.thana + ', ' : ''}${detected.district}` : `${latitude.toFixed(3)}, ${longitude.toFixed(3)}`,
           loading: false,
           granted: true,
           error: null,
           fallback: false,
+          latitude,
+          longitude,
+          detected,
         });
       } catch (error) {
         if (!alive) return;
@@ -1455,11 +1664,11 @@ export default function App() {
         });
       }
     }
-    requestLocation();
-    return () => {
-      alive = false;
-    };
   }, [lang]);
+
+  useEffect(() => {
+    void refreshLocation();
+  }, [refreshLocation]);
 
 async function sendApaMessage(text: string) {
     const trimmed = text.trim();
@@ -1522,6 +1731,23 @@ async function sendApaMessage(text: string) {
   }
 
   const go = (next: Screen) => setScreen(next);
+  // Seed preference selections from the DB-saved snapshot once it loads (so the
+  // selection lives in the database, not only on the phone).
+  useEffect(() => {
+    const prefs = authUser?.preferences;
+    if (prefsSeeded.current || !prefs) return;
+    prefsSeeded.current = true;
+    if (Array.isArray(prefs.categories) && prefs.categories.length) {
+      setSelectedPreferenceCategories(prefs.categories.filter((k): k is PreferenceKey => preferenceOrder.includes(k as PreferenceKey)));
+    }
+    const it = prefs.items || {};
+    if (Array.isArray(it.livestock)) setLivestockPrefs(it.livestock);
+    if (Array.isArray(it.crops)) setCropPrefs(it.crops);
+    if (Array.isArray(it.fishery)) setFishPrefs(it.fishery);
+    if (Array.isArray(it.vegetables)) setVegetablePrefs(it.vegetables);
+    if (Array.isArray(it.fruits)) setFruitPrefs(it.fruits);
+  }, [authUser?.preferences]);
+
   const persistPreferences = async () => {
     if (!authUser?.id) return;
     const selection = [
@@ -1608,10 +1834,11 @@ async function sendApaMessage(text: string) {
       onboarding: (
         <Onboarding
           step={onboarding}
-          onNext={() => (onboarding === 0 ? setOnboarding(1) : go('login'))}
+          onNext={() => (onboarding === 0 ? setOnboarding(1) : go('gpsGrant'))}
           onBack={() => setOnboarding(0)}
         />
       ),
+      gpsGrant: <GpsGrant onContinue={() => go('login')} refreshLocation={refreshLocation} />,
       shathiApa: <ShathiApa setScreen={go} messages={apaMessages} busy={apaBusy} onAsk={sendApaMessage} setDraftSuggestion={setApaDraftSuggestion} />,
       apaVoice: <ApaVoice setScreen={go} />,
       apaCamera: <ApaCamera setScreen={go} />,
@@ -1684,10 +1911,10 @@ async function sendApaMessage(text: string) {
           isFinal
         />
       ),
-      home: <Home setScreen={go} />,
+      home: <Home setScreen={go} openProjects={(t) => { setProjectsInitialTab(t); go('projects'); }} />,
       weather: <WeatherPage setScreen={go} />,
       community: <Community setScreen={go} />,
-      projects: <Projects setScreen={go} />,
+      projects: <Projects setScreen={go} initialTab={projectsInitialTab} onApply={(id) => { setSelectedProjectId(id); go('kyc'); }} />,
       profile: <Profile setScreen={go} />,
       menuPersonal: <PersonalInfo onDone={() => go('profile')} />,
       menuBanking: <BankingScreen setScreen={go} />,
@@ -1699,8 +1926,9 @@ async function sendApaMessage(text: string) {
       officers: <OfficersScreen setScreen={go} />,
       saleCategories: <SaleCategories setScreen={go} />,
       livestock: <Livestock setScreen={go} />,
-      cattleForm: <CattleForm setScreen={go} weight={weight} setWeight={setWeight} imageUri={cattleImage} setImageUri={setCattleImage} />,
-      cattlePrice: <CattlePrice setScreen={go} weight={weight} setWeight={setWeight} onSubmitted={setLatestListing} />,
+      cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
+      cattleMeasure: <CattleMeasure setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
+      cattlePrice: <CattlePrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
       cattleDone: <CattleDone setScreen={go} listing={latestListing} />,
       buyCategories: <BuyCategories setScreen={go} />,
       buyProducts: <BuyProducts setScreen={go} onSelectProduct={setSelectedProduct} />,
@@ -1719,13 +1947,13 @@ async function sendApaMessage(text: string) {
       trainingVideo: <TrainingVideoScreen contentId={learnContentId} setScreen={go} />,
       trainingQuiz: <TrainingQuiz contentId={learnContentId} setScreen={go} />,
       partnerRegister: <PartnerRegister setScreen={go} />,
-      kyc: <Kyc setScreen={go} onSubmitted={setLatestApplication} />,
+      kyc: <Kyc setScreen={go} projectId={selectedProjectId} onSubmitted={setLatestApplication} />,
       regDone: <RegDone setScreen={go} application={latestApplication} />,
       inactive: <Inactive setScreen={go} />,
     };
 
     return routes[screen];
-  }, [screen, onboarding, weight, qty, cattleImage, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication, authUser, selectedMarketId]);
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication, selectedProjectId, projectsInitialTab, authUser, selectedMarketId]);
 
   const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
@@ -1747,11 +1975,11 @@ async function sendApaMessage(text: string) {
           />
           {authScreens.includes(screen) ? (
             <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-              {content}
+              <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
             </KeyboardAvoidingView>
           ) : (
             <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaInputBar onAsk={sendApaMessage} onImage={sendApaImage} onVoice={sendApaVoice} busy={apaBusy} draftSuggestion={apaDraftSuggestion} clearDraftSuggestion={() => setApaDraftSuggestion('')} /> : undefined}>
-              {content}
+              <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
             </Shell>
           )}
           <GlobalLoader />
@@ -1818,6 +2046,23 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [hint, setHint] = useState('');
+  const [resendIn, setResendIn] = useState(0); // seconds until "Resend" is allowed
+  const [expiresIn, setExpiresIn] = useState(0); // seconds until the OTP expires
+
+  // Tick the resend + expiry countdowns once per second while on the OTP step.
+  useEffect(() => {
+    if (step !== 'otp') return;
+    const timer = setInterval(() => {
+      setResendIn((s) => (s > 0 ? s - 1 : 0));
+      setExpiresIn((s) => (s > 0 ? s - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [step]);
+
+  const fmtTime = (s: number) => {
+    const t = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    return lang === 'bn' ? bn(t) : t;
+  };
 
   async function sendCode() {
     const phoneValue = phone.trim();
@@ -1833,6 +2078,8 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
         body: JSON.stringify({ phone: phoneValue }),
       });
       setStep('otp');
+      setResendIn(60);
+      setExpiresIn(300);
       if (response.result?.dev_otp) {
         setHint(tx(`টেস্ট কোড: ${response.result.dev_otp}`, `Test code: ${response.result.dev_otp}`));
       }
@@ -1902,9 +2149,18 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
               placeholderTextColor={colors.muted}
             />
             {hint ? <Text style={styles.otpEditPhone}>{hint}</Text> : null}
+            {expiresIn > 0 ? (
+              <Text style={styles.otpTimer}>⏳ {tx('কোডের মেয়াদ', 'Code expires in')} {fmtTime(expiresIn)}</Text>
+            ) : (
+              <Text style={styles.otpExpired}>{tx('কোডের মেয়াদ শেষ — আবার পাঠান', 'Code expired — please resend')}</Text>
+            )}
             {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
             <AppButton title={tx('যাচাই করুন', 'Verify')} onPress={verify} />
-            <Text style={styles.otpResend} onPress={sendCode}>{tx('কোড আবার পাঠান', 'Resend code')}</Text>
+            {resendIn > 0 ? (
+              <Text style={styles.otpResendWait}>{tx('আবার পাঠানো যাবে', 'Resend available in')} {fmtTime(resendIn)}</Text>
+            ) : (
+              <Text style={styles.otpResend} onPress={sendCode}>{tx('কোড আবার পাঠান', 'Resend code')}</Text>
+            )}
             <Text
               style={styles.otpEditPhone}
               onPress={() => {
@@ -1912,6 +2168,8 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
                 setCode('');
                 setError('');
                 setHint('');
+                setResendIn(0);
+                setExpiresIn(0);
               }}
             >
               {tx('নম্বর পরিবর্তন করুন', 'Change number')}
@@ -1919,6 +2177,64 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
           </>
         )}
       </Card>
+    </View>
+  );
+}
+
+function GpsGrant({ onContinue, refreshLocation }: { onContinue: () => void; refreshLocation: () => Promise<void> }) {
+  const { tx } = useLanguage();
+  const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(true);
+  // Conditional: if location is already granted, skip this screen entirely.
+  // Only shown when access has not been granted yet.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const perm = await Location.getForegroundPermissionsAsync();
+        if (!alive) return;
+        if (perm.status === 'granted') { onContinue(); return; }
+      } catch { /* fall through to prompt */ }
+      if (alive) setChecking(false);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  async function allow() {
+    setBusy(true);
+    try { await refreshLocation(); } catch { /* ignore */ } finally { setBusy(false); onContinue(); }
+  }
+  if (checking) {
+    return <View style={[styles.gpsScreen, { justifyContent: 'center' }]}><ActivityIndicator color={colors.maroon} size="large" /></View>;
+  }
+  const points: Array<[string, string]> = [
+    ['🏷️', tx('এলাকাভিত্তিক প্রকল্প ও বাজারদর', 'Area-based projects & market rates')],
+    ['🌦️', tx('আপনার এলাকার আবহাওয়া', 'Weather for your exact area')],
+    ['🚚', tx('দ্রুত মাঠ পরিদর্শন ও পেমেন্ট', 'Faster field visits & payment')],
+  ];
+  return (
+    <View style={styles.gpsScreen}>
+      <View style={styles.prefLangCenter}><LangToggle subtle /></View>
+      <View style={styles.gpsHero}>
+        <View style={styles.gpsHeroCircle}><Text style={styles.gpsHeroEmoji}>📍</Text></View>
+        <Text style={styles.gpsTitle}>{tx('আপনার এলাকা চিনে নিই', 'Let us find your area')}</Text>
+        <Text style={styles.gpsSub}>{tx('লোকেশন অনুমতি দিলে আমরা আপনার বিভাগ, জেলা ও থানা অনুযায়ী প্রকল্প, বাজারদর ও আবহাওয়া দেখাতে পারব।', 'Allow location and we will tailor projects, market rates and weather to your division, district and thana.')}</Text>
+        <View style={styles.gpsPoints}>
+          {points.map(([icon, text]) => (
+            <View key={text} style={styles.gpsPoint}>
+              <Text style={styles.gpsPointIcon}>{icon}</Text>
+              <Text style={styles.gpsPointText}>{text}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+      <View style={styles.gpsBottom}>
+        <AppButton title={busy ? tx('অনুমতি নেওয়া হচ্ছে...', 'Requesting permission...') : tx('লোকেশন অনুমতি দিন', 'Allow location access')} onPress={allow} disabled={busy} />
+        <Pressable onPress={onContinue} style={({ pressed }) => [styles.gpsSkipBtn, pressed && styles.pressed]}>
+          <Text style={styles.gpsSkipText}>{tx('এখন না, পরে দেব', 'Not now')}</Text>
+        </Pressable>
+        <Text style={styles.gpsPrivacy}>🔒 {tx('আমরা শুধু আপনার এলাকা নির্ধারণে এটি ব্যবহার করি।', 'We only use this to set your area — never shared.')}</Text>
+      </View>
     </View>
   );
 }
@@ -1936,6 +2252,44 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
   const [imageUri, setImageUri] = useState<string | null>(user?.profile_image_url ?? null);
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(user?.profile_image_url ?? null);
   const [error, setError] = useState('');
+
+  // Region: Division -> District -> Thana, cascading from the geo API.
+  const appLocation = useAppLocation();
+  const divisions = useApiList<ApiRow>('geo/divisions');
+  const [divId, setDivId] = useState<string | null>(null);
+  const [divName, setDivName] = useState(user?.division ?? '');
+  const districts = useApiList<ApiRow>(divId ? `geo/districts?division_id=${divId}` : 'geo/districts');
+  const [distId, setDistId] = useState<string | null>(null);
+  const [distName, setDistName] = useState(user?.district ?? '');
+  const upazilas = useApiList<ApiRow>(distId ? `geo/upazilas?district_id=${distId}` : 'geo/upazilas');
+  const [thaId, setThaId] = useState<string | null>(null);
+  const [thaName, setThaName] = useState(user?.upazila ?? '');
+  const [gpsNote, setGpsNote] = useState('');
+
+  const matchByName = (rows: ApiRow[], name?: string) => {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return undefined;
+    return rows.find((r) => String(r.name_en).toLowerCase() === n) || rows.find((r) => String(r.name_en).toLowerCase().includes(n) || n.includes(String(r.name_en).toLowerCase()));
+  };
+  // Resolve saved names -> ids once each geo list loads (keeps the cascade in sync).
+  useEffect(() => { if (!divId && divName && divisions.rows.length) { const r = matchByName(divisions.rows, divName); if (r) setDivId(String(r.id)); } /* eslint-disable-next-line */ }, [divisions.rows.length]);
+  useEffect(() => { if (!distId && distName && districts.rows.length) { const r = matchByName(districts.rows, distName); if (r) setDistId(String(r.id)); } /* eslint-disable-next-line */ }, [districts.rows.length]);
+  useEffect(() => { if (!thaId && thaName && upazilas.rows.length) { const r = matchByName(upazilas.rows, thaName); if (r) setThaId(String(r.id)); } /* eslint-disable-next-line */ }, [upazilas.rows.length]);
+
+  function useGpsLocation() {
+    const d = appLocation.detected;
+    if (!appLocation.granted || !d) {
+      setGpsNote(tx('GPS লোকেশন পাওয়া যায়নি — হাতে নির্বাচন করুন।', 'GPS location not available — please select manually.'));
+      return;
+    }
+    const dv = matchByName(divisions.rows, d.division);
+    if (dv) { setDivId(String(dv.id)); setDivName(String(dv.name_en)); }
+    // district/thana match resolves after the dependent lists load; store names now.
+    if (d.district) setDistName(d.district);
+    if (d.thana) setThaName(d.thana);
+    setDistId(null); setThaId(null);
+    setGpsNote(tx('GPS থেকে এলাকা পূরণ করা হয়েছে — প্রয়োজনে বদলান।', 'Filled region from GPS — adjust if needed.'));
+  }
 
   const genders: Array<{ key: string; label: string }> = [
     { key: 'male', label: tx('পুরুষ', 'Male') },
@@ -1967,6 +2321,10 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
       setError(tx('লিঙ্গ নির্বাচন করুন।', 'Please select your gender.'));
       return;
     }
+    if (!divName) {
+      setError(tx('অন্তত আপনার বিভাগ নির্বাচন করুন।', 'Please select at least your division.'));
+      return;
+    }
     setError('');
     try {
       const response = await apiRequest<{ result?: { user: AuthUser } }>('app/profile', {
@@ -1977,6 +2335,11 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
           gender,
           date_of_birth: dobYear && dobMonth && dobDay ? `${dobYear}-${dobMonth}-${dobDay}` : null,
           profile_image_url: uploadedUrl || undefined,
+          division: divName || undefined,
+          district: distName || undefined,
+          upazila: thaName || undefined,
+          latitude: appLocation.latitude ?? undefined,
+          longitude: appLocation.longitude ?? undefined,
         }),
       });
       if (response.result?.user) await updateUser(response.result.user);
@@ -2030,6 +2393,42 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
             onSelect={setDobYear}
             options={Array.from({ length: 75 }, (_, i) => { const y = new Date().getFullYear() - 10 - i; return { value: String(y), label: num(y, lang) }; })}
           />
+        </View>
+
+        <View style={styles.regionCard}>
+          <View style={styles.regionHead}>
+            <Text style={styles.regionTitle}>📍 {tx('আপনার এলাকা', 'Your location')} <Text style={styles.reqStar}>*</Text></Text>
+            <Pressable onPress={useGpsLocation} style={({ pressed }) => [styles.gpsBtn, pressed && styles.pressed]}>
+              <Text style={styles.gpsBtnText}>⌖ {tx('GPS দিয়ে পূরণ', 'Use GPS')}</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.regionHint}>{tx('প্রকল্প ও বাজারদর আপনার এলাকা অনুযায়ী দেখাতে এটি প্রয়োজন।', 'Needed to show projects and rates for your area.')}</Text>
+          <View style={{ height: 6 }} />
+          <DropdownField
+            value={divId ?? ''}
+            placeholder={tx('বিভাগ বেছে নিন', 'Select division')}
+            onSelect={(id) => { const r = divisions.rows.find((x) => String(x.id) === id); setDivId(id); setDivName(String(r?.name_en ?? '')); setDistId(null); setDistName(''); setThaId(null); setThaName(''); }}
+            options={divisions.rows.map((r) => ({ value: String(r.id), label: rowTitle(r, lang, r.name_en) }))}
+          />
+          <View style={styles.geoRow}>
+            <View style={styles.flex}>
+              <DropdownField
+                value={distId ?? ''}
+                placeholder={divName ? tx('জেলা বেছে নিন', 'Select district') : tx('আগে বিভাগ', 'Division first')}
+                onSelect={(id) => { const r = districts.rows.find((x) => String(x.id) === id); setDistId(id); setDistName(String(r?.name_en ?? '')); setThaId(null); setThaName(''); }}
+                options={districts.rows.map((r) => ({ value: String(r.id), label: rowTitle(r, lang, r.name_en) }))}
+              />
+            </View>
+            <View style={styles.flex}>
+              <DropdownField
+                value={thaId ?? ''}
+                placeholder={distName ? tx('থানা বেছে নিন', 'Select thana') : tx('আগে জেলা', 'District first')}
+                onSelect={(id) => { const r = upazilas.rows.find((x) => String(x.id) === id); setThaId(id); setThaName(String(r?.name_en ?? '')); }}
+                options={upazilas.rows.map((r) => ({ value: String(r.id), label: rowTitle(r, lang, r.name_en) }))}
+              />
+            </View>
+          </View>
+          {gpsNote ? <Text style={styles.regionGpsNote}>{gpsNote}</Text> : null}
         </View>
 
         {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
@@ -2189,13 +2588,20 @@ function PreferenceAnimal({
   step: { current: number; total: number };
 }) {
   const { tx, lang } = useLanguage();
-  const items: Array<PreferenceOption & { id: PreferenceKey }> = [
+  const { roots } = useOnboardingTree();
+  const fallbackItems: Array<PreferenceOption & { id: PreferenceKey }> = [
     { id: 'cattle', icon: '🐄', label: tx('গবাদিপশু ও পোল্ট্রি', 'Cattle & Poultry') },
     { id: 'crops', icon: '🌾', label: tx('ফসল', 'Crops') },
     { id: 'fishery', icon: '🐟', label: tx('মৎস্য', 'Fishery') },
     { id: 'vegetables', icon: '🥬', label: tx('সবজি', 'Vegetables') },
     { id: 'fruits', icon: '🍎', label: tx('ফল', 'Fruits') },
   ];
+  // DB-driven roots: only preference-selectable ones (Inputs/Machinery are hidden).
+  const slugToKey: Record<string, PreferenceKey> = { 'livestock-poultry': 'cattle', crops: 'crops', fishery: 'fishery', vegetables: 'vegetables', fruits: 'fruits' };
+  const dbItems = roots
+    .filter((r) => Number(r.is_selectable) !== 0 && slugToKey[String(r.slug)])
+    .map((r) => ({ id: slugToKey[String(r.slug)], icon: safeEmoji(r.emoji, '🌿'), label: rowTitle(r, lang, r.name_en || 'Category') }));
+  const items = dbItems.length ? dbItems : fallbackItems;
   const toggle = (key: PreferenceKey) => {
     onChange(selected.includes(key) ? selected.filter((item) => item !== key) : preferenceOrder.filter((item) => item === key || selected.includes(item)));
   };
@@ -2216,12 +2622,14 @@ function PreferenceAnimal({
 
 function PreferenceLivestock(props: PreferencePageProps) {
   const { tx, lang } = useLanguage();
+  const { roots } = useOnboardingTree();
+  const db = prefSectionsForRoot(roots, PREF_ROOT_SLUG.cattle, lang, '🐄');
   return (
     <PreferenceSetupStep
       {...props}
-      title={tx('আপনি কোন প্রাণী ও পোল্ট্রি নিয়ে কাজ করেন?', 'Choose your livestock and poultry')}
+      title={tx('আপনি কোন প্রাণী ও পোল্ট্রি নিয়ে কাজ করেন?', 'Choose your livestock and poultry')}
       subtitle={tx('গবাদিপশু ও পোল্ট্রি থেকে এক বা একাধিক নির্বাচন করুন', 'Select one or more livestock and poultry options')}
-      sections={[
+      sections={db.length ? db : [
         {
           title: tx('গবাদিপশু', 'Livestock'),
           items: [
@@ -2243,12 +2651,14 @@ function PreferenceLivestock(props: PreferencePageProps) {
 
 function PreferenceCrops(props: PreferencePageProps) {
   const { tx, lang } = useLanguage();
+  const { roots } = useOnboardingTree();
+  const db = prefSectionsForRoot(roots, PREF_ROOT_SLUG.crops, lang, '🌾');
   return (
     <PreferenceSetupStep
       {...props}
-      title={tx('আপনি কোন ফসল নিয়ে কাজ করেন?', 'Choose your crops')}
+      title={tx('আপনি কোন ফসল নিয়ে কাজ করেন?', 'Choose your crops')}
       subtitle={tx('আপনার জমি বা ব্যবসার সাথে সম্পর্কিত ফসল নির্বাচন করুন', 'Select crops related to your land or business')}
-      sections={[
+      sections={db.length ? db : [
         {
           title: tx('ফসল', 'Crops'),
           items: [
@@ -2256,14 +2666,10 @@ function PreferenceCrops(props: PreferencePageProps) {
             { id: 'corn', icon: '🌽', label: tx('ভুট্টা', 'Corn') },
             { id: 'wheat', icon: '🌾', label: tx('গম', 'Wheat') },
             { id: 'garlic', icon: '🧄', label: tx('রসুন', 'Garlic') },
-            { id: 'onion', icon: '🧅', label: tx('পেঁয়াজ', 'Onion') },
+            { id: 'onion', icon: '🧅', label: tx('পেঁয়াজ', 'Onion') },
             { id: 'mustard', icon: '🌼', label: tx('সরিষা', 'Mustard') },
             { id: 'turmeric', icon: '🫚', label: tx('হলুদ', 'Turmeric') },
             { id: 'chili', icon: '🌶️', label: tx('মরিচ', 'Chili') },
-            { id: 'ginger', icon: '🫚', label: tx('আদা', 'Ginger') },
-            { id: 'lentils', icon: '🫘', label: tx('মসুর ডাল', 'Lentils') },
-            { id: 'soybean', icon: '🫘', label: tx('সয়াবিন', 'Soybean') },
-            { id: 'betel', icon: '🍃', label: tx('পান', 'Betel') },
           ],
         },
       ]}
@@ -2272,13 +2678,15 @@ function PreferenceCrops(props: PreferencePageProps) {
 }
 
 function PreferenceFish(props: PreferencePageProps) {
-  const { tx } = useLanguage();
+  const { tx, lang } = useLanguage();
+  const { roots } = useOnboardingTree();
+  const db = prefSectionsForRoot(roots, PREF_ROOT_SLUG.fishery, lang, '🐟');
   return (
     <PreferenceSetupStep
       {...props}
       title={tx('আপনি কোন মাছ চাষ করেন?', 'Choose your fishery interests')}
       subtitle={tx('চাষ, বিক্রি বা পরামর্শের জন্য প্রযোজ্য মাছ নির্বাচন করুন', 'Select the fish you cultivate, sell, or need support for')}
-      sections={[
+      sections={db.length ? db : [
         {
           title: tx('মাছ', 'Fishery'),
           items: [
@@ -2286,8 +2694,8 @@ function PreferenceFish(props: PreferencePageProps) {
             { id: 'catla', icon: '🐟', label: tx('কাতলা', 'Catla') },
             { id: 'hilsa', icon: '🐟', label: tx('ইলিশ', 'Hilsa') },
             { id: 'pangas', icon: '🐟', label: tx('পাঙ্গাস', 'Pangas') },
-            { id: 'tilapia', icon: '🐟', label: tx('তেলাপিয়া', 'Tilapia') },
-            { id: 'prawn', icon: '🦐', label: tx('চিংড়ি', 'Prawn') },
+            { id: 'tilapia', icon: '🐟', label: tx('তেলাপিয়া', 'Tilapia') },
+            { id: 'prawn', icon: '🦐', label: tx('চিংড়ি', 'Prawn') },
           ],
         },
       ]}
@@ -2296,29 +2704,24 @@ function PreferenceFish(props: PreferencePageProps) {
 }
 
 function PreferenceVegetable(props: PreferencePageProps) {
-  const { tx } = useLanguage();
+  const { tx, lang } = useLanguage();
+  const { roots } = useOnboardingTree();
+  const db = prefSectionsForRoot(roots, PREF_ROOT_SLUG.vegetables, lang, '🥬');
   return (
     <PreferenceSetupStep
       {...props}
       title={tx('আপনি কোন সবজি চাষ করেন?', 'Choose your vegetables')}
       subtitle={tx('আপনার উৎপাদন বা আগ্রহের সবজি নির্বাচন করুন', 'Select vegetables you produce or care about')}
-      sections={[
+      sections={db.length ? db : [
         {
           title: tx('সবজি', 'Vegetables'),
           items: [
-            { id: 'bottle-gourd', icon: '🥒', label: tx('লাউ', 'Bottle Gourd') },
-            { id: 'pointed-gourd', icon: '🥒', label: tx('পটল', 'Pointed Gourd') },
             { id: 'tomato', icon: '🍅', label: tx('টমেটো', 'Tomato') },
             { id: 'potato', icon: '🥔', label: tx('আলু', 'Potato') },
-            { id: 'okra', icon: '🫛', label: tx('ঢেঁড়স', 'Okra') },
-            { id: 'green-beans', icon: '🫛', label: tx('বরবটি', 'Green Beans') },
+            { id: 'bottle-gourd', icon: '🫑', label: tx('লাউ', 'Bottle Gourd') },
             { id: 'eggplant', icon: '🍆', label: tx('বেগুন', 'Eggplant') },
             { id: 'cucumber', icon: '🥒', label: tx('শসা', 'Cucumber') },
-            { id: 'spiny-gourd', icon: '🥒', label: tx('কাঁকরোল', 'Spiny Gourd') },
-            { id: 'lettuce', icon: '🥬', label: tx('লেটুস', 'Lettuce') },
-            { id: 'beans', icon: '🫘', label: tx('শিম', 'Beans') },
-            { id: 'pumpkin', icon: '🎃', label: tx('কুমড়া', 'Pumpkin') },
-            { id: 'leafy-greens', icon: '🥬', label: tx('শাক', 'Leafy Greens') },
+            { id: 'okra', icon: '🫑', label: tx('ঢেঁড়স', 'Okra') },
           ],
         },
       ]}
@@ -2327,13 +2730,15 @@ function PreferenceVegetable(props: PreferencePageProps) {
 }
 
 function PreferenceFruits(props: PreferencePageProps) {
-  const { tx } = useLanguage();
+  const { tx, lang } = useLanguage();
+  const { roots } = useOnboardingTree();
+  const db = prefSectionsForRoot(roots, PREF_ROOT_SLUG.fruits, lang, '🥭');
   return (
     <PreferenceSetupStep
       {...props}
-      title={tx('আপনি কোন ফল নিয়ে কাজ করেন?', 'Choose your fruits')}
-      subtitle={tx('উৎপাদন, বিক্রি বা সহায়তার জন্য ফল নির্বাচন করুন', 'Select fruits you produce, sell, or need support for')}
-      sections={[
+      title={tx('আপনি কোন ফল নিয়ে কাজ করেন?', 'Choose your fruits')}
+      subtitle={tx('উৎপাদন, বিক্রি বা সহায়তার জন্য ফল নির্বাচন করুন', 'Select fruits you produce, sell, or need support for')}
+      sections={db.length ? db : [
         {
           title: tx('ফল', 'Fruits'),
           items: [
@@ -2343,7 +2748,7 @@ function PreferenceFruits(props: PreferencePageProps) {
             { id: 'lychee', icon: '🍒', label: tx('লিচু', 'Lychee') },
             { id: 'jackfruit', icon: '🍈', label: tx('কাঁঠাল', 'Jackfruit') },
             { id: 'watermelon', icon: '🍉', label: tx('তরমুজ', 'Watermelon') },
-            { id: 'guava', icon: '🍐', label: tx('পেয়ারা', 'Guava') },
+            { id: 'guava', icon: '🍐', label: tx('পেয়ারা', 'Guava') },
             { id: 'lemon', icon: '🍋', label: tx('লেবু', 'Lemon') },
           ],
         },
@@ -2471,7 +2876,7 @@ function PreferenceOptionCard({
   );
 }
 
-function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function Home({ setScreen, openProjects }: { setScreen: (screen: Screen) => void; openProjects: (tab: 'all' | 'area' | 'mine') => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const isFieldOfficer = hasRole(user, 'field_officer');
@@ -2496,8 +2901,10 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
     <>
       <BrandHeader setScreen={setScreen} />
       <Card style={styles.heroCard}>
-        <Text style={styles.heroSmall}>{tx('আসসালামু আলাইকুম', 'Assalamu Alaikum')}</Text>
-        <Text style={styles.heroName}>{homeUser?.display_name || homeUser?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')} 👋</Text>
+        <Text style={styles.heroGreeting} numberOfLines={1}>
+          <Text style={styles.heroSmall}>{tx('আসসালামু আলাইকুম, ', 'Assalamu Alaikum, ')}</Text>
+          <Text style={styles.heroName}>{homeUser?.display_name || homeUser?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')} 👋</Text>
+        </Text>
         <Pressable onPress={() => setScreen('weather')} style={({ pressed }) => [styles.weatherHomeCard, pressed && styles.pressed]}>
           <View style={styles.weatherHomeTop}>
             <View style={styles.weatherHomeIcon}>
@@ -2515,22 +2922,22 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
           <Text style={styles.weatherHomeAlert} numberOfLines={1}>{tx('বৃষ্টির সম্ভাবনা', 'Rain chance')}: {num(rainChance, lang)}%</Text>
           <WeatherSourceBadge fallback={liveWeather.usingFallback} error={liveWeather.error} />
         </Pressable>
-        <View style={styles.heroStats}>
-          <HeroStat value={num(Number(homeStats?.listings ?? 0), lang)} label={tx('তালিকা', 'Listings')} />
-          <HeroStat value={num(Number(homeStats?.orders ?? 0), lang)} label={tx('অর্ডার', 'Orders')} />
-          <HeroStat value={amount(Number(homeStats?.earnings ?? 0), lang)} label={tx('মোট আয়', 'Earnings')} />
-        </View>
       </Card>
+      <View style={styles.metricsBand}>
+        <MetricCard value={num(Number(homeStats?.listings ?? 0), lang)} label={tx('তালিকা', 'Listings')} icon="🏷️" tone="rose" />
+        <View style={styles.metricDivider} />
+        <MetricCard value={num(Number(homeStats?.orders ?? 0), lang)} label={tx('অর্ডার', 'Orders')} icon="🛒" tone="blue" />
+        <View style={styles.metricDivider} />
+        <MetricCard value={amount(Number(homeStats?.earnings ?? 0), lang)} label={tx('আয়', 'Earnings')} icon="৳" tone="green" />
+      </View>
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
         {isFieldOfficer || isSeller ? (
-          <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" onPress={() => setScreen('saleCategories')} />
+          <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" highlight onPress={() => setScreen('saleCategories')} />
         ) : null}
-        <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" onPress={() => setScreen('buyCategories')} />
+        <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" highlight onPress={() => setScreen('buyCategories')} />
         <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} fullWidth={trainingFullWidth} />
-        {isFieldOfficer ? (
-          <ServiceCard icon="🤝" title={tx('শাথী পার্টনার', 'Shathi Partner')} sub={tx('চুক্তি চাষ ও ঋণ সংযোগ', 'Contract farming & loans')} tone="green" onPress={() => setScreen('partnerRegister')} />
-        ) : null}
+        <ServiceCard icon="🤝" title={tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')} sub={tx('চুক্তি চাষ ও সকল প্রকল্প', 'Contract farming & all projects')} tone="green" onPress={() => openProjects('all')} />
       </View>
       <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
         <View style={styles.homeApaIcon}>
@@ -2554,7 +2961,7 @@ function Home({ setScreen }: { setScreen: (screen: Screen) => void }) {
           key={item.id || index}
           title={rowTitle(item, lang, tx('বাজার আপডেট', 'Market update'))}
           sub={rowBody(item, lang, item.district || '')}
-          badge={humanizeLabel(item.status || item.update_type || '')}
+          badge={tEnum(item.status || item.update_type || '', lang)}
           gold={item.update_type === 'stock' || item.update_type === 'training'}
         />
       ))}
@@ -2567,6 +2974,18 @@ function HeroStat({ value, label }: { value: string; label: string }) {
     <View style={styles.heroStat}>
       <Text style={styles.heroStatValue}>{value}</Text>
       <Text style={styles.heroStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function MetricCard({ value, label, icon, tone }: { value: string; label: string; icon: string; tone: 'rose' | 'blue' | 'green' }) {
+  const accent = tone === 'blue' ? colors.blue : tone === 'green' ? colors.green : colors.maroon;
+  const chip = tone === 'blue' ? colors.bluePale : tone === 'green' ? colors.greenPale : colors.rose;
+  return (
+    <View style={styles.metricCard}>
+      <View style={[styles.metricIcon, { backgroundColor: chip }]}><Text style={styles.metricIconText}>{icon}</Text></View>
+      <Text style={[styles.metricValue, { color: accent }]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
+      <Text style={styles.metricLabel}>{label}</Text>
     </View>
   );
 }
@@ -3208,6 +3627,8 @@ function ServiceCard({
   tone,
   onPress,
   fullWidth,
+  highlight,
+  badge,
 }: {
   icon: string;
   title: string;
@@ -3215,15 +3636,19 @@ function ServiceCard({
   tone: 'rose' | 'gold' | 'blue' | 'green';
   onPress: () => void;
   fullWidth?: boolean;
+  highlight?: boolean;
+  badge?: string;
 }) {
   const bg = tone === 'gold' ? colors.goldPale : tone === 'blue' ? colors.bluePale : tone === 'green' ? colors.greenPale : colors.rose;
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.serviceCard, fullWidth && styles.serviceCardFull, pressed && styles.pressed]}>
-      <View style={[styles.serviceIcon, { backgroundColor: bg }]}>
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.serviceCard, fullWidth && styles.serviceCardFull, highlight && styles.serviceCardHighlight, pressed && styles.pressed]}>
+      {highlight && badge ? <View style={styles.serviceBadge}><Text style={styles.serviceBadgeText}>{badge}</Text></View> : null}
+      <View style={[styles.serviceIcon, { backgroundColor: bg }, highlight && styles.serviceIconHighlight]}>
         <Text style={styles.serviceIconText}>{icon}</Text>
       </View>
-      <Text style={styles.serviceTitle}>{title}</Text>
-      <Text style={styles.serviceSub}>{sub}</Text>
+      <Text style={[styles.serviceTitle, highlight && styles.serviceTitleHighlight]}>{title}</Text>
+      <Text style={[styles.serviceSub, highlight && styles.serviceSubHighlight]}>{sub}</Text>
+      {highlight ? <Text style={styles.serviceArrow}>›</Text> : null}
     </Pressable>
   );
 }
@@ -3269,24 +3694,48 @@ function Alert({ title, sub, badge, gold }: { title: string; sub: string; badge:
 
 function SaleCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
+  const { user } = useAuth();
   const categories = useApiList<ApiRow>('sale/categories');
   const categoryRows = shouldUseFallback(categories) ? fallbackSaleCategories : categories.rows;
+  // Region gating: a category is enabled only if an active project of that
+  // category exists in the user's region (or an open/all-region project).
+  const [available, setAvailable] = useState<string[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
+    apiRequest<{ data?: { available?: string[] } }>(`app/sale/category-availability${uid}`)
+      .then((j) => { if (alive) setAvailable(j.data?.available ?? []); })
+      .catch(() => { if (alive) setAvailable([]); });
+    return () => { alive = false; };
+  }, [user?.id]);
   return (
     <>
       <Header title={tx('বিক্রির তালিকা করুন', 'List for Sale')} onBack={() => setScreen('home')} />
       <Text style={styles.pageHint}>{tx('আপনার পণ্যের বিভাগ বেছে নিন', 'Choose your product category')}</Text>
       <SectionTitle title={tx('বিভাগ', 'Categories')} warning={fallbackWarning(categories)} />
-      {categories.loading ? <ApiStatus state={categories} empty={tx('বিক্রির কোনো বিভাগ পাওয়া যায়নি।', 'No sale categories are available.')} /> : null}
+      {categories.loading ? <ApiStatus state={categories} empty={tx('বিক্রির কোনো বিভাগ পাওয়া যায়নি।', 'No sale categories are available.')} /> : null}
       <View style={styles.grid}>
         {categoryRows.map((category) => {
           const slug = String(category.slug || '').toLowerCase();
+          const interestSlug = String(category.interest_slug || '');
+          const isLivestock = slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry');
+          // Enabled only when a matching project is active in the region.
+          const hasProject = available === null ? isLivestock : (interestSlug ? available.includes(interestSlug) : false);
+          // Phase 1: only the livestock listing flow is built.
+          const enabled = isLivestock && hasProject;
+          const emoji = category.emoji
+            || (isLivestock ? '🐄' : slug.includes('crop') ? '🌾' : slug.includes('fish') ? '🐟' : slug.includes('veg') ? '🥬' : slug.includes('fruit') ? '🥭' : slug.includes('mach') ? '🚜' : slug.includes('input') ? '🌱' : '🌿');
+          const sub = !hasProject
+            ? tx('এই এলাকায় কোনো প্রকল্প নেই', 'No project in your area')
+            : isLivestock ? tx('গবাদিপশু ও পোল্ট্রি বিক্রি', 'Sell cattle & poultry') : tx('শীঘ্রই আসছে', 'Coming soon');
           return (
             <Tile
               key={category.id || slug}
-              icon={slug.includes('livestock') ? '🐄' : slug.includes('crop') ? '🌾' : slug.includes('mach') ? '🚜' : '🌿'}
+              icon={emoji}
               title={rowTitle(category, lang, tx('বিভাগ', 'Category'))}
-              subtitle={rowBody(category, lang, category.status || '')}
-              onPress={() => setScreen(slug.includes('livestock') ? 'livestock' : 'inactive')}
+              subtitle={sub}
+              dimmed={!enabled}
+              onPress={() => setScreen(enabled ? 'cattleForm' : 'inactive')}
             />
           );
         })}
@@ -3323,142 +3772,232 @@ function Livestock({ setScreen }: { setScreen: (screen: Screen) => void }) {
   );
 }
 
-function CattleForm({
-  setScreen,
-  weight,
-  setWeight,
-  imageUri,
-  setImageUri,
-}: {
+type CattleStepProps = {
   setScreen: (screen: Screen) => void;
-  weight: string;
-  setWeight: (value: string) => void;
-  imageUri: string | null;
-  setImageUri: (value: string | null) => void;
-}) {
+  draft: ListingDraft;
+  patchDraft: (patch: Partial<ListingDraft>) => void;
+};
+
+function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
   const { tx, lang } = useLanguage();
-  const breedState = useApiList<ApiRow>('sale/breeds');
-  const breedWarning = fallbackWarning(breedState);
-  const [age, setAge] = useState(num(24, lang));
-  const [count, setCount] = useState(num(1, lang));
-  const [animalType, setAnimalType] = useState(tx('বলদ', 'Bull'));
-  const [breed, setBreed] = useState(tx('ক্রস ফ্রিজিয়ান', 'Cross Friesian'));
-  const [aiSummary, setAiSummary] = useState('');
-  const [aiAccuracy, setAiAccuracy] = useState<number | null>(null);
-  const [aiAnalyzing, setAiAnalyzing] = useState(false);
-  const animalTypes = [tx('বলদ', 'Bull'), tx('গাভী', 'Cow'), tx('বাছুর', 'Calf'), tx('খাসি বলদ', 'Castrated bull')];
-  const breeds = breedState.rows.length
-    ? breedState.rows.filter((row) => row.is_active !== 0).map((row) => rowTitle(row, lang, row.name_en || row.name_bn || 'Breed'))
-    : [tx('দেশি', 'Local'), tx('ক্রস ফ্রিজিয়ান', 'Cross Friesian'), tx('চট্টগ্রামের লাল গরু', 'Chittagong Red Cow'), tx('সাহিওয়াল', 'Sahiwal'), tx('ব্রাহমান ক্রস', 'Brahman Cross'), tx('হরিয়ানা', 'Hariana')];
-  const earn = (Number(weight) || 0) * 670;
-  async function pickImage() {
+  const { user } = useAuth();
+  const animalState = useApiList<ApiRow>('sale/animals');
+  const breedResource = draft.species ? `sale/breeds?species=${encodeURIComponent(draft.species)}` : 'sale/breeds';
+  const breedState = useApiList<ApiRow>(breedResource);
+
+  const animalItems = animalState.rows
+    .filter((row) => row.is_active !== 0)
+    .map((row) => ({ id: String(row.id), label: `${row.emoji ? row.emoji + ' ' : ''}${rowTitle(row, lang, row.name_en || 'Animal')}`, raw: row }));
+  const breedItems = breedState.rows
+    .filter((row) => row.is_active !== 0)
+    .map((row) => ({ id: String(row.id), label: rowTitle(row, lang, row.name_en || row.name_bn || 'Breed'), raw: row }));
+
+  // Default the animal to the first one (Cow) and prefill contact once.
+  useEffect(() => {
+    if (!draft.animalId && animalItems.length) {
+      const first = animalItems[0];
+      patchDraft({ animalId: first.id, animalName: first.raw.name_en || first.label, species: first.raw.species || null, breedId: null, breedName: '' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animalState.rows.length]);
+
+  useEffect(() => {
+    if (!draft.contactName && user) {
+      patchDraft({
+        contactName: user.display_name || user.full_name || '',
+        contactPhone: user.phone || '',
+        districtName: draft.districtName || user.district || '',
+        thanaName: draft.thanaName || user.upazila || '',
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  async function pickImages() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
+      allowsMultipleSelection: true,
+      selectionLimit: 6,
       quality: 0.72,
     });
     if (!result.canceled) {
-      const uri = result.assets[0].uri;
-      setImageUri(uri);
-      setAiAnalyzing(true);
-      setAiSummary('');
-      setAiAccuracy(null);
-      try {
-        const ai = await analyzeCattlePhoto(uri, lang);
-        const accuracy = Math.max(0, Math.min(100, Math.round(ai.accuracyPercent ?? 0)));
-        setAiAccuracy(accuracy);
-        if (ai.isCow === false) {
-          setAiSummary(ai.healthSummary || tx('এটি গরুর ছবি হিসেবে নিশ্চিত নয়। অনুগ্রহ করে পরিষ্কার গরুর ছবি দিন।', 'This does not look like a clear cow image. Please provide a clear cow image.'));
-        } else {
-          if (ai.ageMonths) setAge(num(ai.ageMonths, lang));
-          if (ai.weightKg) setWeight(String(Math.round(ai.weightKg)));
-          if (ai.count) setCount(num(ai.count, lang));
-          if (ai.animalType) setAnimalType(ai.animalType);
-          if (ai.breed) setBreed(ai.breed);
-          setAiSummary(ai.healthSummary || tx('AI ছবি বিশ্লেষণ করে উপলব্ধ তথ্য পূরণ করেছে। অনিশ্চিত তথ্য আপনি বদলাতে পারবেন।', 'AI filled available details from the photo. You can adjust uncertain values.'));
-        }
-      } catch (error) {
-        setAiAccuracy(0);
-        setAiSummary(error instanceof Error ? error.message : tx('AI বিশ্লেষণ ব্যর্থ হয়েছে। অনুগ্রহ করে আবার পরিষ্কার গরুর ছবি দিন।', 'AI analysis failed. Please try again with a clear cow image.'));
-      } finally {
-        setAiAnalyzing(false);
-      }
+      const uris = result.assets.map((a) => a.uri);
+      patchDraft({ images: [...draft.images, ...uris].slice(0, 6) });
     }
   }
+  function removeImage(uri: string) {
+    patchDraft({ images: draft.images.filter((u) => u !== uri) });
+  }
+
+  function selectAnimal(item: { id: string; raw: ApiRow }) {
+    patchDraft({ animalId: item.id, animalName: item.raw.name_en || '', species: item.raw.species || null, breedId: null, breedName: '' });
+  }
+  function selectBreed(item: { id: string; raw: ApiRow }) {
+    patchDraft({ breedId: item.id, breedName: item.raw.name_en || item.raw.name_bn || '' });
+  }
+
+  const canContinue = Boolean(draft.animalId && draft.breedId && Number(draft.weightKg) > 0 && draft.images.length > 0);
+  const selectedAnimalLabel = animalItems.find((i) => i.id === draft.animalId)?.label ?? draft.animalName;
 
   return (
     <>
-      <Header title={tx('গরু বিক্রির তালিকা', 'List Cattle for Sale')} onBack={() => setScreen('livestock')} />
+      <Header title={tx('গবাদিপশু বিক্রির তালিকা', 'List Livestock for Sale')} onBack={() => setScreen('saleCategories')} />
       <View style={styles.infoBar}>
-        <Text style={styles.infoText}>{tx('ⓘ গরুর ছবি আপলোড করুন। AI ছবি বিশ্লেষণ করে তথ্য পূরণ করবে, চাইলে আপনি বদলাতে পারবেন।', 'ⓘ Upload cattle photo. AI will analyze and prefill details; you can adjust any value.')}</Text>
+        <Text style={styles.infoText}>{tx('ⓘ পশুর ধরন, জাত, বয়স ও ওজন দিন এবং ছবি যুক্ত করুন। মাঠ কর্মকর্তা প্রকৃত ওজন যাচাই করবেন।', 'ⓘ Enter animal type, breed, age and weight, and add photos. The field officer verifies the actual weight.')}</Text>
       </View>
-      <FormLabel label={tx('গরুর ছবি', 'Cattle photo')} />
-      <Pressable onPress={pickImage} style={({ pressed }) => [styles.upload, imageUri && styles.uploadWithImage, pressed && styles.pressed]}>
-        {imageUri ? (
-          <>
-            <Image source={{ uri: imageUri }} style={styles.uploadPreview} />
-            <View style={styles.uploadOverlay}>
-              <Text style={styles.uploadOverlayText}>{tx('AI বিশ্লেষণ সম্পন্ন · ছবি পরিবর্তন করুন', 'AI analysis complete · Change photo')}</Text>
-            </View>
-          </>
-        ) : (
-          <>
-            <Text style={styles.uploadIcon}>▣</Text>
-            <Text style={styles.uploadTitle}>{tx('ছবি তুলতে বা আপলোড করতে ট্যাপ করুন', 'Tap to upload cattle photo')}</Text>
-            <Text style={styles.uploadSub}>JPG, PNG · max 5 MB</Text>
-          </>
-        )}
-      </Pressable>
-      {imageUri ? (
-        <View style={styles.aiAnalysisCard}>
-          <Text style={styles.aiAnalysisTitle}>{aiAnalyzing ? tx('AI ছবি বিশ্লেষণ করছে...', 'AI is analyzing photo...') : tx('AI অনুমান', 'AI estimate')}</Text>
-          {aiAnalyzing ? (
-            <View style={styles.aiProgressTrack}>
-              <View style={styles.aiProgressFill} />
-            </View>
-          ) : null}
-          {aiAccuracy !== null ? (
-            <Text style={styles.aiAccuracyText}>{tx(`বিশ্লেষণের নির্ভুলতা: ${bn(aiAccuracy)}%`, `Analysis accuracy: ${aiAccuracy}%`)}</Text>
-          ) : null}
-          <MarkdownText
-            text={aiSummary || tx('ছবি থেকে বয়স, ওজন, পশুর ধরন ও জাত অনুমান করা হচ্ছে।', 'Estimating age, weight, animal type and breed from the photo.')}
-            style={styles.aiAnalysisText}
-            strongStyle={styles.markdownStrong}
-          />
-        </View>
-      ) : null}
+
+      <FormLabel label={tx('পশুর ধরন', 'Animal Type')} required />
+      {animalState.loading ? <ApiStatus state={animalState} /> : null}
+      <PickerSelect
+        value={selectedAnimalLabel}
+        placeholder={tx('পশুর ধরন বেছে নিন', 'Select animal type')}
+        items={animalItems}
+        onSelect={selectAnimal}
+      />
+
+      <FormLabel label={tx('জাত', 'Breed')} required />
+      {breedState.loading ? <ApiStatus state={breedState} /> : null}
+      <PickerSelect
+        value={draft.breedName}
+        placeholder={tx('জাত বেছে নিন', 'Select breed')}
+        items={breedItems}
+        onSelect={selectBreed}
+        disabled={!draft.animalId}
+      />
+
       <View style={styles.twoCol}>
         <View style={styles.flex}>
           <FormLabel label={tx('বয়স (মাস)', 'Age (months)')} />
-          <TextInput style={[styles.input, aiAnalyzing && styles.inputDisabled]} editable={!aiAnalyzing} value={age} onChangeText={setAge} keyboardType="number-pad" />
+          <TextInput style={styles.input} value={draft.ageMonths} onChangeText={(v) => patchDraft({ ageMonths: v })} keyboardType="number-pad" />
         </View>
         <View style={styles.flex}>
-          <FormLabel label={tx('ওজন (কেজি)', 'Weight (kg)')} />
-          <TextInput style={[styles.input, aiAnalyzing && styles.inputDisabled]} editable={!aiAnalyzing} value={weight} onChangeText={setWeight} keyboardType="number-pad" />
+          <FormLabel label={tx('পশুর সংখ্যা', 'Quantity')} />
+          <TextInput style={styles.input} value={draft.quantity} onChangeText={(v) => patchDraft({ quantity: v })} keyboardType="number-pad" />
         </View>
       </View>
-      <FormLabel label={tx('পশুর ধরন', 'Animal Type')} />
-      <FakeSelect value={animalType} options={animalTypes} onChange={setAnimalType} disabled={aiAnalyzing} />
-      <SectionTitle title={tx('গরুর ধরন / জাত', 'Breed')} warning={breedWarning} />
-      {breedState.loading ? <ApiStatus state={breedState} /> : null}
-      <FakeSelect value={breed} options={breeds} onChange={setBreed} disabled={aiAnalyzing} />
-      <FormLabel label={tx('পশুর সংখ্যা', 'Number of animals')} />
-      <TextInput style={[styles.input, aiAnalyzing && styles.inputDisabled]} editable={!aiAnalyzing} value={count} onChangeText={setCount} keyboardType="number-pad" />
-      {earn > 0 ? (
-        <View style={styles.estimate}>
-          <Text style={styles.estimateLabel}>{tx('আনুমানিক আয়', 'Estimated earning')}</Text>
-          <Text style={styles.estimateValue}>{amount(earn, lang)}</Text>
-        </View>
+
+      <FormLabel label={tx('আনুমানিক ওজন (কেজি)', 'Tentative weight (kg)')} required />
+      <View style={styles.weightRow}>
+        <TextInput style={[styles.input, styles.flex, styles.weightRowInput]} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v })} keyboardType="number-pad" placeholder={tx('যেমন ২০০', 'e.g. 200')} placeholderTextColor={colors.muted} />
+        <Pressable onPress={() => setScreen('cattleMeasure')} style={({ pressed }) => [styles.measureBtn, pressed && styles.pressed]}>
+          <Text style={styles.measureBtnText}>📏 {tx('ফিতা দিয়ে মাপুন', 'Measure by tape')}</Text>
+        </Pressable>
+      </View>
+      <Text style={styles.fieldHint}>{tx('ফিতা পদ্ধতিতে বুকের বেড় ও দৈর্ঘ্য দিয়ে আনুমানিক ওজন বের করুন। চূড়ান্ত ওজন মাঠ কর্মকর্তা স্কেলে নেবেন।', 'Use the tape method (chest girth + body length) to estimate weight. Final weight is taken on the field officer scale.')}</Text>
+
+      <FormLabel label={tx('ছবি (একাধিক)', 'Photos (multiple)')} required />
+      <Pressable onPress={pickImages} style={({ pressed }) => [styles.uploadCompact, pressed && styles.pressed]}>
+        <Text style={styles.uploadIcon}>＋</Text>
+        <Text style={styles.uploadTitle}>{tx('পশুর ছবি যোগ করুন', 'Add animal photos')}</Text>
+        <Text style={styles.uploadSub}>{tx('সর্বোচ্চ ৬টি · JPG, PNG', 'Up to 6 · JPG, PNG')}</Text>
+      </Pressable>
+      {draft.images.length ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.thumbRow}>
+          {draft.images.map((uri) => (
+            <View key={uri} style={styles.thumbWrap}>
+              <Image source={{ uri }} style={styles.thumb} />
+              <Pressable onPress={() => removeImage(uri)} style={styles.thumbRemove}>
+                <Text style={styles.thumbRemoveText}>×</Text>
+              </Pressable>
+            </View>
+          ))}
+        </ScrollView>
       ) : null}
-      <AppButton title={tx('মূল্য বিবরণ দেখুন  →', 'View Price Breakdown  →')} onPress={() => setScreen('cattlePrice')} />
+
+      <View style={styles.formCard}>
+        <Text style={styles.formCardTitle}>{tx('যোগাযোগ ও ঠিকানা', 'Contact & Address')}</Text>
+        <Text style={styles.contactSectionHint}>{tx('আপনার প্রোফাইল থেকে পূরণ — দরকারে বদলান', 'Prefilled from your profile — edit if needed')}</Text>
+        <View style={styles.twoCol}>
+          <View style={styles.flex}>
+            <FormLabel small required label={tx('নাম', 'Name')} />
+            <TextInput style={styles.inputSm} value={draft.contactName} onChangeText={(v) => patchDraft({ contactName: v })} />
+          </View>
+          <View style={styles.flex}>
+            <FormLabel small required label={tx('মোবাইল', 'Mobile')} />
+            <TextInput style={styles.inputSm} value={draft.contactPhone} onChangeText={(v) => patchDraft({ contactPhone: v })} keyboardType="phone-pad" />
+          </View>
+        </View>
+        <GeoPicker draft={draft} patchDraft={patchDraft} small />
+        <FormLabel small label={tx('বিস্তারিত ঠিকানা (গ্রাম)', 'Address (village)')} />
+        <TextInput style={styles.inputSm} value={draft.addressText} onChangeText={(v) => patchDraft({ addressText: v })} placeholder={tx('গ্রাম / বাড়ি', 'Village / house')} placeholderTextColor={colors.muted} />
+      </View>
+
+      {!canContinue ? (
+        <Text style={styles.fieldHint}>{tx('পশুর ধরন, জাত, ওজন ও অন্তত একটি ছবি দিন।', 'Add animal type, breed, weight and at least one photo to continue.')}</Text>
+      ) : null}
+      <AppButton title={tx('পশুর তথ্য নিশ্চিত করুন  →', 'Confirm Cattle Details  →')} onPress={() => setScreen('cattlePrice')} disabled={!canContinue} />
     </>
   );
 }
 
-function FormLabel({ label }: { label: string }) {
-  return <Text style={styles.label}>{label}</Text>;
+// Tape-measurement weight estimator (Schaeffer / heart-girth method).
+function CattleMeasure({ setScreen, draft, patchDraft }: CattleStepProps) {
+  const { tx, lang } = useLanguage();
+  const [unit, setUnit] = useState<'in' | 'cm'>('in');
+  const [girth, setGirth] = useState(draft.measure?.girth ?? '');
+  const [length, setLength] = useState(draft.measure?.length ?? '');
+  const [height, setHeight] = useState(draft.measure?.height ?? '');
+
+  const toInches = (v: number) => (unit === 'cm' ? v / 2.54 : v);
+  const g = toInches(Number(girth) || 0);
+  const l = toInches(Number(length) || 0);
+  // Schaeffer's formula: weight(lb) = (girth^2 * length) / 300 ; kg = lb * 0.4536
+  const weightKg = g > 0 && l > 0 ? Math.round(((g * g * l) / 300) * 0.4536) : 0;
+
+  function useWeight() {
+    patchDraft({ weightKg: String(weightKg), measure: { girth, length, height, weightKg } });
+    setScreen('cattleForm');
+  }
+
+  return (
+    <>
+      <Header title={tx('ফিতা দিয়ে ওজন মাপুন', 'Measure Weight by Tape')} onBack={() => setScreen('cattleForm')} />
+      <View style={styles.infoBar}>
+        <Text style={styles.infoText}>{tx('ⓘ একটি ফিতা দিয়ে বুকের বেড় ও শরীরের দৈর্ঘ্য মেপে আনুমানিক ওজন বের করুন।', 'ⓘ Use a measuring tape to get chest girth and body length, then estimate the weight.')}</Text>
+      </View>
+
+      <View style={styles.measureDiagram}>
+        <Text style={styles.measureDiagramArt}>🐄  ↔  📏</Text>
+        <Text style={styles.measureDiagramText}>
+          {tx('১) বুকের বেড় (Heart Girth): সামনের পায়ের ঠিক পেছনে বুক ঘিরে মাপুন।\n২) দৈর্ঘ্য (Body Length): কাঁধ থেকে লেজের গোড়া পর্যন্ত।',
+            '1) Heart Girth: wrap the tape around the chest, just behind the front legs.\n2) Body Length: from the shoulder point to the pin bone (tail base).')}
+        </Text>
+      </View>
+
+      <View style={styles.unitToggle}>
+        {(['in', 'cm'] as const).map((u) => (
+          <Pressable key={u} onPress={() => setUnit(u)} style={[styles.unitChip, unit === u && styles.unitChipActive]}>
+            <Text style={[styles.unitChipText, unit === u && styles.unitChipTextActive]}>{u === 'in' ? tx('ইঞ্চি', 'inch') : tx('সেমি', 'cm')}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      <FormLabel label={tx('বুকের বেড় (Heart Girth)', 'Chest girth (heart girth)')} />
+      <TextInput style={styles.input} value={girth} onChangeText={setGirth} keyboardType="numeric" placeholder={unit === 'in' ? tx('যেমন ৬৫', 'e.g. 65') : tx('যেমন ১৬৫', 'e.g. 165')} placeholderTextColor={colors.muted} />
+      <FormLabel label={tx('শরীরের দৈর্ঘ্য (Body Length)', 'Body length')} />
+      <TextInput style={styles.input} value={length} onChangeText={setLength} keyboardType="numeric" placeholder={unit === 'in' ? tx('যেমন ৫৫', 'e.g. 55') : tx('যেমন ১৪০', 'e.g. 140')} placeholderTextColor={colors.muted} />
+      <FormLabel label={tx('উচ্চতা (ঐচ্ছিক)', 'Height (optional)')} />
+      <TextInput style={styles.input} value={height} onChangeText={setHeight} keyboardType="numeric" placeholderTextColor={colors.muted} />
+
+      <View style={styles.estimate}>
+        <Text style={styles.estimateLabel}>{tx('আনুমানিক ওজন', 'Approximate weight')}</Text>
+        <Text style={styles.estimateValue}>{weightKg > 0 ? `${num(weightKg, lang)} ${tx('কেজি', 'kg')}` : '—'}</Text>
+      </View>
+      <Text style={styles.fieldHint}>{tx('এটি আনুমানিক (প্রাক-গণনাকৃত) ওজন। চূড়ান্ত ওজন মাঠ কর্মকর্তা স্কেলে নেবেন।', 'This is a tentative (pre-calculated) weight. Final weight is taken on the field officer scale.')}</Text>
+      <AppButton title={tx('এই ওজন ব্যবহার করুন', 'Use this weight')} onPress={useWeight} disabled={weightKg <= 0} />
+      <AppButton title={tx('বাতিল', 'Cancel')} variant="outline" onPress={() => setScreen('cattleForm')} />
+    </>
+  );
+}
+
+function FormLabel({ label, required, small }: { label: string; required?: boolean; small?: boolean }) {
+  return (
+    <Text style={[styles.label, small && styles.labelSm]}>
+      {label}{required ? <Text style={styles.reqStar}> *</Text> : null}
+    </Text>
+  );
 }
 
 function FakeSelect({ value, options, onChange, disabled = false }: { value: string; options?: string[]; onChange?: (value: string) => void; disabled?: boolean }) {
@@ -3487,63 +4026,157 @@ function FakeSelect({ value, options, onChange, disabled = false }: { value: str
   );
 }
 
-function CattlePrice({
-  setScreen,
-  weight,
-  setWeight,
-  onSubmitted,
-}: {
-  setScreen: (screen: Screen) => void;
-  weight: string;
-  setWeight: (value: string) => void;
-  onSubmitted: (listing: ApiRow) => void;
+// Generic dropdown backed by {id,label} items (animal, breed, geo).
+function PickerSelect({ value, placeholder, items, onSelect, disabled = false, compact = false }: {
+  value?: string;
+  placeholder: string;
+  items: { id: string; label: string; raw?: any }[];
+  onSelect: (item: any) => void;
+  disabled?: boolean;
+  compact?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
+  const interactive = !disabled && items.length > 0;
+  return (
+    <>
+      <Pressable disabled={!interactive} onPress={() => setOpen(true)} style={({ pressed }) => [styles.fakeSelect, compact && styles.fakeSelectCompact, disabled && styles.inputDisabled, pressed && interactive && styles.pressed]}>
+        <Text style={[styles.fakeSelectText, !value && styles.fakeSelectPlaceholder]} numberOfLines={1}>{value || placeholder}</Text>
+        <Text style={styles.chevron}>⌄</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
+          <View style={styles.dropdownCard}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {items.map((item) => (
+                <Pressable key={item.id} style={[styles.dropdownOption, item.label === value && styles.dropdownOptionActive]} onPress={() => { onSelect(item); setOpen(false); }}>
+                  <Text style={[styles.dropdownOptionText, item.label === value && styles.dropdownOptionTextActive]}>{item.label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
+
+// Cascading Division -> District -> Thana picker sourced from the geo API.
+function GeoPicker({ draft, patchDraft, small = false }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void; small?: boolean }) {
+  const { tx, lang } = useLanguage();
+  const divisions = useApiList<ApiRow>('geo/divisions');
+  const districts = useApiList<ApiRow>(draft.divisionId ? `geo/districts?division_id=${draft.divisionId}` : 'geo/districts');
+  const thanas = useApiList<ApiRow>(draft.districtId ? `geo/upazilas?district_id=${draft.districtId}` : 'geo/upazilas');
+  const toItems = (rows: ApiRow[]) => rows.map((r) => ({ id: String(r.id), label: rowTitle(r, lang, r.name_en || 'N/A'), raw: r }));
+  return (
+    <>
+      {!small ? <FormLabel required label={tx('বিভাগ', 'Division')} /> : null}
+      {small ? <View style={{ height: 4 }} /> : null}
+      <PickerSelect
+        value={draft.divisionName}
+        placeholder={tx('বিভাগ বেছে নিন', 'Select division')}
+        items={toItems(divisions.rows)}
+        compact={small}
+        onSelect={(item) => patchDraft({ divisionId: item.id, divisionName: item.raw.name_en || '', districtId: null, districtName: '', thanaId: null, thanaName: '' })}
+      />
+      <View style={small ? styles.geoRow : styles.twoCol}>
+        <View style={styles.flex}>
+          {!small ? <FormLabel label={tx('জেলা', 'District')} /> : null}
+          <PickerSelect
+            value={draft.districtName}
+            placeholder={tx('জেলা বেছে নিন', 'Select district')}
+            items={toItems(districts.rows)}
+            disabled={!draft.divisionId}
+            compact={small}
+            onSelect={(item) => patchDraft({ districtId: item.id, districtName: item.raw.name_en || '', thanaId: null, thanaName: '' })}
+          />
+        </View>
+        <View style={styles.flex}>
+          {!small ? <FormLabel label={tx('থানা / উপজেলা', 'Thana / Upazila')} /> : null}
+          <PickerSelect
+            value={draft.thanaName}
+            placeholder={tx('থানা বেছে নিন', 'Select thana')}
+            items={toItems(thanas.rows)}
+            disabled={!draft.districtId}
+            compact={small}
+            onSelect={(item) => patchDraft({ thanaId: item.id, thanaName: item.raw.name_en || '' })}
+          />
+        </View>
+      </View>
+    </>
+  );
+}
+
+function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepProps & { onSubmitted: (listing: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
-  const pricing = useApiList<ApiRow>('sale/pricing');
-  const saleItems = useApiList<ApiRow>('sale/items');
-  const breeds = useApiList<ApiRow>('sale/breeds');
-  const [contactPhone, setContactPhone] = useState('01712-345678');
-  const [addressText, setAddressText] = useState(tx('গ্রাম, উপজেলা, জেলা', 'Village, upazila, district'));
+  const [quote, setQuote] = useState<ApiRow | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
-  const w = Number(weight) || 200;
-  const rule = pricing.rows.find((row) => row.is_active !== 0) || {};
-  const farmerRate = Number(rule.farmer_rate || 670);
-  const b2bRate = Number(rule.b2b_market_rate || 0);
-  const platformFee = Number(rule.platform_fee || 0);
-  const logisticsFee = Number(rule.logistics_fee || 0);
-  const vetFee = Number(rule.warehouse_vet_fee || 0);
-  const rows: Array<[string, string, number]> = [
-    [tx('B2B বাজার দর', 'B2B market rate'), tx('পাইকারি ক্রয় মূল্য', 'Wholesale buy rate'), b2bRate],
-    [tx('নির্ধারিত বিক্রয় মূল্য', 'Nirdharito Bikroy Mullo'), tx('আপনি পাবেন এই মূল্যে', 'Your selling rate'), farmerRate],
-    [tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), '', platformFee],
-    [tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), '', logisticsFee],
-    [tx('গুদাম ও পশু চিকিৎসা', 'Warehouse & vet care'), '', vetFee],
-    [tx('মোট কর্তন', 'Total deductions'), '', platformFee + logisticsFee + vetFee],
+
+  const district = draft.districtName || user?.district || '';
+  const w = Number(draft.weightKg) || 0;
+
+  useEffect(() => {
+    let alive = true;
+    setQuoteLoading(true);
+    const params = new URLSearchParams();
+    if (draft.animalId) params.set('animal_id', draft.animalId);
+    if (draft.breedId) params.set('breed_id', draft.breedId);
+    if (district) params.set('district', district);
+    if (w > 0) params.set('weight', String(w));
+    apiRequest<{ data?: ApiRow }>(`app/sale/price-quote?${params.toString()}`)
+      .then((json) => { if (alive) setQuote(json.data?.breakdown ?? null); })
+      .catch(() => { if (alive) setQuote(null); })
+      .finally(() => { if (alive) setQuoteLoading(false); });
+    return () => { alive = false; };
+  }, [draft.animalId, draft.breedId, district, w]);
+
+  const b2bRate = Number(quote?.b2b_market_rate ?? 0);
+  const platformFee = Number(quote?.platform_fee ?? 0);
+  const logisticsFee = Number(quote?.logistics_fee ?? 0);
+  const vetFee = Number(quote?.warehouse_vet_fee ?? 0);
+  const farmerRate = Number(quote?.net_farmer_rate ?? (b2bRate - platformFee - logisticsFee - vetFee)) || 670;
+  const rows: Array<[string, string, number, boolean]> = [
+    [tx('B2B বাজার দর', 'B2B market rate'), tx('পাইকারি ক্রয় মূল্য', 'Wholesale buy rate'), b2bRate, false],
+    [tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), '', -platformFee, false],
+    [tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), '', -logisticsFee, false],
+    [tx('গুদাম ও পশু চিকিৎসা', 'Warehouse & vet care'), '', -vetFee, false],
+    [tx('নিট কৃষক মূল্য', 'Net farmer rate'), tx('আপনি পাবেন এই মূল্যে', 'Your selling rate'), farmerRate, true],
   ];
+
   async function submitListing() {
     setSubmitting(true);
     setSubmitError('');
     try {
-      const cattleItem = saleItems.rows.find((row) => String(row.slug || row.name_en || '').toLowerCase().includes('cattle')) || saleItems.rows[0];
-      const breed = breeds.rows[0];
+      let mediaUrls: string[] = [];
+      try {
+        mediaUrls = await Promise.all(draft.images.map((uri) => uploadImage(uri, 'sale-listings')));
+      } catch {
+        mediaUrls = draft.images; // fall back to local uris if upload fails
+      }
       const listingCode = `SAL-APP-${Date.now()}`;
       const response = await apiCreate('sale/listings', {
         listing_code: listingCode,
         user_id: Number(user?.id) || 1,
-        sale_item_id: Number(cattleItem?.id || 1),
-        breed_id: breed?.id ? Number(breed.id) : undefined,
-        title_en: 'Cattle listing from mobile app',
-        title_bn: 'মোবাইল অ্যাপ থেকে গরুর তালিকা',
+        sale_item_id: 1,
+        animal_id: draft.animalId ? Number(draft.animalId) : undefined,
+        breed_id: draft.breedId ? Number(draft.breedId) : undefined,
+        title_en: `${draft.animalName || 'Livestock'} listing from mobile app`,
+        title_bn: 'মোবাইল অ্যাপ থেকে পশুর তালিকা',
+        age_months: Number(draft.ageMonths) || undefined,
         weight_kg: w,
-        quantity: 1,
+        quantity: Number(draft.quantity) || 1,
         unit: 'piece',
         farmer_expected_price: farmerRate,
         estimated_earning: w * farmerRate,
-        contact_phone: contactPhone,
-        address_text: addressText,
-        ai_analysis_json: { source: 'mobile_app', image_upload_pending: true },
+        contact_phone: draft.contactPhone,
+        division: draft.divisionName || undefined,
+        district: draft.districtName || user?.district || undefined,
+        upazila: draft.thanaName || user?.upazila || undefined,
+        address_text: [draft.addressText, draft.thanaName, draft.districtName, draft.divisionName].filter(Boolean).join(', '),
+        media_json: mediaUrls,
+        ai_analysis_json: { source: 'mobile_app', measure: draft.measure },
         status: 'submitted',
       });
       onSubmitted({ listing_code: listingCode, id: response.result?.insertId, estimated_earning: w * farmerRate });
@@ -3554,15 +4187,16 @@ function CattlePrice({
       setSubmitting(false);
     }
   }
+
   return (
     <>
       <Header title={tx('মূল্য ও আয়ের বিবরণ', 'Price & Earning')} onBack={() => setScreen('cattleForm')} />
       <Card style={styles.weightCard}>
         <Text style={styles.weightIcon}>⚖</Text>
         <View style={styles.flex}>
-          <Text style={styles.smallUpper}>{tx('ওজন পরিবর্তন করুন', 'Adjust weight')}</Text>
+          <Text style={styles.smallUpper}>{tx('আনুমানিক ওজন', 'Tentative weight')}</Text>
           <View style={styles.weightInputRow}>
-            <TextInput style={styles.weightInput} value={weight} onChangeText={setWeight} keyboardType="number-pad" />
+            <TextInput style={styles.weightInput} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v })} keyboardType="number-pad" />
             <Text style={styles.kgText}>{tx('কেজি', 'kg')}</Text>
           </View>
         </View>
@@ -3571,6 +4205,16 @@ function CattlePrice({
           <Text style={styles.quickEarn}>{amount(w * farmerRate, lang)}</Text>
         </View>
       </Card>
+
+      <View style={styles.summaryChips}>
+        <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{draft.animalName || tx('পশু', 'Animal')}</Text></View>
+        {draft.breedName ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{draft.breedName}</Text></View> : null}
+        {district ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⌖ {district}</Text></View> : null}
+      </View>
+
+      {quoteLoading ? <Text style={styles.fieldHint}>{tx('অনুমোদিত B2B দর আনা হচ্ছে...', 'Fetching approved B2B rate...')}</Text> : null}
+      {!quoteLoading && !quote ? <Text style={styles.fieldHint}>{tx('এই অঞ্চলে অনুমোদিত দর নেই — ডিফল্ট দর দেখানো হচ্ছে।', 'No approved rate for this region — showing default rate.')}</Text> : null}
+
       <View style={styles.priceTable}>
         <View style={styles.priceHead}>
           <Text style={styles.priceHeadTitle}>{tx('মূল্য বিবরণী', 'Price Breakdown')}</Text>
@@ -3581,14 +4225,14 @@ function CattlePrice({
           <Text style={styles.colLabel}>/kg</Text>
           <Text style={styles.colLabel}>{tx('মোট', 'Total')} ({num(w, lang)})</Text>
         </View>
-        {rows.map(([title, sub, rate]) => (
-          <View key={title} style={[styles.priceRow, (title === 'নির্ধারিত বিক্রয় মূল্য' || title === 'Nirdharito Bikroy Mullo') && styles.priceRowHighlight]}>
+        {rows.map(([title, sub, rate, highlight]) => (
+          <View key={title} style={[styles.priceRow, highlight && styles.priceRowHighlight]}>
             <View style={styles.flex}>
-              <Text style={[styles.priceTitle, (title === 'নির্ধারিত বিক্রয় মূল্য' || title === 'Nirdharito Bikroy Mullo') && styles.priceTitleStrong]}>{title}</Text>
+              <Text style={[styles.priceTitle, highlight && styles.priceTitleStrong]}>{title}</Text>
               {sub ? <Text style={styles.priceSub}>{sub}</Text> : null}
             </View>
-            <Text style={styles.rateText}>৳{num(rate, lang)}</Text>
-            <Text style={styles.totalText}>{amount(Number(rate) * w, lang)}</Text>
+            <Text style={styles.rateText}>৳{num(Math.abs(rate), lang)}</Text>
+            <Text style={styles.totalText}>{amount(rate * w, lang)}</Text>
           </View>
         ))}
         <View style={styles.finalRow}>
@@ -3605,18 +4249,8 @@ function CattlePrice({
       <View style={styles.noteGold}>
         <Text style={styles.noteText}>{tx('৩ কর্মদিনের মধ্যে মাঠ কর্মকর্তা আসবেন। সম্মতিতে ওজন নিশ্চিত হলে নগদ বা চেকে পেমেন্ট।', 'Field officer arrives within 3 working days. Cash or cheque payment after weight confirmation.')}</Text>
       </View>
-      <View style={styles.contactSection}>
-        <View style={styles.contactSectionHead}>
-          <Text style={styles.contactSectionTitle}>{tx('যোগাযোগের তথ্য', 'Contact Information')}</Text>
-          <Text style={styles.contactSectionHint}>{tx('মাঠ কর্মকর্তা এই তথ্য ব্যবহার করবেন', 'Field officer will use these details')}</Text>
-        </View>
-        <FormLabel label={tx('মোবাইল নম্বর', 'Mobile number')} />
-        <TextInput style={styles.input} value={contactPhone} onChangeText={setContactPhone} keyboardType="phone-pad" />
-        <FormLabel label={tx('ঠিকানা', 'Address')} />
-        <TextInput style={styles.input} value={addressText} onChangeText={setAddressText} />
-      </View>
       {submitError ? <Text style={styles.apiNotice}>{submitError}</Text> : null}
-      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('তালিকা নিশ্চিত করুন ✓', 'Confirm Listing ✓')} onPress={submitListing} disabled={submitting} />
+      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('অর্ডার যাচাইয়ের জন্য নিশ্চিত করুন ✓', 'Confirm for Order Validation ✓')} onPress={submitListing} disabled={submitting} />
       <AppButton title={tx('তথ্য পরিবর্তন করুন', 'Edit Details')} variant="outline" onPress={() => setScreen('cattleForm')} />
     </>
   );
@@ -3883,6 +4517,14 @@ function useUid() {
 }
 
 // Training home — points, level, next-up, preference-first categories + all.
+// Learning sections (segmented training): order + bilingual headers.
+const TRAIN_SECTIONS: Array<[string, [string, string]]> = [
+  ['agriculture', ['কৃষি ও খামার', 'Farming & Agriculture']],
+  ['climate', ['জলবায়ু ও সহনশীলতা', 'Climate & Resilience']],
+  ['livelihood', ['দক্ষতা ও জীবিকা', 'Skills & Livelihood']],
+  ['social', ['সমাজ ও কল্যাণ', 'Community & Wellbeing']],
+];
+
 function TrainingHome({ setScreen, openCategory }: { setScreen: (screen: Screen) => void; openCategory: (cat: LearnCat) => void }) {
   const { tx, lang } = useLanguage();
   const uid = useUid();
@@ -3953,12 +4595,20 @@ function TrainingHome({ setScreen, openCategory }: { setScreen: (screen: Screen)
         </>
       ) : null}
 
-      <SectionTitle title={tx('সকল বিষয়', 'All categories')} />
-      <View style={styles.trainCatGrid}>
-        {cats.map((c) => (
-          <TrainCatCard key={`all-${c.id}`} cat={c} onPress={() => openCategory({ id: String(c.id), name: rowTitle(c, lang, ''), emoji: c.emoji })} />
-        ))}
-      </View>
+      {TRAIN_SECTIONS.map(([key, label]) => {
+        const list = cats.filter((c) => String(c.section || 'agriculture') === key);
+        if (!list.length) return null;
+        return (
+          <View key={key}>
+            <SectionTitle title={tx(label[0], label[1])} />
+            <View style={styles.trainCatGrid}>
+              {list.map((c) => (
+                <TrainCatCard key={`sec-${c.id}`} cat={c} onPress={() => openCategory({ id: String(c.id), name: rowTitle(c, lang, ''), emoji: c.emoji })} />
+              ))}
+            </View>
+          </View>
+        );
+      })}
       {!loading && cats.length === 0 ? <Text style={styles.apiNotice}>{tx('এখন কোনো প্রশিক্ষণ বিষয় নেই।', 'No training categories yet.')}</Text> : null}
     </>
   );
@@ -4321,9 +4971,6 @@ function PartnerRegister({ setScreen }: { setScreen: (screen: Screen) => void })
   return (
     <>
       <Header title={tx('শাথী পার্টনার নিবন্ধন', 'Shathi Partner Registration')} onBack={() => setScreen('home')} />
-      <View style={styles.notice}>
-        <Text style={styles.noticeText}>{tx('চুক্তিভিত্তিক চাষ ও ঋণ সংযোগসম্পন্ন Due Diligence সার্ভে পূরণ করুন।', 'Contract farming & credit linkage. Complete the Due Diligence survey.')}</Text>
-      </View>
       <SectionTitle title={tx('সক্রিয় প্রকল্পসমূহ', 'Active Projects')} warning={fallbackWarning(projects)} />
       {projects.loading ? <ApiStatus state={projects} empty={tx('এখন কোনো পার্টনার প্রকল্প নেই।', 'No partner projects are available right now.')} /> : null}
       {projectRows.map((project) => (
@@ -4355,39 +5002,62 @@ function PartnerRegister({ setScreen }: { setScreen: (screen: Screen) => void })
   );
 }
 
-function Kyc({ setScreen, onSubmitted }: { setScreen: (screen: Screen) => void; onSubmitted: (application: ApiRow) => void }) {
+function Kyc({ setScreen, projectId, onSubmitted }: { setScreen: (screen: Screen) => void; projectId?: string | null; onSubmitted: (application: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const projects = useApiList<ApiRow>('partners/projects');
-  const [fullName, setFullName] = useState('');
-  const [nid, setNid] = useState('');
-  const [land, setLand] = useState(num(120, lang));
-  const [livestock, setLivestock] = useState(num(5, lang));
-  const [income, setIncome] = useState(num(120000, lang));
+  const project = (projectId && projects.rows.find((row) => String(row.id) === String(projectId)))
+    || projects.rows.find((row) => row.status === 'open') || projects.rows[0];
+
+  const verified = Boolean(user?.is_kyc_verified);
+  const profileName = user?.full_name && user.full_name !== 'Shathi user' ? user.full_name : '';
+  const initialDob = user?.date_of_birth ? String(user.date_of_birth).slice(0, 10).split('-') : [];
+
+  const [fullName, setFullName] = useState(profileName);
+  const [nid, setNid] = useState(user?.nid_number ?? '');
+  const [gender, setGender] = useState(user?.gender ?? '');
+  const [dobYear, setDobYear] = useState(initialDob[0] || '');
+  const [dobMonth, setDobMonth] = useState(initialDob[1] || '');
+  const [dobDay, setDobDay] = useState(initialDob[2] || '');
+  const [land, setLand] = useState('');
+  const [livestock, setLivestock] = useState('');
+  const [income, setIncome] = useState('');
+  const [incomeSource, setIncomeSource] = useState('');
+  const [mfs, setMfs] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+
+  const genders: Array<{ key: string; label: string }> = [
+    { key: 'male', label: tx('পুরুষ', 'Male') },
+    { key: 'female', label: tx('নারী', 'Female') },
+    { key: 'other', label: tx('অন্যান্য', 'Other') },
+  ];
+  const incomeSources = [tx('গবাদিপশু', 'Livestock'), tx('ফসল', 'Crops'), tx('মৎস্য', 'Fishery'), tx('ব্যবসা', 'Business'), tx('চাকরি', 'Service'), tx('অন্যান্য', 'Other')];
+  const mfsOptions = [tx('বিকাশ', 'bKash'), tx('নগদ', 'Nagad'), tx('রকেট', 'Rocket'), tx('উপায়', 'Upay'), tx('নেই', 'None')];
+  // When the profile is verified, identity fields are locked to the verified data.
+  const lockIdentity = verified && Boolean(profileName) && Boolean(user?.gender);
+
   async function submitKyc() {
+    if (!fullName.trim()) { setSubmitError(tx('NID অনুযায়ী পূর্ণ নাম দিন।', 'Enter your full name as per NID.')); return; }
+    if (!nid.trim()) { setSubmitError(tx('জাতীয় পরিচয়পত্র নম্বর দিন।', 'Enter your NID number.')); return; }
+    if (!gender) { setSubmitError(tx('লিঙ্গ নির্বাচন করুন।', 'Select your gender.')); return; }
     setSubmitting(true);
     setSubmitError('');
     try {
-      const project = projects.rows.find((row) => row.status === 'open') || projects.rows[0];
-      const applicationCode = `KYC-APP-${Date.now()}`;
-      const response = await apiCreate('partners/applications', {
-        application_code: applicationCode,
+      const response = await apiCreate('app/kyc/submit', {
         user_id: Number(user?.id) || 1,
         partner_project_id: Number(project?.id || 1),
-        current_step: 'personal_kyc',
-        full_name_per_nid: fullName,
-        nid_number: nid,
+        full_name_per_nid: fullName.trim(),
+        nid_number: nid.trim(),
+        date_of_birth: dobYear && dobMonth && dobDay ? `${dobYear}-${dobMonth}-${dobDay}` : null,
         total_land_decimals: Number(land) || 0,
         livestock_count: Number(livestock) || 0,
-        primary_income_source: 'Livestock',
+        primary_income_source: incomeSource || undefined,
         annual_household_income: Number(income) || 0,
-        mobile_banking_provider: 'bKash',
-        verification_notes: 'Submitted from mobile app.',
-        status: 'submitted',
+        mobile_banking_provider: mfs || undefined,
       });
-      onSubmitted({ application_code: applicationCode, id: response.result?.insertId });
+      const result = (response.result ?? {}) as { application_code?: string; application_id?: number };
+      onSubmitted({ application_code: result.application_code, id: result.application_id });
       setScreen('regDone');
     } catch (error) {
       setSubmitError(naturalApiError(error, lang));
@@ -4395,36 +5065,71 @@ function Kyc({ setScreen, onSubmitted }: { setScreen: (screen: Screen) => void; 
       setSubmitting(false);
     }
   }
+
   return (
     <>
-      <Header title={tx('KYC সার্ভে', 'KYC Survey')} onBack={() => setScreen('partnerRegister')} right={tx('ধাপ ২/৫', 'Step 2/5')} />
-      <View style={styles.progressLine} />
-      <FormLabel label={tx('পূর্ণ নাম (NID অনুযায়ী)', 'Full name (per NID)')} />
-      <TextInput style={styles.input} value={fullName} onChangeText={setFullName} placeholder={tx('আপনার পূর্ণ নাম', 'Your full name')} placeholderTextColor={colors.muted} />
-      <FormLabel label={tx('জাতীয় পরিচয়পত্র নম্বর', 'NID number')} />
-      <TextInput style={styles.input} value={nid} onChangeText={setNid} placeholder={tx('১৭ সংখ্যার NID', '17-digit NID')} placeholderTextColor={colors.muted} keyboardType="number-pad" />
-      <View style={styles.twoCol}>
-        <View style={styles.flex}>
-          <FormLabel label={tx('জন্ম তারিখ', 'DOB')} />
-          <TextInput style={styles.input} placeholder="mm/dd/yyyy" placeholderTextColor={colors.muted} />
+      <Header title={tx('KYC যাচাই', 'KYC Verification')} onBack={() => setScreen('projects')} right={tx('ধাপ ২/৫', 'Step 2/5')} />
+      {project ? (
+        <View style={styles.kycProjectBar}>
+          <Text style={styles.kycProjectLabel}>{tx('প্রকল্প', 'Project')}</Text>
+          <Text style={styles.kycProjectName} numberOfLines={1}>{rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
         </View>
-        <View style={styles.flex}>
-          <FormLabel label={tx('লিঙ্গ', 'Gender')} />
-          <FakeSelect value={tx('নির্বাচন', 'Select')} />
+      ) : null}
+
+      <View style={styles.formCard}>
+        <Text style={styles.formCardTitle}>{tx('পরিচয় তথ্য', 'Identity details')}</Text>
+        {lockIdentity ? (
+          <View style={styles.verifiedBanner}>
+            <Text style={styles.verifiedBannerText}>✓ {tx('আপনার প্রোফাইল যাচাইকৃত — নাম ও লিঙ্গ স্বয়ংক্রিয়ভাবে পূরণ হয়েছে।', 'Your profile is verified — name and gender are filled automatically.')}</Text>
+          </View>
+        ) : null}
+
+        <FormLabel small required label={tx('পূর্ণ নাম (NID অনুযায়ী)', 'Full name (per NID)')} />
+        <TextInput style={[styles.inputSm, lockIdentity && styles.inputLocked]} editable={!lockIdentity} value={fullName} onChangeText={setFullName} placeholder={tx('আপনার পূর্ণ নাম', 'Your full name')} placeholderTextColor={colors.muted} />
+
+        <FormLabel small required label={tx('জাতীয় পরিচয়পত্র নম্বর', 'NID number')} />
+        <TextInput style={styles.inputSm} value={nid} onChangeText={setNid} placeholder={tx('১০ বা ১৭ সংখ্যা', '10 or 17 digits')} placeholderTextColor={colors.muted} keyboardType="number-pad" />
+
+        <FormLabel small label={tx('জন্ম তারিখ', 'Date of birth')} />
+        <View style={styles.dobRow}>
+          <DropdownField value={dobDay} placeholder={tx('দিন', 'Day')} onSelect={lockIdentity ? () => {} : setDobDay} options={Array.from({ length: 31 }, (_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: num(i + 1, lang) }; })} />
+          <DropdownField value={dobMonth} placeholder={tx('মাস', 'Month')} flexBasis={1.3} onSelect={lockIdentity ? () => {} : setDobMonth} options={MONTHS_EN.map((_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: lang === 'bn' ? MONTHS_BN[i] : MONTHS_EN[i] }; })} />
+          <DropdownField value={dobYear} placeholder={tx('সাল', 'Year')} flexBasis={1.2} onSelect={lockIdentity ? () => {} : setDobYear} options={Array.from({ length: 75 }, (_, i) => { const y = new Date().getFullYear() - 10 - i; return { value: String(y), label: num(y, lang) }; })} />
+        </View>
+
+        <FormLabel small required label={tx('লিঙ্গ', 'Gender')} />
+        <View style={styles.genderRow}>
+          {genders.map((g) => (
+            <Pressable key={g.key} disabled={lockIdentity} style={[styles.genderPillSm, gender === g.key && styles.genderPillActive, lockIdentity && gender !== g.key && styles.inputLocked]} onPress={() => setGender(g.key)}>
+              <Text style={[styles.genderPillText, gender === g.key && styles.genderPillTextActive]}>{g.label}</Text>
+            </Pressable>
+          ))}
         </View>
       </View>
-      <FormLabel label={tx('মোট জমি (শতক)', 'Total land (decimals)')} />
-      <TextInput style={styles.input} value={land} onChangeText={setLand} keyboardType="number-pad" />
-      <FormLabel label={tx('বর্তমান পশুর সংখ্যা', 'Livestock count')} />
-      <TextInput style={styles.input} value={livestock} onChangeText={setLivestock} keyboardType="number-pad" />
-      <FormLabel label={tx('প্রধান আয়ের উৎস', 'Primary income source')} />
-      <FakeSelect value={tx('নির্বাচন', 'Select')} />
-      <FormLabel label={tx('বার্ষিক পারিবারিক আয় (৳)', 'Annual household income (৳)')} />
-      <TextInput style={styles.input} value={income} onChangeText={setIncome} keyboardType="number-pad" />
-      <FormLabel label={tx('মোবাইল ব্যাংকিং', 'Mobile banking')} />
-      <FakeSelect value={tx('নির্বাচন', 'Select')} />
+
+      <View style={styles.formCard}>
+        <Text style={styles.formCardTitle}>{tx('খামার ও আয়', 'Farm & income')}</Text>
+        <View style={styles.twoCol}>
+          <View style={styles.flex}>
+            <FormLabel small label={tx('মোট জমি (শতক)', 'Total land (decimals)')} />
+            <TextInput style={styles.inputSm} value={land} onChangeText={setLand} keyboardType="number-pad" placeholder={tx('যেমন ১২০', 'e.g. 120')} placeholderTextColor={colors.muted} />
+          </View>
+          <View style={styles.flex}>
+            <FormLabel small label={tx('পশুর সংখ্যা', 'Livestock count')} />
+            <TextInput style={styles.inputSm} value={livestock} onChangeText={setLivestock} keyboardType="number-pad" placeholder={tx('যেমন ৫', 'e.g. 5')} placeholderTextColor={colors.muted} />
+          </View>
+        </View>
+        <FormLabel small label={tx('প্রধান আয়ের উৎস', 'Primary income source')} />
+        <FakeSelect value={incomeSource || tx('নির্বাচন করুন', 'Select')} options={incomeSources} onChange={setIncomeSource} />
+        <FormLabel small label={tx('বার্ষিক পারিবারিক আয় (৳)', 'Annual household income (৳)')} />
+        <TextInput style={styles.inputSm} value={income} onChangeText={setIncome} keyboardType="number-pad" placeholder={tx('যেমন ১২০০০০', 'e.g. 120000')} placeholderTextColor={colors.muted} />
+        <FormLabel small label={tx('মোবাইল ব্যাংকিং', 'Mobile banking')} />
+        <FakeSelect value={mfs || tx('নির্বাচন করুন', 'Select')} options={mfsOptions} onChange={setMfs} />
+      </View>
+
+      <Text style={styles.fieldHint}>{tx('মাঠ কর্মকর্তা তথ্য যাচাই করে অনুমোদন করবেন। যাচাইকৃত KYC ছাড়া প্রকল্প সক্রিয় হবে না।', 'A field officer verifies your details before approval. Projects activate only after KYC is approved.')}</Text>
       {submitError ? <Text style={styles.apiNotice}>{submitError}</Text> : null}
-      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('জমা দিন ও পরবর্তী ধাপ  →', 'Submit & next step  →')} onPress={submitKyc} disabled={submitting} />
+      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('আবেদন জমা দিন', 'Submit application')} onPress={submitKyc} disabled={submitting} />
     </>
   );
 }
@@ -4514,10 +5219,10 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
           </View>
         ))}
       </View>
-      <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('officers')} warning={fallbackWarning(officers)} />
+      <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('officers')} />
       <Card>
         {officerRows.slice(0, 2).map((officer, index) => (
-          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')} phone={officer.phone ? String(officer.phone) : undefined} />
+          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[tEnum(officer.role || officer.officer_role, lang), officer.district, officer.upazila].filter(Boolean).join(' · ')} phone={officer.phone ? String(officer.phone) : undefined} />
         ))}
         {officers.loading ? <Text style={styles.apiNotice}>{tx('কর্মকর্তার তথ্য আনা হচ্ছে...', 'Loading officer data...')}</Text> : null}
       </Card>
@@ -4563,7 +5268,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <Post
           key={String(post.id ?? `local-${index}`)}
           name={String(post.farmer_name || post.user_name || tx('শাথী ব্যবহারকারী', 'Shathi user'))}
-          tag={humanizeLabel(post.post_type || tx('পোস্ট', 'Post'))}
+          tag={post.post_type ? tEnum(post.post_type, lang) : tx('পোস্ট', 'Post')}
           text={rowBody(post, lang, '')}
           image={post.image_url ? String(post.image_url) : undefined}
           official={Number(post.is_official ?? 0) === 1}
@@ -4627,100 +5332,171 @@ function Post({ name, tag, text, likes, comments, meta, image, official }: { nam
   );
 }
 
-function Projects({ setScreen }: { setScreen: (screen: Screen) => void }) {
+const PROJECT_CAT_EMOJI: Record<string, string> = {
+  'livestock-poultry': '🐄', crops: '🌾', fishery: '🐟', vegetables: '🥬', fruits: '🥭', inputs: '🌱', machinery: '🚜',
+};
+
+function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () => void }) {
   const { tx, lang } = useLanguage();
-  const projects = useApiList<ApiRow>('partners/projects');
-  const ledgers = useApiList<ApiRow>('partners/ledgers');
-  const projectRows = shouldUseFallback(projects) ? fallbackPartnerProjects : projects.rows;
-  const ledgerRows = shouldUseFallback(ledgers) ? fallbackLedgers : ledgers.rows;
-  const project = projectRows[0];
-  const projectLedgers = ledgerRows.slice(0, 4);
-  const rawSteps = (parseMaybeJson(lang === 'bn' ? project?.steps_bn_json : project?.steps_json) as any[]);
-  const projectSteps = rawSteps.length
-    ? rawSteps.map(String)
-    : [tx('প্রকল্প নির্বাচন', 'Project selection'), tx('KYC', 'KYC'), tx('যাচাই', 'Verification'), tx('অনুমোদন', 'Approval')];
-  const currentStepIndex = Math.min(projectSteps.length - 1, Math.max(0, Number(project?.current_step_index ?? 2)));
-  const progressPercent = projectSteps.length > 1 ? Math.round((currentStepIndex / (projectSteps.length - 1)) * 100) : 100;
+  const emoji = PROJECT_CAT_EMOJI[String(project.interest_slug)] || '📦';
+  const region = [project.upazila, project.district, project.division].filter(Boolean).join(', ');
+  const open = project.status === 'open';
+  const matches = Number(project.matches_interest) === 1;
   return (
-    <>
-      <BrandHeader setScreen={setScreen} />
-      <View style={styles.projectHero}>
-        <View style={styles.projectHeroIcon}>
-          <Text style={styles.projectHeroEmoji}>▣</Text>
-        </View>
-        <View style={styles.flex}>
-          <Text style={styles.projectHeroTitle}>{tx('শাথী পার্টনার', 'Shathi Partner')}</Text>
-          <Text style={styles.projectHeroSub}>{tx('চুক্তি চাষ, উপকরণ ও লাভের হিসাব', 'Contract farming, inputs and profit tracking')}</Text>
-        </View>
-        <Badge label={tx('সক্রিয়', 'Active')} tone="green" />
-      </View>
-      {projects.loading ? <ApiStatus state={projects} empty={tx('এখন কোনো প্রকল্প পাওয়া যায়নি।', 'No projects are available right now.')} /> : null}
-
-      <View style={styles.projectStatGrid}>
-        <View style={styles.projectStatCard}>
-          <Text style={styles.projectStatValue}>{num(projectRows.length, lang)}</Text>
-          <Text style={styles.projectStatLabel}>{tx('সক্রিয় প্রকল্প', 'Active Projects')}</Text>
-        </View>
-        <View style={styles.projectStatCard}>
-          <Text style={styles.projectStatValue}>৳62K</Text>
-          <Text style={styles.projectStatLabel}>{tx('উপকরণ', 'Inputs')}</Text>
-        </View>
-        <View style={styles.projectStatCard}>
-          <Text style={styles.projectStatValue}>৳18K</Text>
-          <Text style={styles.projectStatLabel}>{tx('লভ্যাংশ', 'Profit Share')}</Text>
+    <Card style={styles.projCard}>
+      <View style={styles.projImageWrap}>
+        {project.image_url ? <Image source={{ uri: String(project.image_url) }} style={styles.projImage} /> : <View style={[styles.projImage, styles.projImagePlaceholder]}><Text style={styles.projImageEmoji}>{emoji}</Text></View>}
+        {matches ? <View style={styles.projTag}><Text style={styles.projTagText}>{tx('আপনার আগ্রহ', 'Your interest')}</Text></View> : null}
+        <View style={[styles.projStatusPill, open ? styles.projStatusOpen : styles.projStatusSoon]}>
+          <Text style={styles.projStatusText}>{open ? tx('নিবন্ধন চলছে', 'Open') : tx('শীঘ্রই', 'Soon')}</Text>
         </View>
       </View>
+      <View style={styles.projBody}>
+        <Text style={styles.projName}>{emoji} {rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
+        {region ? <Text style={styles.projMeta}>⌖ {region}{Number(project.region_based) === 0 ? ` · ${tx('সব অঞ্চল', 'All regions')}` : ''}</Text> : null}
+        {project.summary_en || project.summary_bn ? <Text style={styles.projSummary} numberOfLines={2}>{rowBody(project, lang, '')}</Text> : null}
+        <View style={styles.projStatsRow}>
+          {project.duration_label ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('মেয়াদ', 'Duration')}</Text><Text style={styles.projStatValue}>{String(project.duration_label)}</Text></View> : null}
+          {Number(project.investment_amount) > 0 ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('বিনিয়োগ', 'Investment')}</Text><Text style={styles.projStatValue}>{amount(Number(project.investment_amount), lang)}</Text></View> : null}
+          {Number(project.capacity) > 0 ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('আসন', 'Seats')}</Text><Text style={styles.projStatValue}>{num(Number(project.enrolled || 0), lang)}/{num(Number(project.capacity), lang)}</Text></View> : null}
+        </View>
+        {project.market_overview_en || project.market_overview_bn ? (
+          <View style={styles.projOverview}><Text style={styles.projOverviewText}>📈 {lang === 'bn' ? (project.market_overview_bn || project.market_overview_en) : (project.market_overview_en || project.market_overview_bn)}</Text></View>
+        ) : null}
+        {open ? <AppButton title={tx('এই প্রকল্পে আবেদন করুন  →', 'Apply for this project  →')} onPress={onApply} /> : null}
+      </View>
+    </Card>
+  );
+}
 
-      <SectionTitle title={tx('সক্রিয় প্রকল্প', 'Active Project')} warning={fallbackWarning(projects)} />
-      <View style={styles.projectDetailCard}>
-        <View style={styles.projectDetailTop}>
-          <View style={styles.flex}>
-            <Text style={styles.projectDetailName}>{rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
-            <Text style={styles.projectDetailMeta}>{[formatDate(project?.start_date, lang), formatDate(project?.end_date, lang)].filter(Boolean).join(' — ')}</Text>
-          </View>
-          <View style={styles.projectBalance}>
-            <Text style={styles.projectBalanceLabel}>{tx('বাকি', 'Balance')}</Text>
-            <Text style={styles.projectBalanceValue}>৳2,700</Text>
+function ProjectMineCard({ project }: { project: ApiRow }) {
+  const { tx, lang } = useLanguage();
+  const emoji = PROJECT_CAT_EMOJI[String(project.interest_slug)] || '📦';
+  const approved = Number(project.is_approved) === 1 || project.application_status === 'approved';
+  const kyc = Number(project.kyc_verified) === 1;
+  const banking = Number(project.has_banking) === 1;
+  const farm = Number(project.has_farm_assessment) === 1;
+  const steps: Array<{ label: string; done: boolean }> = [
+    { label: tx('আবেদন/নথিভুক্ত', 'Enrolled'), done: approved },
+    { label: tx('ব্যক্তিগত KYC', 'Personal KYC'), done: kyc },
+    { label: tx('ব্যাংকিং তথ্য', 'Banking info'), done: banking },
+    { label: tx('খামার মূল্যায়ন', 'Farm assessment'), done: farm },
+  ];
+  const firstPending = steps.findIndex((s) => !s.done);
+  const region = [project.upazila, project.district, project.division].filter(Boolean).join(', ');
+  const dates = [formatDate(project.start_date, lang), formatDate(project.end_date, lang)].filter(Boolean).join(' — ');
+  return (
+    <Card style={styles.projCard}>
+      {project.image_url ? (
+        <View style={styles.projImageWrap}>
+          <Image source={{ uri: String(project.image_url) }} style={styles.projImage} />
+          <View style={[styles.projStatusPill, approved ? styles.projStatusOpen : styles.projStatusSoon]}>
+            <Text style={styles.projStatusText}>{approved ? tx('সক্রিয়', 'Active') : tEnum(project.application_status, lang)}</Text>
           </View>
         </View>
-        <View style={styles.projectHealthBar}>
-          <View style={[styles.projectHealthFill, { width: `${progressPercent}%` }]} />
+      ) : null}
+      <View style={styles.projBody}>
+        <View style={styles.projMineHead}>
+          <Text style={styles.projName}>{emoji} {rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
+          {!project.image_url ? <Badge label={approved ? tx('সক্রিয়', 'Active') : tEnum(project.application_status, lang)} tone={approved ? 'green' : 'gold'} /> : null}
         </View>
-        <Text style={styles.projectHealthText}>
-          {tx(`চলমান ধাপ: ${projectSteps[currentStepIndex] || ''}`, `Ongoing step: ${projectSteps[currentStepIndex] || ''}`)}
-        </Text>
+        {region ? <Text style={styles.projMeta}>⌖ {region}</Text> : null}
+        {dates ? <Text style={styles.projMeta}>🗓 {dates}{project.duration_label ? ` · ${project.duration_label}` : ''}</Text> : null}
+        {project.application_code ? <Text style={styles.projMeta}>{tx('আবেদন', 'Application')}: {String(project.application_code)}</Text> : null}
 
-        <View style={styles.projectProgressHead}>
-          <Text style={styles.smallUpper}>{tx('প্রকল্পের অগ্রগতি', 'Project Progress')}</Text>
-          <Text style={styles.projectProgressBadge}>{tx(`ধাপ ${bn(currentStepIndex + 1)}/${bn(projectSteps.length)}`, `Step ${currentStepIndex + 1}/${projectSteps.length}`)}</Text>
-        </View>
+        <Text style={styles.projTimelineTitle}>{tx('আবেদন অগ্রগতি', 'Application progress')}</Text>
         <View style={styles.connectedTimeline}>
-          {projectSteps.map((item, index) => {
-            const state = index < currentStepIndex ? 'done' : index === currentStepIndex ? 'current' : 'pending';
+          {steps.map((s, index) => {
+            const state = s.done ? 'done' : (index === firstPending ? 'current' : 'pending');
             return (
-              <View key={item} style={styles.connectedStep}>
+              <View key={s.label} style={styles.connectedStep}>
                 <View style={styles.timelineNodeRow}>
-                  {index > 0 ? <View style={[styles.timelineConnector, index <= currentStepIndex ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
+                  {index > 0 ? <View style={[styles.timelineConnector, steps[index - 1].done ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
                   <View style={[styles.timelineNode, state === 'done' && styles.timelineNodeDone, state === 'current' && styles.timelineNodeCurrent]}>
                     <Text style={[styles.timelineNodeText, state === 'pending' && styles.timelineNodeTextPending]}>{state === 'done' ? '✓' : num(index + 1, lang)}</Text>
                   </View>
-                  {index < projectSteps.length - 1 ? <View style={[styles.timelineConnector, index < currentStepIndex ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
+                  {index < steps.length - 1 ? <View style={[styles.timelineConnector, s.done ? styles.timelineConnectorDone : styles.timelineConnectorPending]} /> : <View style={styles.timelineConnectorGhost} />}
                 </View>
-                <Text style={[styles.timelineText, state === 'current' && styles.timelineTextCurrent]} numberOfLines={2}>{item}</Text>
-                <Text style={[styles.timelineStateText, state === 'done' && styles.timelineStateDone, state === 'current' && styles.timelineStateCurrent]}>
-                  {state === 'done' ? tx('সম্পন্ন', 'Completed') : state === 'current' ? tx('চলমান', 'Ongoing') : tx('বাকি', 'Remaining')}
+                <Text style={[styles.timelineText, state === 'current' && styles.timelineTextCurrent]} numberOfLines={2}>{s.label}</Text>
+                <Text style={[styles.timelineStateText, s.done && styles.timelineStateDone, state === 'current' && styles.timelineStateCurrent]}>
+                  {s.done ? tx('সম্পন্ন ✓', 'Verified ✓') : tx('অপেক্ষমাণ', 'Pending')}
                 </Text>
               </View>
             );
           })}
         </View>
-        <Text style={styles.smallUpper}>{tx('উপকরণ ও হিসাব', 'Inputs & Accounts')}</Text>
-        <SectionTitle title={tx('লেনদেন', 'Ledger')} warning={fallbackWarning(ledgers)} />
-        {ledgers.loading ? <ApiStatus state={ledgers} empty={tx('এই প্রকল্পে এখন কোনো লেজার তথ্য নেই।', 'No ledger data is available for this project yet.')} /> : null}
-        {projectLedgers.map((ledger) => (
-          <LedgerRow key={ledger.id || ledger.title_en} label={rowTitle(ledger, lang, ledger.entry_type || '')} value={amount(Number(ledger.amount || 0), lang)} green={ledger.entry_type === 'payment'} />
+      </View>
+    </Card>
+  );
+}
+
+function Projects({ setScreen, onApply, initialTab = 'area' }: { setScreen: (screen: Screen) => void; onApply: (projectId: string) => void; initialTab?: 'all' | 'area' | 'mine' }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
+  const all = useApiList<ApiRow>('partners/projects');
+  const active = useApiList<ApiRow>(`app/projects/active${uid}`);
+  const mine = useApiList<ApiRow>(`app/projects/mine${uid}`);
+  const [tab, setTab] = useState<'all' | 'area' | 'mine'>(initialTab);
+  const allRows = all.rows.filter((p) => Number(p.is_active) !== 0);
+  const tabs: Array<{ key: 'all' | 'area' | 'mine'; label: string }> = [
+    { key: 'area', label: tx('আপনার এলাকা', 'In your area') },
+    { key: 'all', label: tx('সকল প্রকল্প', 'All projects') },
+    { key: 'mine', label: tx('আমার প্রকল্প', 'My projects') },
+  ];
+  return (
+    <>
+      <BrandHeader setScreen={setScreen} />
+      <View style={styles.projectHero}>
+        <View style={styles.projectHeroIcon}><Text style={styles.projectHeroEmoji}>▣</Text></View>
+        <View style={styles.flex}>
+          <Text style={styles.projectHeroTitle}>{tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')}</Text>
+          <Text style={styles.projectHeroSub}>{tx('এলাকার, সকল ও আপনার প্রকল্প', 'Area, all and your projects')}</Text>
+        </View>
+      </View>
+
+      <View style={styles.projTabBar}>
+        {tabs.map((t) => (
+          <Pressable key={t.key} onPress={() => setTab(t.key)} style={[styles.projTab, tab === t.key && styles.projTabActive]}>
+            <Text style={[styles.projTabText, tab === t.key && styles.projTabTextActive]} numberOfLines={1}>{t.label}</Text>
+          </Pressable>
         ))}
       </View>
+
+      {tab === 'area' ? (
+        <>
+          {active.loading ? <ApiStatus state={active} /> : null}
+          {!active.loading && active.rows.length === 0 ? (
+            <Text style={styles.fieldHint}>{tx('আপনার এলাকায় এখন কোনো সক্রিয় প্রকল্প নেই।', 'No active projects in your area right now.')}</Text>
+          ) : null}
+          {active.rows.map((p) => (
+            <ProjectAreaCard key={String(p.id)} project={p} onApply={() => onApply(String(p.id))} />
+          ))}
+        </>
+      ) : tab === 'all' ? (
+        <>
+          {all.loading ? <ApiStatus state={all} /> : null}
+          {!all.loading && allRows.length === 0 ? (
+            <Text style={styles.fieldHint}>{tx('এখন কোনো প্রকল্প নেই।', 'No projects available right now.')}</Text>
+          ) : null}
+          {allRows.map((p) => (
+            <ProjectAreaCard key={String(p.id)} project={p} onApply={() => onApply(String(p.id))} />
+          ))}
+        </>
+      ) : (
+        <>
+          {mine.loading ? <ApiStatus state={mine} /> : null}
+          {!mine.loading && mine.rows.length === 0 ? (
+            <View style={styles.projEmpty}>
+              <Text style={styles.projEmptyText}>{tx('আপনি এখনো কোনো প্রকল্পে যুক্ত হননি।', 'You have not joined any project yet.')}</Text>
+              <AppButton title={tx('সকল প্রকল্প দেখুন', 'Browse all projects')} variant="outline" onPress={() => setTab('all')} />
+            </View>
+          ) : null}
+          {mine.rows.map((p) => (
+            <ProjectMineCard key={String(p.application_id || p.id)} project={p} />
+          ))}
+        </>
+      )}
     </>
   );
 }
@@ -5176,7 +5952,7 @@ function MarketUpdates({ setScreen, onSelect }: { setScreen: (screen: Screen) =>
               {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketCardImage} /> : null}
               <View style={styles.marketCardBody}>
                 <View style={styles.marketCardTop}>
-                  <Badge label={humanizeLabel(row.category || row.update_type || 'update')} tone="gold" />
+                  <Badge label={tEnum(row.category || row.update_type || 'update', lang)} tone="gold" />
                   {row.created_at ? <Text style={styles.menuSub}>{formatDate(row.created_at, lang)}</Text> : null}
                 </View>
                 <Text style={styles.marketCardTitle}>{rowTitle(row, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
@@ -5218,7 +5994,7 @@ function MarketDetail({ setScreen, id }: { setScreen: (screen: Screen) => void; 
             {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketDetailImage} /> : null}
             <View style={{ paddingHorizontal: 16, paddingTop: 14 }}>
               <View style={styles.marketCardTop}>
-                <Badge label={humanizeLabel(row.category || row.update_type || 'update')} tone="gold" />
+                <Badge label={tEnum(row.category || row.update_type || 'update', lang)} tone="gold" />
                 {row.created_at ? <Text style={styles.menuSub}>{formatDate(row.created_at, lang)}</Text> : null}
               </View>
               <Text style={styles.marketDetailTitle}>{rowTitle(row, lang, '')}</Text>
@@ -5249,7 +6025,7 @@ function OfficersScreen({ setScreen }: { setScreen: (screen: Screen) => void }) 
             <Officer
               key={String(officer.id ?? index)}
               name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))}
-              role={[humanizeLabel(officer.role || officer.officer_role), officer.district, officer.upazila].filter(Boolean).join(' · ')}
+              role={[tEnum(officer.role || officer.officer_role, lang), officer.district, officer.upazila].filter(Boolean).join(' · ')}
               phone={officer.phone ? String(officer.phone) : undefined}
             />
           ))}
@@ -5442,6 +6218,9 @@ const styles = StyleSheet.create({
   loaderOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
   loaderCard: { width: 76, height: 76, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.96)', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 8, borderWidth: 1, borderColor: colors.line },
   otpResend: { color: colors.maroon, fontSize: 14, fontWeight: '700', textAlign: 'center', marginTop: 14 },
+  otpTimer: { color: colors.muted, fontSize: 13, fontWeight: '600', textAlign: 'center', marginTop: 10 },
+  otpExpired: { color: colors.danger, fontSize: 13, fontWeight: '700', textAlign: 'center', marginTop: 10 },
+  otpResendWait: { color: colors.muted, fontSize: 13, textAlign: 'center', marginTop: 14 },
   otpEditPhone: { color: colors.muted, fontSize: 13, textAlign: 'center', marginTop: 8 },
   genderRow: { flexDirection: 'row', gap: 10, marginHorizontal: 20, marginTop: 6 },
   genderPill: { flex: 1, height: 46, borderRadius: 10, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
@@ -5628,19 +6407,27 @@ const styles = StyleSheet.create({
     borderColor: colors.maroon,
     padding: 18,
   },
-  heroSmall: { color: 'rgba(255,255,255,0.78)', fontSize: 16 },
-  heroName: { color: 'white', fontSize: 19, fontWeight: '700', marginTop: 4 },
+  heroGreeting: { marginBottom: 2 },
+  heroSmall: { color: 'rgba(255,255,255,0.82)', fontSize: 16 },
+  heroName: { color: 'white', fontSize: 18, fontWeight: '800' },
   heroMeta: { color: 'rgba(255,255,255,0.78)', fontSize: 13, marginTop: 8 },
-  weatherHomeCard: { marginTop: 12, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.14)', padding: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
-  weatherHomeTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  weatherHomeIcon: { width: 42, height: 42, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
-  weatherHomeEmoji: { fontSize: 24 },
-  weatherHomeTitle: { color: 'white', fontSize: 15, fontWeight: '700' },
-  weatherHomeLocation: { color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 2 },
+  weatherHomeCard: { marginTop: 10, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.14)', paddingVertical: 9, paddingHorizontal: 11, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
+  weatherHomeTop: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  weatherHomeIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
+  weatherHomeEmoji: { fontSize: 20 },
+  weatherHomeTitle: { color: 'white', fontSize: 14, fontWeight: '700' },
+  weatherHomeLocation: { color: 'rgba(255,255,255,0.8)', fontSize: 11, marginTop: 1 },
   weatherHomeTemp: { alignItems: 'flex-end' },
-  weatherHomeTempText: { color: colors.goldPale, fontSize: 21, fontWeight: '700' },
-  weatherHomeMeta: { color: 'rgba(255,255,255,0.76)', fontSize: 11 },
-  weatherHomeAlert: { color: 'rgba(255,255,255,0.84)', fontSize: 12, fontWeight: '700', marginTop: 8 },
+  weatherHomeTempText: { color: colors.goldPale, fontSize: 19, fontWeight: '700' },
+  weatherHomeMeta: { color: 'rgba(255,255,255,0.76)', fontSize: 10 },
+  weatherHomeAlert: { color: 'rgba(255,255,255,0.84)', fontSize: 11, fontWeight: '700', marginTop: 6 },
+  metricsBand: { flexDirection: 'row', alignItems: 'stretch', marginHorizontal: 16, marginTop: 14, marginBottom: 4, backgroundColor: colors.card, borderRadius: 16, borderWidth: 1, borderColor: colors.line, paddingVertical: 12, shadowColor: colors.maroon, shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
+  metricDivider: { width: 1, backgroundColor: colors.line, marginVertical: 6 },
+  metricCard: { flex: 1, alignItems: 'center', paddingHorizontal: 4 },
+  metricIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  metricIconText: { fontSize: 17 },
+  metricValue: { fontSize: 18, fontWeight: '800', marginTop: 6 },
+  metricLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', marginTop: 2 },
   sourceBadge: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 8, alignSelf: 'flex-start', maxWidth: '100%', backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FDBA74', borderRadius: 10, paddingHorizontal: 9, paddingVertical: 7 },
   sourceBadgeIcon: { color: '#92400E', fontSize: 12, fontWeight: '700' },
   sourceBadgeText: { color: '#92400E', fontSize: 11, lineHeight: 15, flexShrink: 1 },
@@ -5672,10 +6459,17 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   serviceCardFull: { width: '100%' },
+  serviceCardHighlight: { backgroundColor: colors.rose, borderColor: '#E8C4D4', borderWidth: 1.5, shadowColor: colors.maroon, shadowOpacity: 0.1, shadowRadius: 9, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
+  serviceBadge: { position: 'absolute', top: 10, right: 10, backgroundColor: colors.gold, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3, zIndex: 2 },
+  serviceBadgeText: { color: '#4A2C00', fontSize: 10, fontWeight: '800' },
   serviceIcon: { width: 50, height: 50, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
+  serviceIconHighlight: { width: 52, height: 52, backgroundColor: colors.card },
   serviceIconText: { color: colors.maroon, fontSize: 27, lineHeight: 32, textAlign: 'center' },
   serviceTitle: { color: colors.ink, fontSize: 15, lineHeight: 19, fontWeight: '700', flexShrink: 1 },
+  serviceTitleHighlight: { color: colors.maroon, fontSize: 16, fontWeight: '800' },
   serviceSub: { color: colors.muted, fontSize: 11, lineHeight: 15, marginTop: 2 },
+  serviceSubHighlight: { color: colors.maroon, opacity: 0.75 },
+  serviceArrow: { position: 'absolute', bottom: 12, right: 12, color: colors.maroon, opacity: 0.55, fontSize: 22, lineHeight: 22 },
   homeApaCard: {
     marginHorizontal: 16,
     marginTop: 16,
@@ -5896,8 +6690,8 @@ const styles = StyleSheet.create({
   listTitle: { color: colors.ink, fontSize: 16, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
   listSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
   chevron: { color: colors.muted, fontSize: 22 },
-  infoBar: { backgroundColor: colors.rose, paddingHorizontal: 18, paddingVertical: 12, marginTop: 0 },
-  infoText: { color: colors.maroon, fontSize: 14 },
+  infoBar: { backgroundColor: colors.rose, paddingHorizontal: 16, paddingVertical: 13, marginHorizontal: 16, marginTop: 8, borderRadius: 12, borderLeftWidth: 4, borderLeftColor: colors.maroon },
+  infoText: { color: colors.maroon, fontSize: 14, lineHeight: 21, fontWeight: '500' },
   twoCol: { flexDirection: 'row', gap: 10, paddingHorizontal: 16 },
   fakeSelect: {
     height: 48,
@@ -5911,7 +6705,127 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  fakeSelectText: { color: colors.ink, fontSize: 16 },
+  fakeSelectCompact: { height: 44, marginHorizontal: 0, paddingHorizontal: 12 },
+  fakeSelectText: { color: colors.ink, fontSize: 16, flex: 1 },
+  fakeSelectPlaceholder: { color: colors.muted },
+  fieldHint: { color: colors.muted, fontSize: 12, marginHorizontal: 16, marginTop: 6, lineHeight: 17 },
+  weightRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16 },
+  weightRowInput: { marginHorizontal: 0 },
+  measureBtn: { height: 48, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', alignItems: 'center', justifyContent: 'center' },
+  measureBtnText: { color: colors.blue, fontSize: 13, fontWeight: '700' },
+  uploadCompact: { marginHorizontal: 16, borderWidth: 2, borderStyle: 'dashed', borderColor: '#D8A4BC', backgroundColor: colors.rose, borderRadius: 12, minHeight: 84, alignItems: 'center', justifyContent: 'center' },
+  thumbRow: { marginHorizontal: 16, marginTop: 10 },
+  thumbWrap: { width: 84, height: 84, borderRadius: 10, marginRight: 10, overflow: 'hidden', position: 'relative' },
+  thumb: { width: 84, height: 84, resizeMode: 'cover' },
+  thumbRemove: { position: 'absolute', top: 2, right: 2, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(74,17,43,0.85)', alignItems: 'center', justifyContent: 'center' },
+  thumbRemoveText: { color: 'white', fontSize: 15, fontWeight: '700', lineHeight: 17 },
+  measureDiagram: { marginHorizontal: 16, marginTop: 10, backgroundColor: colors.rose, borderRadius: 12, padding: 14, alignItems: 'center' },
+  measureDiagramArt: { fontSize: 30 },
+  measureDiagramText: { color: colors.ink, fontSize: 13, lineHeight: 20, marginTop: 8 },
+  unitToggle: { flexDirection: 'row', gap: 8, marginHorizontal: 16, marginTop: 12 },
+  unitChip: { paddingVertical: 7, paddingHorizontal: 18, borderRadius: 999, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
+  unitChipActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
+  unitChipText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
+  unitChipTextActive: { color: 'white' },
+  summaryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 16, marginTop: 12 },
+  summaryChip: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: colors.rose, borderWidth: 1, borderColor: colors.line },
+  summaryChipText: { color: colors.maroon, fontSize: 12, fontWeight: '700' },
+  projTabBar: { flexDirection: 'row', marginHorizontal: 16, marginTop: 6, marginBottom: 4, backgroundColor: colors.rose, borderRadius: 12, padding: 4, gap: 4 },
+  projTab: { flex: 1, paddingVertical: 9, borderRadius: 9, alignItems: 'center' },
+  projTabActive: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
+  projTabText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  projTabTextActive: { color: colors.maroon },
+  projTimelineTitle: { color: colors.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', marginTop: 14, marginBottom: 4 },
+  projCard: { marginHorizontal: 16, marginTop: 12, padding: 0, overflow: 'hidden' },
+  projImageWrap: { position: 'relative', width: '100%', height: 150, backgroundColor: colors.rose },
+  projImage: { width: '100%', height: 150, resizeMode: 'cover' },
+  projImagePlaceholder: { alignItems: 'center', justifyContent: 'center' },
+  projImageEmoji: { fontSize: 44 },
+  projTag: { position: 'absolute', top: 10, left: 10, backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  projTagText: { color: 'white', fontSize: 11, fontWeight: '700' },
+  projStatusPill: { position: 'absolute', top: 10, right: 10, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  projStatusOpen: { backgroundColor: colors.green },
+  projStatusSoon: { backgroundColor: colors.blue },
+  projStatusText: { color: 'white', fontSize: 11, fontWeight: '700' },
+  projBody: { padding: 14 },
+  projName: { color: colors.ink, fontSize: 16, fontWeight: '700' },
+  projMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
+  projSummary: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 6 },
+  projStatsRow: { flexDirection: 'row', gap: 16, marginTop: 10 },
+  projStat: {},
+  projStatLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  projStatValue: { color: colors.maroon, fontSize: 14, fontWeight: '700', marginTop: 2 },
+  projOverview: { marginTop: 10, backgroundColor: colors.bluePale, borderRadius: 10, padding: 10 },
+  projOverviewText: { color: '#1E40AF', fontSize: 12, lineHeight: 18 },
+  projMineHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  projHealthBar: { height: 7, borderRadius: 7, backgroundColor: colors.line, overflow: 'hidden', marginTop: 10 },
+  projHealthFill: { height: 7, borderRadius: 7, backgroundColor: colors.green },
+  projStepText: { color: colors.ink, fontSize: 12, fontWeight: '700', marginTop: 6 },
+  projStepsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 },
+  projStepItem: { flex: 1, alignItems: 'center', paddingHorizontal: 2 },
+  projStepDot: { width: 26, height: 26, borderRadius: 13, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  projStepDotDone: { backgroundColor: colors.green },
+  projStepDotCur: { backgroundColor: colors.maroon },
+  projStepDotText: { color: 'white', fontSize: 12, fontWeight: '700' },
+  projStepLabel: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 4 },
+  projEmpty: { marginHorizontal: 16, marginTop: 16, padding: 18, backgroundColor: colors.rose, borderRadius: 14, alignItems: 'center', gap: 10 },
+  projEmptyText: { color: colors.ink, fontSize: 14, textAlign: 'center' },
+  tileDimmed: { opacity: 0.55 },
+  tileIconDimmed: { opacity: 0.6 },
+  gpsScreen: { flex: 1, backgroundColor: colors.cream, paddingHorizontal: 24, paddingTop: androidStatusBarInset + 24, justifyContent: 'space-between' },
+  gpsHero: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  gpsHeroCircle: { width: 112, height: 112, borderRadius: 56, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#E8C4D4' },
+  gpsHeroEmoji: { fontSize: 52 },
+  gpsTitle: { color: colors.maroon, fontSize: 24, fontWeight: '800', marginTop: 22, textAlign: 'center' },
+  gpsSub: { color: colors.ink, fontSize: 15, lineHeight: 23, textAlign: 'center', marginTop: 12 },
+  gpsPoints: { alignSelf: 'stretch', marginTop: 24, gap: 12 },
+  gpsPoint: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line, paddingVertical: 13, paddingHorizontal: 14 },
+  gpsPointIcon: { fontSize: 22 },
+  gpsPointText: { color: colors.ink, fontSize: 14, fontWeight: '600', flex: 1 },
+  gpsBottom: { paddingBottom: 28, gap: 6 },
+  gpsSkipBtn: { alignItems: 'center', paddingVertical: 10 },
+  gpsSkipText: { color: colors.muted, fontSize: 14, fontWeight: '700' },
+  gpsPrivacy: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 2 },
+  regionCard: { marginTop: 14, backgroundColor: '#FBF4F8', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  regionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  regionTitle: { color: colors.maroon, fontSize: 15, fontWeight: '800' },
+  regionHint: { color: colors.muted, fontSize: 12, marginTop: 4, marginBottom: 4 },
+  gpsBtn: { backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 7 },
+  gpsBtnText: { color: 'white', fontSize: 12, fontWeight: '700' },
+  regionGpsNote: { color: colors.green, fontSize: 12, fontWeight: '600', marginTop: 8 },
+  geoRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  statusLoading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginHorizontal: 16, marginTop: 12, paddingVertical: 16, backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.line },
+  statusLoadingText: { color: colors.muted, fontSize: 14, fontWeight: '600' },
+  statusError: { marginHorizontal: 16, marginTop: 12, padding: 18, backgroundColor: '#FEF2F2', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', alignItems: 'center' },
+  statusErrorIcon: { fontSize: 30 },
+  statusErrorTitle: { color: colors.danger, fontSize: 16, fontWeight: '800', marginTop: 8 },
+  statusErrorText: { color: '#7F1D1D', fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 6 },
+  statusRetryBtn: { marginTop: 14, backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 22, paddingVertical: 10 },
+  statusRetryText: { color: 'white', fontSize: 14, fontWeight: '700' },
+  statusEmpty: { marginHorizontal: 16, marginTop: 12, padding: 18, backgroundColor: colors.rose, borderRadius: 14, alignItems: 'center' },
+  statusEmptyText: { color: colors.ink, fontSize: 14, textAlign: 'center', lineHeight: 20 },
+  crashScreen: { flex: 1, backgroundColor: colors.cream, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  crashCard: { backgroundColor: colors.card, borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 26, alignItems: 'center', width: '100%', maxWidth: 360 },
+  crashIcon: { fontSize: 52 },
+  crashTitle: { color: colors.maroon, fontSize: 20, fontWeight: '800', marginTop: 12 },
+  crashTitleEn: { color: colors.muted, fontSize: 14, fontWeight: '700', marginTop: 2 },
+  crashMsg: { color: colors.ink, fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 12 },
+  crashBtn: { marginTop: 18, backgroundColor: colors.maroon, borderRadius: 12, paddingHorizontal: 22, paddingVertical: 13, alignSelf: 'stretch', alignItems: 'center' },
+  crashBtnText: { color: 'white', fontSize: 15, fontWeight: '700' },
+  crashBtnOutline: { marginTop: 10, borderRadius: 12, borderWidth: 1.5, borderColor: colors.maroon, paddingVertical: 12, alignSelf: 'stretch', alignItems: 'center' },
+  crashBtnOutlineText: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
+  reqStar: { color: colors.danger, fontWeight: '800' },
+  labelSm: { fontSize: 13, marginTop: 10, marginBottom: 4, marginHorizontal: 0 },
+  inputSm: { height: 44, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE', paddingHorizontal: 12, fontSize: 14, color: colors.ink },
+  inputLocked: { backgroundColor: '#F2E9EE', opacity: 0.85 },
+  genderPillSm: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
+  formCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  formCardTitle: { color: colors.maroon, fontSize: 14, fontWeight: '800', marginBottom: 4 },
+  kycProjectBar: { marginHorizontal: 16, marginTop: 10, backgroundColor: colors.rose, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, borderLeftWidth: 4, borderLeftColor: colors.maroon },
+  kycProjectLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  kycProjectName: { color: colors.maroon, fontSize: 15, fontWeight: '800', marginTop: 2 },
+  verifiedBanner: { backgroundColor: colors.greenPale, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, marginVertical: 6, borderWidth: 1, borderColor: '#A7F3D0' },
+  verifiedBannerText: { color: '#166534', fontSize: 12, lineHeight: 17, fontWeight: '600' },
   upload: {
     marginHorizontal: 16,
     borderWidth: 2,
@@ -5968,7 +6882,7 @@ const styles = StyleSheet.create({
   noteBlue: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderWidth: 1, marginHorizontal: 16, marginBottom: 10, borderRadius: 10, padding: 12 },
   noteGold: { backgroundColor: '#FFF7ED', borderColor: '#FDBA74', borderWidth: 1, marginHorizontal: 16, marginBottom: 4, borderRadius: 10, padding: 12 },
   noteGreen: { backgroundColor: colors.greenPale, borderColor: '#86EFAC', borderWidth: 1, marginHorizontal: 16, marginTop: 12, borderRadius: 10, padding: 12 },
-  noteText: { color: colors.maroon, fontSize: 13, lineHeight: 20 },
+  noteText: { color: colors.maroon, fontSize: 14, lineHeight: 21, fontWeight: '500' },
   contactSection: { marginHorizontal: 16, marginTop: 12, paddingTop: 2, paddingBottom: 14, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line },
   contactSectionHead: { padding: 14, borderBottomWidth: 1, borderColor: colors.line },
   contactSectionTitle: { color: colors.ink, fontSize: 17, fontWeight: '700' },
@@ -6142,7 +7056,7 @@ const styles = StyleSheet.create({
   videoLessonSub: { color: 'rgba(255,255,255,0.74)', fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 8 },
   notice: { backgroundColor: '#FFF8E1', padding: 14, borderBottomWidth: 1, borderColor: colors.line },
   noticeText: { color: '#92400E', fontSize: 14, fontWeight: '700' },
-  apiNotice: { marginHorizontal: 16, marginTop: 10, marginBottom: 4, padding: 12, borderRadius: 12, backgroundColor: '#FFF7FA', borderWidth: 1, borderColor: colors.line, color: colors.maroon, fontSize: 13, lineHeight: 19 },
+  apiNotice: { marginHorizontal: 16, marginTop: 10, marginBottom: 4, padding: 13, borderRadius: 12, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', color: '#B91C1C', fontSize: 14, lineHeight: 20, fontWeight: '600' },
   projectApply: { padding: 14 },
   projectApplyHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   projectProgress: { color: colors.muted, fontWeight: '700' },
