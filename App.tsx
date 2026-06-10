@@ -57,6 +57,7 @@ type Screen =
   | 'cattleDone'
   | 'inputsForm'
   | 'inputsPrice'
+  | 'myListings'
   | 'buyCategories'
   | 'buyProducts'
   | 'buyOrder'
@@ -1582,6 +1583,7 @@ export default function App() {
   const [apaBusy, setApaBusy] = useState(false);
   const [apaDraftSuggestion, setApaDraftSuggestion] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<ApiRow | null>(null);
+  const [buyCategory, setBuyCategory] = useState<ApiRow | null>(null);
   const [latestOrder, setLatestOrder] = useState<ApiRow | null>(null);
   const [latestListing, setLatestListing] = useState<ApiRow | null>(null);
   const [latestApplication, setLatestApplication] = useState<ApiRow | null>(null);
@@ -1984,8 +1986,9 @@ async function sendApaMessage(text: string) {
       cattleDone: <CattleDone setScreen={go} listing={latestListing} />,
       inputsForm: <InputsForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       inputsPrice: <InputsPrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
-      buyCategories: <BuyCategories setScreen={go} />,
-      buyProducts: <BuyProducts setScreen={go} onSelectProduct={setSelectedProduct} />,
+      myListings: <MyListings setScreen={go} />,
+      buyCategories: <BuyCategories setScreen={go} onSelectCategory={(c) => { setBuyCategory(c); go('buyProducts'); }} />,
+      buyProducts: <BuyProducts setScreen={go} category={buyCategory} onSelectProduct={setSelectedProduct} />,
       buyOrder: <BuyOrder setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />,
       buyDone: <BuyDone setScreen={go} qty={qty} product={selectedProduct} order={latestOrder} />,
       training: <TrainingHome setScreen={go} openCategory={(cat) => { setLearnCategory(cat); go('trainingCategory'); }} />,
@@ -2007,7 +2010,7 @@ async function sendApaMessage(text: string) {
     };
 
     return routes[screen];
-  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, latestOrder, latestListing, latestApplication, selectedProjectId, projectsInitialTab, authUser, selectedMarketId]);
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, latestOrder, latestListing, latestApplication, selectedProjectId, projectsInitialTab, authUser, selectedMarketId]);
 
   const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
@@ -2933,10 +2936,6 @@ function PreferenceOptionCard({
 function Home({ setScreen, openProjects }: { setScreen: (screen: Screen) => void; openProjects: (tab: 'all' | 'area' | 'mine') => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
-  const isFieldOfficer = hasRole(user, 'field_officer');
-  const isSeller = hasRole(user, 'shathisheba_seller');
-  // Scenario 2: a seller (partner) who is not a field officer gets a full-width Training tile.
-  const trainingFullWidth = isSeller && !isFieldOfficer;
   const home = useAppHome(user?.id);
   const users = useApiList<ApiRow>('users');
   const liveWeather = useWeatherApi();
@@ -2986,11 +2985,9 @@ function Home({ setScreen, openProjects }: { setScreen: (screen: Screen) => void
       </View>
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
-        {isFieldOfficer || isSeller ? (
-          <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" highlight onPress={() => setScreen('saleCategories')} />
-        ) : null}
+        <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" highlight onPress={() => setScreen('saleCategories')} />
         <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" highlight onPress={() => setScreen('buyCategories')} />
-        <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} fullWidth={trainingFullWidth} />
+        <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} />
         <ServiceCard icon="🤝" title={tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')} sub={tx('চুক্তি চাষ ও সকল প্রকল্প', 'Contract farming & all projects')} tone="green" onPress={() => openProjects('all')} />
       </View>
       <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
@@ -4199,7 +4196,7 @@ function ContactSection({ draft, patchDraft }: { draft: ListingDraft; patchDraft
 
   const chips: Array<[string, string, string | undefined]> = [
     ['🪪', tx('NID', 'NID'), kyc.nid],
-    ['🤳', tx('সেলফি', 'Selfie'), kyc.selfie],
+    ['🤳', tx('ব্যবহারকারীর ছবি', 'User Photo'), kyc.selfie],
     ['🏦', tx('ব্যাংক', 'Bank'), kyc.banking ? 'verified' : 'none'],
   ];
 
@@ -4718,7 +4715,13 @@ function InputsPrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
   );
 }
 
-function BuyCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function buyCategoryIcon(slug: string) {
+  return slug.includes('mach') ? '🚜' : slug.includes('tool') ? '🔧' : slug.includes('medicine') ? '💊'
+    : slug.includes('fertilizer') ? '🧪' : slug.includes('seed') ? '🌱' : slug.includes('livestock') ? '🐄'
+    : slug.includes('produce') ? '🌾' : slug.includes('feed') ? '🌽' : '🛒';
+}
+
+function BuyCategories({ setScreen, onSelectCategory }: { setScreen: (screen: Screen) => void; onSelectCategory: (category: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
   const categories = useApiList<ApiRow>('buy/categories');
   const categoryRows = shouldUseFallback(categories) ? fallbackBuyCategories : categories.rows;
@@ -4729,51 +4732,70 @@ function BuyCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <Text style={styles.deliveryText}>{tx('🚚 দ্রুত ডেলিভারি ১-৩ দিন · ৳৫০০+ অর্ডারে বিনামূল্যে', '🚚 Fast delivery 1-3 days · Free over ৳500')}</Text>
       </View>
       <SectionTitle title={tx('বিভাগ অনুযায়ী কিনুন', 'Shop by category')} warning={fallbackWarning(categories)} />
-      {categories.loading ? <ApiStatus state={categories} empty={tx('কেনার কোনো বিভাগ পাওয়া যায়নি।', 'No buying categories are available.')} /> : null}
+      {categories.loading ? <ApiStatus state={categories} empty={tx('এখন কোনো পণ্য বিক্রির জন্য নেই।', 'No products are available to buy right now.')} /> : null}
       <View style={styles.grid}>
-        {categoryRows.map((category) => (
-          <Tile key={category.id || category.slug} icon={String(category.slug || '').includes('mach') ? '🚜' : String(category.slug || '').includes('tool') ? '🔧' : String(category.slug || '').includes('medicine') ? '💊' : String(category.slug || '').includes('fertilizer') ? '🧪' : String(category.slug || '').includes('seed') ? '🌱' : '🌾'} title={rowTitle(category, lang, tx('বিভাগ', 'Category'))} subtitle={rowBody(category, lang, '')} onPress={() => setScreen('buyProducts')} />
-        ))}
+        {categoryRows.map((category) => {
+          const count = Number(category.product_count ?? 0);
+          return (
+            <Pressable key={category.id || category.slug} onPress={() => onSelectCategory(category)} style={({ pressed }) => [styles.catCard, pressed && styles.pressed]}>
+              <Text style={styles.catCardIcon}>{buyCategoryIcon(String(category.slug || ''))}</Text>
+              <Text style={styles.catCardTitle} numberOfLines={1}>{rowTitle(category, lang, tx('বিভাগ', 'Category'))}</Text>
+              {count > 0
+                ? <Text style={styles.catCardCount}>{num(count, lang)} {tx('পণ্য', 'items')}</Text>
+                : <Text style={styles.catCardCountMuted} numberOfLines={1}>{rowBody(category, lang, tx('উপলব্ধ', 'Available'))}</Text>}
+            </Pressable>
+          );
+        })}
       </View>
     </>
   );
 }
 
-function BuyProducts({ setScreen, onSelectProduct }: { setScreen: (screen: Screen) => void; onSelectProduct: (product: ApiRow) => void }) {
+function BuyProducts({ setScreen, category, onSelectProduct }: { setScreen: (screen: Screen) => void; category: ApiRow | null; onSelectProduct: (product: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
-  const products = useApiList<ApiRow>('buy/products');
+  const slug = category?.slug ? String(category.slug) : '';
+  const products = useApiList<ApiRow>(slug ? `buy/products?category=${slug}` : 'buy/products');
+  const [query, setQuery] = useState('');
   const productRows = shouldUseFallback(products) ? fallbackBuyProducts : products.rows;
+  const q = query.trim().toLowerCase();
+  const filtered = q ? productRows.filter((p) => `${p.name_en || ''} ${p.name_bn || ''} ${p.short_description_en || ''}`.toLowerCase().includes(q)) : productRows;
+  const title = category ? rowTitle(category, lang, tx('পণ্য', 'Products')) : tx('সব পণ্য', 'All products');
   return (
     <>
-      <Header title={tx('শাধীন ফিড', 'Seeds')} onBack={() => setScreen('buyCategories')} />
-      <View style={styles.segment}>
-        <Text style={styles.segmentActive}>{tx('কিনুন', 'Buy')}</Text>
-        <Text style={styles.segmentInactive}>{tx('বিক্রি করুন', 'Sell')}</Text>
+      <Header title={title} onBack={() => setScreen('buyCategories')} />
+      <View style={styles.buySearch}>
+        <Text style={styles.buySearchIcon}>🔍</Text>
+        <TextInput style={styles.buySearchInput} value={query} onChangeText={setQuery} placeholder={tx('পণ্য খুঁজুন', 'Search products')} placeholderTextColor={colors.muted} />
+        {query ? <Pressable onPress={() => setQuery('')} hitSlop={8}><Text style={styles.buySearchClear}>×</Text></Pressable> : null}
       </View>
-      <SectionTitle title={tx('পণ্য', 'Products')} warning={fallbackWarning(products)} />
-      {products.loading ? <ApiStatus state={products} empty={tx('কোনো পণ্য পাওয়া যায়নি।', 'No products are available.')} /> : null}
-      {productRows.map((product) => {
+      {products.loading ? <ApiStatus state={products} empty={tx('কোনো পণ্য পাওয়া যায়নি।', 'No products are available.')} /> : null}
+      {!products.loading && filtered.length === 0 ? <Text style={styles.buyEmpty}>{tx('কোনো পণ্য মেলেনি।', 'No products match your search.')}</Text> : null}
+      {filtered.map((product) => {
         const available = product.status === 'active';
         const lowStock = Number(product.stock_qty || 0) <= Number(product.low_stock_threshold || -1);
+        const img = product.image_url ? String(product.image_url) : '';
         return (
-        <Pressable
-          key={product.id || product.sku}
-          disabled={!available}
-          onPress={() => {
-            onSelectProduct(product);
-            setScreen('buyOrder');
-          }}
-          style={[styles.productCard, !available && styles.disabledCard]}
-        >
-          <Text style={styles.productIcon}>{String(product.name_en || '').toLowerCase().includes('fish') ? '🐟' : String(product.name_en || '').toLowerCase().includes('seed') ? '🌾' : '🐄'}</Text>
-          <View style={styles.flex}>
-            <Text style={styles.productTitle}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
-            <Text style={styles.productSub}>{[product.package_size, rowBody(product, lang, '')].filter(Boolean).join(' · ')}</Text>
-            <Badge label={!available ? tx('মজুদ নেই', 'Out of stock') : lowStock ? tx('কম মজুদ', 'Low stock') : tx('মজুদ আছে', 'In stock')} tone={available ? 'green' : 'rose'} />
-            <Text style={[styles.productPrice, !available && styles.mutedPrice]}>{amount(Number(product.price || 0), lang)}<Text style={styles.unit}> /{product.unit || tx('বস্তা', 'sack')}</Text></Text>
-          </View>
-        </Pressable>
-      )})}
+          <Pressable
+            key={product.id || product.sku}
+            disabled={!available}
+            onPress={() => { onSelectProduct(product); setScreen('buyOrder'); }}
+            style={[styles.buyCard, !available && styles.disabledCard]}
+          >
+            {img
+              ? <Image source={{ uri: img }} style={styles.buyCardImage} />
+              : <View style={styles.buyCardImagePh}><Text style={styles.buyCardImagePhText}>{buyCategoryIcon(slug)}</Text></View>}
+            <View style={styles.buyCardBody}>
+              <Text style={styles.productTitle} numberOfLines={1}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
+              {rowBody(product, lang, '') ? <Text style={styles.productSub} numberOfLines={2}>{rowBody(product, lang, '')}</Text> : null}
+              {product.package_size ? <Text style={styles.buyCardPack}>{String(product.package_size)}</Text> : null}
+              <View style={styles.buyCardFoot}>
+                <Text style={[styles.productPrice, !available && styles.mutedPrice]}>{amount(Number(product.price || 0), lang)}<Text style={styles.unit}> /{product.unit || tx('একক', 'unit')}</Text></Text>
+                <Badge label={!available ? tx('মজুদ নেই', 'Out of stock') : lowStock ? tx('কম মজুদ', 'Low stock') : tx('মজুদ আছে', 'In stock')} tone={available ? 'green' : 'rose'} />
+              </View>
+            </View>
+          </Pressable>
+        );
+      })}
     </>
   );
 }
@@ -5929,15 +5951,33 @@ function Projects({ setScreen, onApply, initialTab = 'area' }: { setScreen: (scr
       ) : (
         <>
           {mine.loading ? <ApiStatus state={mine} /> : null}
-          {!mine.loading && mine.rows.length === 0 ? (
-            <View style={styles.projEmpty}>
-              <Text style={styles.projEmptyText}>{tx('আপনি এখনো কোনো প্রকল্পে যুক্ত হননি।', 'You have not joined any project yet.')}</Text>
-              <AppButton title={tx('সকল প্রকল্প দেখুন', 'Browse all projects')} variant="outline" onPress={() => setTab('all')} />
-            </View>
-          ) : null}
-          {mine.rows.map((p) => (
-            <ProjectMineCard key={String(p.application_id || p.id)} project={p} />
-          ))}
+          {(() => {
+            const approved = mine.rows.filter((p) => Number(p.is_approved) === 1);
+            const pending = mine.rows.filter((p) => Number(p.is_approved) !== 1);
+            return (
+              <>
+                {pending.length > 0 ? (
+                  <>
+                    <SectionTitle title={tx('চলমান আবেদন', 'Pending applications')} />
+                    {pending.map((p) => <ProjectMineCard key={String(p.application_id || p.id)} project={p} />)}
+                  </>
+                ) : (!mine.loading ? (
+                  <View style={styles.projEmpty}>
+                    <Text style={styles.projEmptyIcon}>📋</Text>
+                    <Text style={styles.projEmptyTitle}>{tx('কোনো চলমান আবেদন নেই', 'No pending applications')}</Text>
+                    <Text style={styles.projEmptyText}>{tx('একটি প্রকল্পে আবেদন করলে এখানে অগ্রগতি দেখা যাবে।', 'Apply to a project and track its progress here.')}</Text>
+                    <AppButton title={tx('সকল প্রকল্প দেখুন', 'Browse all projects')} variant="outline" onPress={() => setTab('all')} />
+                  </View>
+                ) : null)}
+                {approved.length > 0 ? (
+                  <>
+                    <SectionTitle title={tx('সক্রিয় প্রকল্প', 'Active projects')} />
+                    {approved.map((p) => <ProjectMineCard key={String(p.application_id || p.id)} project={p} />)}
+                  </>
+                ) : null}
+              </>
+            );
+          })()}
         </>
       )}
     </>
@@ -5963,6 +6003,63 @@ function LedgerRow({ label, value, green, strong }: { label: string; value: stri
   );
 }
 
+// Seller's own listings + their admin-approval status.
+function listingStatusTone(s: string): 'green' | 'gold' | 'rose' | 'blue' {
+  return s === 'active' ? 'green' : s === 'rejected' || s === 'cancelled' ? 'rose' : s === 'sold' ? 'blue' : 'gold';
+}
+
+function MyListings({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
+  const listings = useApiList<ApiRow>(`app/sale/my-listings${uid}`);
+  const rows = listings.rows;
+  const pendingCount = rows.filter((l) => l.status === 'submitted' || l.status === 'field_verification').length;
+  return (
+    <>
+      <Header title={tx('আমার বিক্রির তালিকা', 'My Listings')} onBack={() => setScreen('profile')} />
+      {pendingCount > 0 ? (
+        <View style={styles.infoBar}>
+          <Text style={styles.infoText}>{tx(`ⓘ ${num(pendingCount, lang)}টি তালিকা অনুমোদনের অপেক্ষায়। অনুমোদনের পর "শাথী থেকে কিনুন"-এ দেখা যাবে।`, `ⓘ ${pendingCount} listing(s) awaiting approval. Once approved they appear in Buy from Shathi.`)}</Text>
+        </View>
+      ) : null}
+      {listings.loading ? <ApiStatus state={listings} /> : null}
+      {!listings.loading && rows.length === 0 ? (
+        <View style={styles.projEmpty}>
+          <Text style={styles.projEmptyIcon}>🏷️</Text>
+          <Text style={styles.projEmptyTitle}>{tx('এখনো কোনো তালিকা নেই', 'No listings yet')}</Text>
+          <Text style={styles.projEmptyText}>{tx('পশু বা কৃষি উপকরণ ন্যায্য দরে বিক্রি করতে তালিকা দিন।', 'List livestock or farm inputs to sell at a fair rate.')}</Text>
+          <AppButton title={tx('বিক্রির তালিকা দিন', 'List for sale')} onPress={() => setScreen('saleCategories')} />
+        </View>
+      ) : null}
+      {rows.map((l) => {
+        const media = Array.isArray(l.media_json) ? (l.media_json as unknown[]) : [];
+        const img = media.length ? String(media[0]) : '';
+        const status = String(l.status || 'submitted');
+        const isPending = status === 'submitted' || status === 'field_verification';
+        return (
+          <View key={String(l.id)} style={styles.buyCard}>
+            {img
+              ? <Image source={{ uri: img }} style={styles.buyCardImage} />
+              : <View style={styles.buyCardImagePh}><Text style={styles.buyCardImagePhText}>🏷️</Text></View>}
+            <View style={styles.buyCardBody}>
+              <Text style={styles.productTitle} numberOfLines={1}>{rowTitle(l, lang, String(l.item_name || 'Listing'))}</Text>
+              <Text style={styles.productSub} numberOfLines={1}>
+                {[l.item_name ? tEnum(l.category_slug, lang) || String(l.item_name) : '', `${num(Number(l.quantity || 1), lang)} ${l.unit || ''}`].filter(Boolean).join(' · ')}
+              </Text>
+              <Text style={styles.buyCardPack}>{new Date(String(l.created_at)).toLocaleDateString()}</Text>
+              <View style={styles.buyCardFoot}>
+                <Text style={styles.productPrice}>{amount(Number(l.farmer_expected_price || 0), lang)}<Text style={styles.unit}> /{l.unit || ''}</Text></Text>
+                <Badge label={isPending ? tx('অনুমোদনের অপেক্ষায়', 'Pending approval') : tEnum(status, lang)} tone={listingStatusTone(status)} />
+              </View>
+            </View>
+          </View>
+        );
+      })}
+    </>
+  );
+}
+
 function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang, toggleLang } = useLanguage();
   const { user: authedUser, signOut } = useAuth();
@@ -5973,6 +6070,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
     { icon: '🏦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
     { icon: '🌾', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
     { icon: '🪪', title: tx('KYC ডকুমেন্ট', 'KYC Documents'), sub: tx('NID, কাগজপত্র', 'NID, papers'), target: 'menuKyc' },
+    { icon: '🏷️', title: tx('আমার বিক্রির তালিকা', 'My Listings'), sub: tx('তালিকা ও অনুমোদনের অবস্থা', 'Listings & approval status'), target: 'myListings' },
     { icon: '🗂️', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
     { icon: '🌐', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
     { icon: '❓', title: tx('সাহায্য ও FAQ', 'Help & FAQ'), sub: tx('সাধারণ জিজ্ঞাসা', 'Common questions'), target: 'menuFaq' },
@@ -6243,7 +6341,7 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const docTypes: Array<{ key: string; label: string; icon: string; sample: string; guide: string }> = [
     { key: 'nid_front', label: tx('NID সামনে', 'NID front'), icon: '🪪', sample: tx('NID-এর সামনের অংশ', 'NID front side'), guide: tx('ছবি, নাম ও NID নম্বর স্পষ্ট দেখা যাবে এমনভাবে ফ্রেমের ভেতরে রাখুন।', 'Place inside the frame so photo, name and NID number are clearly readable.') },
     { key: 'nid_back', label: tx('NID পিছনে', 'NID back'), icon: '🪪', sample: tx('NID-এর পিছনের অংশ', 'NID back side'), guide: tx('পুরো পিছনের অংশ ফ্রেমে রাখুন, কোনো অংশ কাটা যাবে না।', 'Fit the whole back side in the frame, no corners cut.') },
-    { key: 'selfie', label: tx('সেলফি', 'Selfie'), icon: '🤳', sample: tx('আপনার সেলফি', 'Your selfie'), guide: tx('মুখ স্পষ্ট ও ভালো আলোতে, চশমা/টুপি ছাড়া।', 'Face clear, good light, no glasses/cap.') },
+    { key: 'selfie', label: tx('ব্যবহারকারীর ছবি', 'User Photo'), icon: '🤳', sample: tx('আপনার ছবি', 'Your photo'), guide: tx('মুখ স্পষ্ট ও ভালো আলোতে, চশমা/টুপি ছাড়া।', 'Face clear, good light, no glasses/cap.') },
     { key: 'trade_license', label: tx('ট্রেড লাইসেন্স', 'Trade license'), icon: '📄', sample: tx('ট্রেড লাইসেন্স', 'Trade license'), guide: tx('সম্পূর্ণ ডকুমেন্ট পড়া যায় এমনভাবে তুলুন।', 'Capture the full document, fully readable.') },
     { key: 'passbook', label: tx('পাসবই', 'Passbook'), icon: '📒', sample: tx('ব্যাংক পাসবই', 'Bank passbook'), guide: tx('অ্যাকাউন্ট তথ্যসহ প্রথম পৃষ্ঠা তুলুন।', 'Capture the first page showing account details.') },
   ];
@@ -6330,7 +6428,7 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
 
         <SectionTitle title={tx('যাচাই অবস্থা', 'Verification status')} />
         <View style={styles.kycSummaryRow}>
-          {([['🪪', tx('NID', 'NID'), kyc.nid], ['🤳', tx('সেলফি', 'Selfie'), kyc.selfie], ['🏦', tx('ব্যাংক', 'Bank'), kyc.banking ? 'verified' : 'none']] as Array<[string, string, string | undefined]>).map(([icon, label, st]) => {
+          {([['🪪', tx('NID', 'NID'), kyc.nid], ['🤳', tx('ব্যবহারকারীর ছবি', 'User Photo'), kyc.selfie], ['🏦', tx('ব্যাংক', 'Bank'), kyc.banking ? 'verified' : 'none']] as Array<[string, string, string | undefined]>).map(([icon, label, st]) => {
             const tone = kycTone(st);
             return (
               <View key={label} style={[styles.kycSummaryChip, styles[`kycChip_${tone}` as 'kycChip_green']]}>
@@ -7260,8 +7358,10 @@ const styles = StyleSheet.create({
   projStepDotCur: { backgroundColor: colors.maroon },
   projStepDotText: { color: 'white', fontSize: 12, fontWeight: '700' },
   projStepLabel: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 4 },
-  projEmpty: { marginHorizontal: 16, marginTop: 16, padding: 18, backgroundColor: colors.rose, borderRadius: 14, alignItems: 'center', gap: 10 },
-  projEmptyText: { color: colors.ink, fontSize: 14, textAlign: 'center' },
+  projEmpty: { marginHorizontal: 16, marginTop: 16, padding: 22, backgroundColor: colors.rose, borderRadius: 16, alignItems: 'center', gap: 8 },
+  projEmptyIcon: { fontSize: 34 },
+  projEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', textAlign: 'center' },
+  projEmptyText: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 19 },
   tileDimmed: { opacity: 0.55 },
   tileIconDimmed: { opacity: 0.6 },
   gpsScreen: { flex: 1, backgroundColor: colors.cream, paddingHorizontal: 24, paddingTop: androidStatusBarInset + 24, justifyContent: 'space-between' },
@@ -7441,6 +7541,23 @@ const styles = StyleSheet.create({
   segmentInactive: { flex: 1, color: colors.muted, padding: 10, textAlign: 'center', fontWeight: '700' },
   productCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 10, padding: 14, flexDirection: 'row', gap: 12, borderWidth: 1, borderColor: colors.line },
   disabledCard: { opacity: 0.55 },
+  catCard: { width: '48%', backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, paddingVertical: 18, paddingHorizontal: 12, alignItems: 'center' },
+  catCardIcon: { fontSize: 30, marginBottom: 8 },
+  catCardTitle: { color: colors.ink, fontSize: 14, fontWeight: '800', textAlign: 'center' },
+  catCardCount: { marginTop: 4, color: colors.green, fontSize: 12, fontWeight: '700' },
+  catCardCountMuted: { marginTop: 4, color: colors.muted, fontSize: 12 },
+  buySearch: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 12, marginBottom: 2, height: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', paddingHorizontal: 12 },
+  buySearchIcon: { fontSize: 15 },
+  buySearchInput: { flex: 1, fontSize: 15, color: colors.ink, padding: 0 },
+  buySearchClear: { fontSize: 22, color: colors.muted, paddingHorizontal: 4 },
+  buyEmpty: { textAlign: 'center', color: colors.muted, fontSize: 14, marginTop: 28 },
+  buyCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, flexDirection: 'row', overflow: 'hidden' },
+  buyCardImage: { width: 96, height: 96, backgroundColor: '#f0e7ed' },
+  buyCardImagePh: { width: 96, height: 96, backgroundColor: '#f6eef2', alignItems: 'center', justifyContent: 'center' },
+  buyCardImagePhText: { fontSize: 34 },
+  buyCardBody: { flex: 1, padding: 12, justifyContent: 'center' },
+  buyCardPack: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  buyCardFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   productIcon: { width: 58, height: 58, borderRadius: 10, backgroundColor: colors.rose, textAlign: 'center', textAlignVertical: 'center', fontSize: 31, lineHeight: 58, overflow: 'hidden' },
   productTitle: { color: colors.ink, fontSize: 16, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
   productSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
