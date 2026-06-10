@@ -128,7 +128,7 @@ type TrainingModule = {
   videoUrl?: string;
 };
 type ApiRow = Record<string, any>;
-type ApiState<T> = { rows: T[]; loading: boolean; error: string | null };
+type ApiState<T> = { rows: T[]; loading: boolean; error: string | null; stale?: boolean };
 // Draft for the livestock "List for Sale" flow (form -> measure -> price).
 type ListingDraft = {
   categorySlug: string;          // 'livestock' | 'inputs' | ...
@@ -557,6 +557,34 @@ async function apiCreate(resource: string, payload: ApiRow) {
   });
 }
 
+// Tracks which resources are currently serving cached (stale) data after a failed
+// server fetch, so a single global banner can offer a refresh.
+const staleStore = {
+  resources: new Set<string>(),
+  listeners: new Set<(count: number) => void>(),
+  mark(resource: string) {
+    this.resources.add(resource);
+    this.listeners.forEach((fn) => fn(this.resources.size));
+  },
+  clear(resource: string) {
+    if (this.resources.delete(resource)) this.listeners.forEach((fn) => fn(this.resources.size));
+  },
+  subscribe(fn: (count: number) => void) {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  },
+};
+
+function useStaleCount() {
+  const [count, setCount] = useState(staleStore.resources.size);
+  useEffect(() => staleStore.subscribe(setCount), []);
+  return count;
+}
+
+const API_CACHE_PREFIX = 'apicache:';
+
 function useApiList<T = ApiRow>(resource: string): ApiState<T> {
   const { lang } = useLanguage();
   const refreshTick = useRefreshTick();
@@ -566,10 +594,23 @@ function useApiList<T = ApiRow>(resource: string): ApiState<T> {
     setState((current) => ({ ...current, loading: true, error: null }));
     apiList<T>(resource)
       .then((rows) => {
-        if (alive) setState({ rows, loading: false, error: null });
+        if (!alive) return;
+        setState({ rows, loading: false, error: null });
+        staleStore.clear(resource);
+        // Persist the last good response so the app still works offline next time.
+        AsyncStorage.setItem(API_CACHE_PREFIX + resource, JSON.stringify(rows)).catch(() => {});
       })
-      .catch((error) => {
-        if (alive) setState({ rows: [], loading: false, error: naturalApiError(error, lang) });
+      .catch(async (error) => {
+        let cached: T[] = [];
+        try {
+          const raw = await AsyncStorage.getItem(API_CACHE_PREFIX + resource);
+          if (raw) cached = JSON.parse(raw) as T[];
+        } catch {
+          cached = [];
+        }
+        if (!alive) return;
+        if (cached.length > 0) staleStore.mark(resource);
+        setState({ rows: cached, loading: false, error: naturalApiError(error, lang), stale: cached.length > 0 });
       });
     return () => {
       alive = false;
@@ -804,8 +845,21 @@ function ApiStatus({ state, empty }: { state: ApiState<any>; empty?: string }) {
   if (state.loading) {
     return (
       <View style={styles.statusLoading}>
-        <ActivityIndicator color={colors.maroon} />
-        <Text style={styles.statusLoadingText}>{tx('সার্ভার থেকে তথ্য আনা হচ্ছে...', 'Loading latest data…')}</Text>
+        <View style={styles.statusLoadingSpinner}>
+          <ActivityIndicator color={colors.maroon} size="small" />
+        </View>
+        <Text style={styles.statusLoadingText}>{tx('তথ্য আনা হচ্ছে…', 'Loading…')}</Text>
+      </View>
+    );
+  }
+  if (state.error && state.rows.length > 0) {
+    // Cached data is on screen — show a slim notice, not a scary error block.
+    return (
+      <View style={styles.statusStale}>
+        <Text style={styles.statusStaleText}>📡 {tx('সার্ভারে পৌঁছানো যায়নি — সংরক্ষিত তথ্য দেখানো হচ্ছে', 'Server unreachable — showing saved data')}</Text>
+        <Pressable onPress={() => refreshStore.trigger()} hitSlop={8}>
+          <Text style={styles.statusStaleRefresh}>↻ {tx('রিফ্রেশ', 'Refresh')}</Text>
+        </Pressable>
       </View>
     );
   }
@@ -829,6 +883,24 @@ function ApiStatus({ state, empty }: { state: ApiState<any>; empty?: string }) {
     );
   }
   return null;
+}
+
+// Slim global banner shown when any resource is serving cached data after a
+// failed server fetch. One tap refreshes every visible list.
+function StaleBanner() {
+  const { tx } = useLanguage();
+  const count = useStaleCount();
+  if (count === 0) return null;
+  return (
+    <View style={styles.staleBanner}>
+      <Text style={styles.staleBannerText} numberOfLines={1}>
+        📡 {tx('সার্ভার থেকে আনা যায়নি — আগের তথ্য দেখানো হচ্ছে', 'Server fetch failed — showing previous data')}
+      </Text>
+      <Pressable onPress={() => refreshStore.trigger()} style={({ pressed }) => [styles.staleBannerBtn, pressed && styles.pressed]}>
+        <Text style={styles.staleBannerBtnText}>↻ {tx('রিফ্রেশ', 'Refresh')}</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 function shouldUseFallback<T>(state: ApiState<T>) {
@@ -1475,6 +1547,7 @@ function Shell({
   return (
     <View style={styles.shell}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <StaleBanner />
         <ScrollView
           contentContainerStyle={[styles.shellContent, fixedAccessory ? styles.shellContentWithAccessory : null]}
           showsVerticalScrollIndicator={false}
@@ -3648,6 +3721,8 @@ function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
 }
 
 function BrandHeader({ setScreen }: { setScreen?: (screen: Screen) => void }) {
+  const { user } = useAuth();
+  const initial = String(user?.display_name || user?.full_name || 'S').trim().charAt(0).toUpperCase() || 'S';
   return (
     <View style={styles.brandHeader}>
       <View style={styles.brandLockup}>
@@ -3664,7 +3739,7 @@ function BrandHeader({ setScreen }: { setScreen?: (screen: Screen) => void }) {
         </Pressable>
         <Text style={styles.brandActionIcon}>🔔</Text>
         <View style={styles.userAvatarMini}>
-          <Text style={styles.userAvatarText}>R</Text>
+          <Text style={styles.userAvatarText}>{initial}</Text>
         </View>
       </View>
     </View>
@@ -3749,6 +3824,7 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
   const categories = useApiList<ApiRow>('sale/categories');
   const categoryRows = shouldUseFallback(categories) ? fallbackSaleCategories : categories.rows;
   const [available, setAvailable] = useState<string[] | null>(null);
+  const [tab, setTab] = useState<'cats' | 'mine'>('cats');
   useEffect(() => {
     let alive = true;
     const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
@@ -3793,6 +3869,16 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
   return (
     <>
       <Header title={tx('বিক্রির তালিকা করুন', 'List for Sale')} onBack={() => setScreen('home')} />
+      <View style={styles.projTabBar}>
+        <Pressable onPress={() => setTab('cats')} style={[styles.projTab, tab === 'cats' && styles.projTabActive]}>
+          <Text style={[styles.projTabText, tab === 'cats' && styles.projTabTextActive]}>{tx('বিভাগসমূহ', 'Categories')}</Text>
+        </Pressable>
+        <Pressable onPress={() => setTab('mine')} style={[styles.projTab, tab === 'mine' && styles.projTabActive]}>
+          <Text style={[styles.projTabText, tab === 'mine' && styles.projTabTextActive]}>{tx('আমার তালিকা', 'My Listings')}</Text>
+        </Pressable>
+      </View>
+      {tab === 'cats' ? (
+        <>
       <Text style={styles.pageHint}>{tx('আপনার পণ্যের বিভাগ বেছে নিন', 'Choose your product category')}</Text>
       {categories.loading ? <ApiStatus state={categories} empty={tx('বিক্রির কোনো বিভাগ পাওয়া যায়নি।', 'No sale categories are available.')} /> : null}
 
@@ -3805,6 +3891,10 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
           <View style={styles.grid}>{extraCats.map(renderTile)}</View>
         </>
       ) : null}
+        </>
+      ) : (
+        <MyListingsBody setScreen={setScreen} />
+      )}
     </>
   );
 }
@@ -4718,43 +4808,121 @@ function InputsPrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
 function buyCategoryIcon(slug: string) {
   return slug.includes('mach') ? '🚜' : slug.includes('tool') ? '🔧' : slug.includes('medicine') ? '💊'
     : slug.includes('fertilizer') ? '🧪' : slug.includes('seed') ? '🌱' : slug.includes('livestock') ? '🐄'
-    : slug.includes('produce') ? '🌾' : slug.includes('feed') ? '🌽' : '🛒';
+    : slug.includes('produce') || slug.includes('crop') ? '🌾' : slug.includes('feed') ? '🌽'
+    : slug.includes('fish') ? '🐟' : slug.includes('veg') ? '🥬' : slug.includes('fruit') ? '🥭' : '🛒';
+}
+
+// Buyer-facing order status labels (plain language, not backend enum tokens).
+function orderStatusBadge(s: string, tx: (bn: string, en: string) => string): { label: string; tone: 'green' | 'gold' | 'rose' | 'blue' } {
+  if (s === 'placed') return { label: tx('স্টক যাচাইয়ের অপেক্ষায়', 'Awaiting stock check'), tone: 'gold' };
+  if (s === 'confirmed') return { label: tx('নিশ্চিত হয়েছে', 'Confirmed'), tone: 'green' };
+  if (s === 'assigned' || s === 'in_transit') return { label: tx('ডেলিভারির পথে', 'On the way'), tone: 'blue' };
+  if (s === 'delivered') return { label: tx('ডেলিভারি সম্পন্ন', 'Delivered'), tone: 'green' };
+  return { label: tx('বাতিল', 'Cancelled'), tone: 'rose' };
 }
 
 function BuyCategories({ setScreen, onSelectCategory }: { setScreen: (screen: Screen) => void; onSelectCategory: (category: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
-  const categories = useApiList<ApiRow>('buy/categories');
-  const categoryRows = shouldUseFallback(categories) ? fallbackBuyCategories : categories.rows;
+  const { user } = useAuth();
+  const [tab, setTab] = useState<'shop' | 'orders'>('shop');
+  const mainCats = useApiList<ApiRow>('sale/categories');
+  const buyCats = useApiList<ApiRow>('buy/categories');
+  const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
+  const myOrders = useApiList<ApiRow>(`app/orders/mine${uid}`);
+
+  // Availability: which preference (interest) categories actually have products.
+  const countByInterest: Record<string, number> = {};
+  for (const c of buyCats.rows) {
+    const key = String(c.interest_slug || '');
+    if (key) countByInterest[key] = (countByInterest[key] || 0) + Number(c.product_count || 0);
+  }
+  const mainRows = (shouldUseFallback(mainCats) ? fallbackSaleCategories : mainCats.rows);
+  const withAvail = mainRows.map((c) => {
+    const key = String(c.interest_slug || c.slug || '');
+    return { cat: c, key, count: countByInterest[key] || 0 };
+  });
+  const availableFirst = [...withAvail].sort((a, b) => (b.count > 0 ? 1 : 0) - (a.count > 0 ? 1 : 0));
+
   return (
     <>
       <Header title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} onBack={() => setScreen('home')} />
-      <View style={styles.deliveryBanner}>
-        <Text style={styles.deliveryText}>{tx('🚚 দ্রুত ডেলিভারি ১-৩ দিন · ৳৫০০+ অর্ডারে বিনামূল্যে', '🚚 Fast delivery 1-3 days · Free over ৳500')}</Text>
+      <View style={styles.projTabBar}>
+        <Pressable onPress={() => setTab('shop')} style={[styles.projTab, tab === 'shop' && styles.projTabActive]}>
+          <Text style={[styles.projTabText, tab === 'shop' && styles.projTabTextActive]}>{tx('কিনুন', 'Shop')}</Text>
+        </Pressable>
+        <Pressable onPress={() => setTab('orders')} style={[styles.projTab, tab === 'orders' && styles.projTabActive]}>
+          <Text style={[styles.projTabText, tab === 'orders' && styles.projTabTextActive]}>{tx('আমার অর্ডার', 'My Orders')}</Text>
+        </Pressable>
       </View>
-      <SectionTitle title={tx('বিভাগ অনুযায়ী কিনুন', 'Shop by category')} warning={fallbackWarning(categories)} />
-      {categories.loading ? <ApiStatus state={categories} empty={tx('এখন কোনো পণ্য বিক্রির জন্য নেই।', 'No products are available to buy right now.')} /> : null}
-      <View style={styles.grid}>
-        {categoryRows.map((category) => {
-          const count = Number(category.product_count ?? 0);
-          return (
-            <Pressable key={category.id || category.slug} onPress={() => onSelectCategory(category)} style={({ pressed }) => [styles.catCard, pressed && styles.pressed]}>
-              <Text style={styles.catCardIcon}>{buyCategoryIcon(String(category.slug || ''))}</Text>
-              <Text style={styles.catCardTitle} numberOfLines={1}>{rowTitle(category, lang, tx('বিভাগ', 'Category'))}</Text>
-              {count > 0
-                ? <Text style={styles.catCardCount}>{num(count, lang)} {tx('পণ্য', 'items')}</Text>
-                : <Text style={styles.catCardCountMuted} numberOfLines={1}>{rowBody(category, lang, tx('উপলব্ধ', 'Available'))}</Text>}
-            </Pressable>
-          );
-        })}
-      </View>
+
+      {tab === 'shop' ? (
+        <>
+          <View style={styles.deliveryBanner}>
+            <Text style={styles.deliveryText}>{tx('🚚 দ্রুত ডেলিভারি ১-৩ দিন · ৳৫০০+ অর্ডারে বিনামূল্যে', '🚚 Fast delivery 1-3 days · Free over ৳500')}</Text>
+          </View>
+          <SectionTitle title={tx('বিভাগ অনুযায়ী কিনুন', 'Shop by category')} warning={fallbackWarning(mainCats)} />
+          {mainCats.loading || buyCats.loading ? <ApiStatus state={mainCats.loading ? mainCats : buyCats} /> : null}
+          <View style={styles.grid}>
+            {availableFirst.map(({ cat, key, count }) => {
+              const active = count > 0;
+              const emoji = String(cat.emoji || '') || buyCategoryIcon(key);
+              return (
+                <Pressable
+                  key={String(cat.id || cat.slug)}
+                  disabled={!active}
+                  onPress={() => onSelectCategory({ ...cat, interest_slug: key })}
+                  style={({ pressed }) => [styles.catCard, !active && styles.catCardInactive, pressed && styles.pressed]}
+                >
+                  <Text style={styles.catCardIcon}>{emoji}</Text>
+                  <Text style={styles.catCardTitle} numberOfLines={1}>{rowTitle(cat, lang, tx('বিভাগ', 'Category'))}</Text>
+                  {active
+                    ? <Text style={styles.catCardCount}>{num(count, lang)} {tx('পণ্য', 'items')}</Text>
+                    : <Text style={styles.catCardCountMuted}>{tx('এখন কোনো পণ্য নেই', 'No items right now')}</Text>}
+                </Pressable>
+              );
+            })}
+          </View>
+        </>
+      ) : (
+        <>
+          {myOrders.loading ? <ApiStatus state={myOrders} /> : null}
+          {!myOrders.loading && myOrders.rows.length === 0 ? (
+            <View style={styles.projEmpty}>
+              <Text style={styles.projEmptyIcon}>🛒</Text>
+              <Text style={styles.projEmptyTitle}>{tx('এখনো কোনো অর্ডার নেই', 'No orders yet')}</Text>
+              <Text style={styles.projEmptyText}>{tx('পছন্দের পণ্য অর্ডার করুন — অনুমোদনের পর ডেলিভারি হবে।', 'Order products you need — delivery follows confirmation.')}</Text>
+            </View>
+          ) : null}
+          {myOrders.rows.map((o) => {
+            const badge = orderStatusBadge(String(o.fulfillment_status || 'placed'), tx);
+            return (
+              <View key={String(o.id)} style={styles.orderCard}>
+                <View style={styles.orderCardTop}>
+                  <Text style={styles.orderCardCode}>{String(o.order_code)}</Text>
+                  <Badge label={badge.label} tone={badge.tone} />
+                </View>
+                <Text style={styles.orderCardItems} numberOfLines={2}>{String(o.items_summary || '')}</Text>
+                <View style={styles.orderCardFoot}>
+                  <Text style={styles.orderCardDate}>{new Date(String(o.created_at)).toLocaleDateString()}</Text>
+                  <Text style={styles.orderCardTotal}>{amount(Number(o.payable_amount || 0), lang)}</Text>
+                </View>
+                {String(o.fulfillment_status) === 'placed' ? (
+                  <Text style={styles.orderCardHint}>{tx('ⓘ স্টক যাচাইয়ের পর অর্ডার নিশ্চিত করা হবে।', 'ⓘ Your order will be confirmed after our stock check.')}</Text>
+                ) : null}
+              </View>
+            );
+          })}
+        </>
+      )}
     </>
   );
 }
 
 function BuyProducts({ setScreen, category, onSelectProduct }: { setScreen: (screen: Screen) => void; category: ApiRow | null; onSelectProduct: (product: ApiRow) => void }) {
   const { tx, lang } = useLanguage();
-  const slug = category?.slug ? String(category.slug) : '';
-  const products = useApiList<ApiRow>(slug ? `buy/products?category=${slug}` : 'buy/products');
+  const interest = category?.interest_slug ? String(category.interest_slug) : '';
+  const slug = !interest && category?.slug ? String(category.slug) : '';
+  const products = useApiList<ApiRow>(interest ? `buy/products?interest=${interest}` : slug ? `buy/products?category=${slug}` : 'buy/products');
   const [query, setQuery] = useState('');
   const productRows = shouldUseFallback(products) ? fallbackBuyProducts : products.rows;
   const q = query.trim().toLowerCase();
@@ -4783,7 +4951,7 @@ function BuyProducts({ setScreen, category, onSelectProduct }: { setScreen: (scr
           >
             {img
               ? <Image source={{ uri: img }} style={styles.buyCardImage} />
-              : <View style={styles.buyCardImagePh}><Text style={styles.buyCardImagePhText}>{buyCategoryIcon(slug)}</Text></View>}
+              : <View style={styles.buyCardImagePh}><Text style={styles.buyCardImagePhText}>{buyCategoryIcon(slug || interest)}</Text></View>}
             <View style={styles.buyCardBody}>
               <Text style={styles.productTitle} numberOfLines={1}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
               {rowBody(product, lang, '') ? <Text style={styles.productSub} numberOfLines={2}>{rowBody(product, lang, '')}</Text> : null}
@@ -4942,7 +5110,7 @@ function BuyDone({ setScreen, qty, product, order }: { setScreen: (screen: Scree
       icon="🎉"
       title={tx('অর্ডার সম্পন্ন!', 'Order Complete!')}
       refNo={order?.order_code || 'ORD-APP'}
-      desc={tx(`${bn(qty)} × ${rowTitle(product || undefined, 'bn', 'পণ্য')} অর্ডার নিশ্চিত।`, `${num(qty, lang)} × ${rowTitle(product || undefined, 'en', 'Product')} order confirmed.`)}
+      desc={tx(`${bn(qty)} × ${rowTitle(product || undefined, 'bn', 'পণ্য')} অর্ডার গৃহীত হয়েছে। স্টক যাচাইয়ের পর নিশ্চিত করা হবে — 'আমার অর্ডার'-এ অবস্থা দেখুন।`, `${num(qty, lang)} × ${rowTitle(product || undefined, 'en', 'Product')} order placed. We will confirm it after a quick stock check — track it in My Orders.`)}
       action={() => setScreen('home')}
       gold
     />
@@ -5617,7 +5785,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
-  const posts = useApiList<ApiRow>('community/posts');
+  const posts = useApiList<ApiRow>(`community/posts${district}`);
   const officers = useApiList<ApiRow>(`community/officers${district}`);
   const marketUpdates = useApiList<ApiRow>(`app/market-updates${district}`);
   const [postDraft, setPostDraft] = useState('');
@@ -6008,7 +6176,7 @@ function listingStatusTone(s: string): 'green' | 'gold' | 'rose' | 'blue' {
   return s === 'active' ? 'green' : s === 'rejected' || s === 'cancelled' ? 'rose' : s === 'sold' ? 'blue' : 'gold';
 }
 
-function MyListings({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function MyListingsBody({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
@@ -6017,7 +6185,7 @@ function MyListings({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const pendingCount = rows.filter((l) => l.status === 'submitted' || l.status === 'field_verification').length;
   return (
     <>
-      <Header title={tx('আমার বিক্রির তালিকা', 'My Listings')} onBack={() => setScreen('profile')} />
+      {/* header rendered by wrapper */}
       {pendingCount > 0 ? (
         <View style={styles.infoBar}>
           <Text style={styles.infoText}>{tx(`ⓘ ${num(pendingCount, lang)}টি তালিকা অনুমোদনের অপেক্ষায়। অনুমোদনের পর "শাথী থেকে কিনুন"-এ দেখা যাবে।`, `ⓘ ${pendingCount} listing(s) awaiting approval. Once approved they appear in Buy from Shathi.`)}</Text>
@@ -6056,6 +6224,16 @@ function MyListings({ setScreen }: { setScreen: (screen: Screen) => void }) {
           </View>
         );
       })}
+    </>
+  );
+}
+
+function MyListings({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx } = useLanguage();
+  return (
+    <>
+      <Header title={tx('আমার বিক্রির তালিকা', 'My Listings')} onBack={() => setScreen('profile')} />
+      <MyListingsBody setScreen={setScreen} />
     </>
   );
 }
@@ -7386,8 +7564,16 @@ const styles = StyleSheet.create({
   gpsBtnText: { color: 'white', fontSize: 12, fontWeight: '700' },
   regionGpsNote: { color: colors.green, fontSize: 12, fontWeight: '600', marginTop: 8 },
   geoRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
-  statusLoading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginHorizontal: 16, marginTop: 12, paddingVertical: 16, backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.line },
-  statusLoadingText: { color: colors.muted, fontSize: 14, fontWeight: '600' },
+  statusLoading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginHorizontal: 16, marginTop: 12, paddingVertical: 14, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line },
+  statusLoadingSpinner: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  statusLoadingText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  statusStale: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginHorizontal: 16, marginTop: 10, paddingVertical: 9, paddingHorizontal: 12, backgroundColor: '#FFF8E8', borderRadius: 11, borderWidth: 1, borderColor: '#F0DDB5' },
+  statusStaleText: { flex: 1, color: '#8A6418', fontSize: 12, fontWeight: '600' },
+  statusStaleRefresh: { color: colors.maroon, fontSize: 12, fontWeight: '800' },
+  staleBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#FFF4DD', borderBottomWidth: 1, borderColor: '#F0DDB5' },
+  staleBannerText: { flex: 1, color: '#8A6418', fontSize: 12, fontWeight: '700' },
+  staleBannerBtn: { backgroundColor: colors.maroon, borderRadius: 999, paddingVertical: 5, paddingHorizontal: 12 },
+  staleBannerBtnText: { color: 'white', fontSize: 12, fontWeight: '800' },
   statusError: { marginHorizontal: 16, marginTop: 12, padding: 18, backgroundColor: '#FEF2F2', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', alignItems: 'center' },
   statusErrorIcon: { fontSize: 30 },
   statusErrorTitle: { color: colors.danger, fontSize: 16, fontWeight: '800', marginTop: 8 },
@@ -7546,6 +7732,15 @@ const styles = StyleSheet.create({
   catCardTitle: { color: colors.ink, fontSize: 14, fontWeight: '800', textAlign: 'center' },
   catCardCount: { marginTop: 4, color: colors.green, fontSize: 12, fontWeight: '700' },
   catCardCountMuted: { marginTop: 4, color: colors.muted, fontSize: 12 },
+  catCardInactive: { opacity: 0.45 },
+  orderCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  orderCardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  orderCardCode: { color: colors.ink, fontSize: 14, fontWeight: '800' },
+  orderCardItems: { color: colors.muted, fontSize: 13, marginTop: 6, lineHeight: 18 },
+  orderCardFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
+  orderCardDate: { color: colors.muted, fontSize: 12 },
+  orderCardTotal: { color: colors.maroon, fontSize: 16, fontWeight: '800' },
+  orderCardHint: { color: '#8A6418', fontSize: 12, marginTop: 8, backgroundColor: '#FFF8E8', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 9 },
   buySearch: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 12, marginBottom: 2, height: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', paddingHorizontal: 12 },
   buySearchIcon: { fontSize: 15 },
   buySearchInput: { flex: 1, fontSize: 15, color: colors.ink, padding: 0 },
