@@ -1657,6 +1657,7 @@ export default function App() {
   const [apaDraftSuggestion, setApaDraftSuggestion] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<ApiRow | null>(null);
   const [buyCategory, setBuyCategory] = useState<ApiRow | null>(null);
+  const [buyInitialTab, setBuyInitialTab] = useState<'shop' | 'orders'>('shop');
   const [latestOrder, setLatestOrder] = useState<ApiRow | null>(null);
   const [latestListing, setLatestListing] = useState<ApiRow | null>(null);
   const [latestApplication, setLatestApplication] = useState<ApiRow | null>(null);
@@ -2038,7 +2039,7 @@ async function sendApaMessage(text: string) {
           isFinal
         />
       ),
-      home: <Home setScreen={go} openProjects={(t) => { setProjectsInitialTab(t); go('projects'); }} />,
+      home: <Home setScreen={go} openProjects={(t) => { setProjectsInitialTab(t); go('projects'); }} openBuy={(t) => { setBuyInitialTab(t); go('buyCategories'); }} />,
       weather: <WeatherPage setScreen={go} />,
       community: <Community setScreen={go} />,
       projects: <Projects setScreen={go} initialTab={projectsInitialTab} onApply={(id) => { setSelectedProjectId(id); go('kyc'); }} />,
@@ -2060,7 +2061,7 @@ async function sendApaMessage(text: string) {
       inputsForm: <InputsForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       inputsPrice: <InputsPrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
       myListings: <MyListings setScreen={go} />,
-      buyCategories: <BuyCategories setScreen={go} onSelectCategory={(c) => { setBuyCategory(c); go('buyProducts'); }} />,
+      buyCategories: <BuyCategories setScreen={go} initialTab={buyInitialTab} onSelectCategory={(c) => { setBuyCategory(c); go('buyProducts'); }} />,
       buyProducts: <BuyProducts setScreen={go} category={buyCategory} onSelectProduct={setSelectedProduct} />,
       buyOrder: <BuyOrder setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />,
       buyDone: <BuyDone setScreen={go} qty={qty} product={selectedProduct} order={latestOrder} />,
@@ -2083,7 +2084,7 @@ async function sendApaMessage(text: string) {
     };
 
     return routes[screen];
-  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, latestOrder, latestListing, latestApplication, selectedProjectId, projectsInitialTab, authUser, selectedMarketId]);
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, projectsInitialTab, authUser, selectedMarketId]);
 
   const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
@@ -3006,7 +3007,7 @@ function PreferenceOptionCard({
   );
 }
 
-function Home({ setScreen, openProjects }: { setScreen: (screen: Screen) => void; openProjects: (tab: 'all' | 'area' | 'mine') => void }) {
+function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen) => void; openProjects: (tab: 'all' | 'area' | 'mine') => void; openBuy: (tab: 'shop' | 'orders') => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const home = useAppHome(user?.id);
@@ -3050,16 +3051,16 @@ function Home({ setScreen, openProjects }: { setScreen: (screen: Screen) => void
         </Pressable>
       </Card>
       <View style={styles.metricsBand}>
-        <MetricCard value={num(Number(homeStats?.listings ?? 0), lang)} label={tx('তালিকা', 'Listings')} icon="🏷️" tone="rose" />
+        <MetricCard value={num(Number(homeStats?.listings ?? 0), lang)} label={tx('তালিকা', 'Listings')} icon="🏷️" tone="rose" onPress={() => setScreen('myListings')} />
         <View style={styles.metricDivider} />
-        <MetricCard value={num(Number(homeStats?.orders ?? 0), lang)} label={tx('অর্ডার', 'Orders')} icon="🛒" tone="blue" />
+        <MetricCard value={num(Number(homeStats?.orders ?? 0), lang)} label={tx('অর্ডার', 'Orders')} icon="🛒" tone="blue" onPress={() => openBuy('orders')} />
         <View style={styles.metricDivider} />
         <MetricCard value={amount(Number(homeStats?.earnings ?? 0), lang)} label={tx('আয়', 'Earnings')} icon="৳" tone="green" />
       </View>
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
         <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" highlight onPress={() => setScreen('saleCategories')} />
-        <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" highlight onPress={() => setScreen('buyCategories')} />
+        <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" highlight onPress={() => openBuy('shop')} />
         <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} />
         <ServiceCard icon="🤝" title={tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')} sub={tx('চুক্তি চাষ ও সকল প্রকল্প', 'Contract farming & all projects')} tone="green" onPress={() => openProjects('all')} />
       </View>
@@ -3102,15 +3103,15 @@ function HeroStat({ value, label }: { value: string; label: string }) {
   );
 }
 
-function MetricCard({ value, label, icon, tone }: { value: string; label: string; icon: string; tone: 'rose' | 'blue' | 'green' }) {
+function MetricCard({ value, label, icon, tone, onPress }: { value: string; label: string; icon: string; tone: 'rose' | 'blue' | 'green'; onPress?: () => void }) {
   const accent = tone === 'blue' ? colors.blue : tone === 'green' ? colors.green : colors.maroon;
   const chip = tone === 'blue' ? colors.bluePale : tone === 'green' ? colors.greenPale : colors.rose;
   return (
-    <View style={styles.metricCard}>
+    <Pressable onPress={onPress} disabled={!onPress} style={({ pressed }) => [styles.metricCard, pressed && onPress ? styles.pressed : null]}>
       <View style={[styles.metricIcon, { backgroundColor: chip }]}><Text style={styles.metricIconText}>{icon}</Text></View>
       <Text style={[styles.metricValue, { color: accent }]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
       <Text style={styles.metricLabel}>{label}</Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -4821,10 +4822,32 @@ function orderStatusBadge(s: string, tx: (bn: string, en: string) => string): { 
   return { label: tx('বাতিল', 'Cancelled'), tone: 'rose' };
 }
 
-function BuyCategories({ setScreen, onSelectCategory }: { setScreen: (screen: Screen) => void; onSelectCategory: (category: ApiRow) => void }) {
+// Visual fulfilment progress: Placed -> Confirmed -> On the way -> Delivered.
+function OrderProgress({ status }: { status: string }) {
+  const { tx } = useLanguage();
+  if (status === 'cancelled') return null;
+  const stageIndex = status === 'placed' ? 0 : status === 'confirmed' ? 1 : status === 'assigned' || status === 'in_transit' ? 2 : 3;
+  const steps = [tx('গৃহীত', 'Placed'), tx('নিশ্চিত', 'Confirmed'), tx('পথে', 'On way'), tx('ডেলিভারি', 'Delivered')];
+  return (
+    <View style={styles.orderProgress}>
+      {steps.map((label, i) => (
+        <View key={label} style={styles.orderProgressStep}>
+          {i > 0 ? <View style={[styles.orderProgressLine, i <= stageIndex && styles.orderProgressLineDone]} /> : null}
+          <View style={[styles.orderProgressDot, i <= stageIndex && styles.orderProgressDotDone]}>
+            <Text style={[styles.orderProgressDotText, i <= stageIndex && styles.orderProgressDotTextDone]}>{i < stageIndex ? '✓' : ''}</Text>
+          </View>
+          <Text style={[styles.orderProgressLabel, i <= stageIndex && styles.orderProgressLabelDone]} numberOfLines={1}>{label}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function BuyCategories({ setScreen, onSelectCategory, initialTab = 'shop' }: { setScreen: (screen: Screen) => void; onSelectCategory: (category: ApiRow) => void; initialTab?: 'shop' | 'orders' }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
-  const [tab, setTab] = useState<'shop' | 'orders'>('shop');
+  const [tab, setTab] = useState<'shop' | 'orders'>(initialTab);
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
   const mainCats = useApiList<ApiRow>('sale/categories');
   const buyCats = useApiList<ApiRow>('buy/categories');
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
@@ -4902,6 +4925,7 @@ function BuyCategories({ setScreen, onSelectCategory }: { setScreen: (screen: Sc
                   <Badge label={badge.label} tone={badge.tone} />
                 </View>
                 <Text style={styles.orderCardItems} numberOfLines={2}>{String(o.items_summary || '')}</Text>
+                <OrderProgress status={String(o.fulfillment_status || 'placed')} />
                 <View style={styles.orderCardFoot}>
                   <Text style={styles.orderCardDate}>{new Date(String(o.created_at)).toLocaleDateString()}</Text>
                   <Text style={styles.orderCardTotal}>{amount(Number(o.payable_amount || 0), lang)}</Text>
@@ -5785,7 +5809,13 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
-  const posts = useApiList<ApiRow>(`community/posts${district}`);
+  const [feedFilter, setFeedFilter] = useState<'regional' | 'mine' | 'listings' | 'all'>('regional');
+  const feedQs = [
+    user?.district ? `district=${encodeURIComponent(String(user.district))}` : '',
+    feedFilter !== 'regional' ? `filter=${feedFilter}` : '',
+    feedFilter === 'mine' && user?.id ? `user_id=${encodeURIComponent(String(user.id))}` : '',
+  ].filter(Boolean).join('&');
+  const posts = useApiList<ApiRow>(`community/posts${feedQs ? '?' + feedQs : ''}`);
   const officers = useApiList<ApiRow>(`community/officers${district}`);
   const marketUpdates = useApiList<ApiRow>(`app/market-updates${district}`);
   const [postDraft, setPostDraft] = useState('');
@@ -5896,6 +5926,18 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
       ) : null}
 
       <SectionTitle title={tx('কমিউনিটি পোস্ট', 'Community Posts')} warning={fallbackWarning(posts)} />
+      <View style={styles.feedFilterRow}>
+        {([
+          ['regional', tx('আঞ্চলিক', 'Regional')],
+          ['mine', tx('আমার পোস্ট', 'My posts')],
+          ['listings', tx('বিক্রির তালিকা', 'Sale listings')],
+          ['all', tx('সব', 'All')],
+        ] as Array<['regional' | 'mine' | 'listings' | 'all', string]>).map(([key, label]) => (
+          <Pressable key={key} onPress={() => setFeedFilter(key)} style={[styles.feedFilterChip, feedFilter === key && styles.feedFilterChipActive]}>
+            <Text style={[styles.feedFilterText, feedFilter === key && styles.feedFilterTextActive]}>{label}</Text>
+          </Pressable>
+        ))}
+      </View>
       {posts.loading ? <ApiStatus state={posts} empty={tx('এখন কোনো কমিউনিটি পোস্ট নেই।', 'No community posts are available right now.')} /> : null}
       {visiblePosts.map((post, index) => (
         <Post
@@ -5908,6 +5950,8 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
           likes={num(post.like_count || 0, lang)}
           comments={num(post.comment_count || 0, lang)}
           meta={[formatDate(post.created_at, lang), post.district || post.upazila].filter(Boolean).join(' · ')}
+          highlight={Number(post.is_listing ?? 0) === 1}
+          onViewListing={Number(post.is_listing ?? 0) === 1 ? () => setScreen('buyCategories') : undefined}
         />
       ))}
     </>
@@ -5935,10 +5979,10 @@ function Officer({ name, role, phone }: { name: string; role: string; phone?: st
   );
 }
 
-function Post({ name, tag, text, likes, comments, meta, image, official }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean }) {
+function Post({ name, tag, text, likes, comments, meta, image, official, highlight, onViewListing }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean; highlight?: boolean; onViewListing?: () => void }) {
   const { tx } = useLanguage();
   return (
-    <Card style={[styles.postCard, official && styles.officialCard]}>
+    <Card style={[styles.postCard, official && styles.officialCard, highlight && styles.listingPostCard]}>
       {official ? (
         <View style={styles.officialRibbon}>
           <Text style={styles.officialRibbonText}>{tx('শাথী সেবা ✓', 'Shathi Sheba ✓')}</Text>
@@ -5956,6 +6000,11 @@ function Post({ name, tag, text, likes, comments, meta, image, official }: { nam
       </View>
       {text ? <Text style={styles.postText}>{text}</Text> : null}
       {image ? <Image source={{ uri: image }} style={styles.postImage} /> : null}
+      {onViewListing ? (
+        <Pressable onPress={onViewListing} style={({ pressed }) => [styles.listingPostBtn, pressed && styles.pressed]}>
+          <Text style={styles.listingPostBtnText}>🛒 {tx('শাথী থেকে কিনুন-এ দেখুন', 'View in Buy from Shathi')}</Text>
+        </Pressable>
+      ) : null}
       <View style={styles.postActions}>
         <View style={styles.postActionItem}><Ionicons name="heart-outline" size={18} color={colors.muted} /><Text style={styles.postActionText}>{likes}</Text></View>
         <View style={styles.postActionItem}><Ionicons name="chatbubble-outline" size={17} color={colors.muted} /><Text style={styles.postActionText}>{comments}</Text></View>
@@ -5983,10 +6032,13 @@ function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () =>
         <View style={[styles.projStatusPill, open ? styles.projStatusOpen : styles.projStatusSoon]}>
           <Text style={styles.projStatusText}>{open ? tx('নিবন্ধন চলছে', 'Open') : tx('শীঘ্রই', 'Soon')}</Text>
         </View>
+        {region ? (
+          <View style={styles.projRegionTag}><Text style={styles.projRegionTagText} numberOfLines={1}>⌖ {region}</Text></View>
+        ) : null}
       </View>
       <View style={styles.projBody}>
         <Text style={styles.projName}>{emoji} {rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
-        {region ? <Text style={styles.projMeta}>⌖ {region}{Number(project.region_based) === 0 ? ` · ${tx('সব অঞ্চল', 'All regions')}` : ''}</Text> : null}
+        {Number(project.region_based) === 0 ? <Text style={styles.projMeta}>🌐 {tx('সব অঞ্চলের জন্য উন্মুক্ত', 'Open to all regions')}</Text> : null}
         {project.summary_en || project.summary_bn ? <Text style={styles.projSummary} numberOfLines={2}>{rowBody(project, lang, '')}</Text> : null}
         <View style={styles.projStatsRow}>
           {project.duration_label ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('মেয়াদ', 'Duration')}</Text><Text style={styles.projStatValue}>{String(project.duration_label)}</Text></View> : null}
@@ -6206,11 +6258,11 @@ function MyListingsBody({ setScreen }: { setScreen: (screen: Screen) => void }) 
         const status = String(l.status || 'submitted');
         const isPending = status === 'submitted' || status === 'field_verification';
         return (
-          <View key={String(l.id)} style={styles.buyCard}>
+          <View key={String(l.id)} style={styles.listingCard}>
             {img
-              ? <Image source={{ uri: img }} style={styles.buyCardImage} />
-              : <View style={styles.buyCardImagePh}><Text style={styles.buyCardImagePhText}>🏷️</Text></View>}
-            <View style={styles.buyCardBody}>
+              ? <Image source={{ uri: img }} style={styles.listingCardImage} resizeMode="cover" />
+              : <View style={styles.listingCardImagePh}><Text style={styles.buyCardImagePhText}>🏷️</Text></View>}
+            <View style={styles.listingCardBody}>
               <Text style={styles.productTitle} numberOfLines={1}>{rowTitle(l, lang, String(l.item_name || 'Listing'))}</Text>
               <Text style={styles.productSub} numberOfLines={1}>
                 {[l.item_name ? tEnum(l.category_slug, lang) || String(l.item_name) : '', `${num(Number(l.quantity || 1), lang)} ${l.unit || ''}`].filter(Boolean).join(' · ')}
@@ -7519,9 +7571,9 @@ const styles = StyleSheet.create({
   projName: { color: colors.ink, fontSize: 16, fontWeight: '700' },
   projMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
   projSummary: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 6 },
-  projStatsRow: { flexDirection: 'row', gap: 16, marginTop: 10 },
-  projStat: {},
-  projStatLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  projStatsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, backgroundColor: colors.rose, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14 },
+  projStat: { flex: 1, alignItems: 'center' },
+  projStatLabel: { color: colors.muted, fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.3 },
   projStatValue: { color: colors.maroon, fontSize: 14, fontWeight: '700', marginTop: 2 },
   projOverview: { marginTop: 10, backgroundColor: colors.bluePale, borderRadius: 10, padding: 10 },
   projOverviewText: { color: '#1E40AF', fontSize: 12, lineHeight: 18 },
@@ -7741,6 +7793,30 @@ const styles = StyleSheet.create({
   orderCardDate: { color: colors.muted, fontSize: 12 },
   orderCardTotal: { color: colors.maroon, fontSize: 16, fontWeight: '800' },
   orderCardHint: { color: '#8A6418', fontSize: 12, marginTop: 8, backgroundColor: '#FFF8E8', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 9 },
+  orderProgress: { flexDirection: 'row', marginTop: 12, marginBottom: 2 },
+  orderProgressStep: { flex: 1, alignItems: 'center', position: 'relative' },
+  orderProgressLine: { position: 'absolute', top: 9, right: '50%', left: '-50%', height: 3, backgroundColor: colors.line },
+  orderProgressLineDone: { backgroundColor: colors.green },
+  orderProgressDot: { width: 20, height: 20, borderRadius: 10, backgroundColor: 'white', borderWidth: 2, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  orderProgressDotDone: { backgroundColor: colors.green, borderColor: colors.green },
+  orderProgressDotText: { fontSize: 10, color: 'transparent' },
+  orderProgressDotTextDone: { color: 'white', fontWeight: '800' },
+  orderProgressLabel: { marginTop: 4, fontSize: 10, color: colors.muted, fontWeight: '600' },
+  orderProgressLabelDone: { color: colors.green, fontWeight: '800' },
+  feedFilterRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginTop: 8, marginBottom: 2, flexWrap: 'wrap' },
+  feedFilterChip: { paddingVertical: 7, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white' },
+  feedFilterChipActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
+  feedFilterText: { fontSize: 13, color: colors.muted, fontWeight: '600' },
+  feedFilterTextActive: { color: 'white', fontWeight: '700' },
+  listingPostCard: { borderWidth: 1.5, borderColor: colors.gold, backgroundColor: '#FFFDF6' },
+  listingPostBtn: { marginTop: 10, backgroundColor: colors.maroon, borderRadius: 11, paddingVertical: 10, alignItems: 'center' },
+  listingPostBtnText: { color: 'white', fontSize: 14, fontWeight: '800' },
+  listingCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 16, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
+  listingCardImage: { width: '100%', height: 170, backgroundColor: '#f0e7ed' },
+  listingCardImagePh: { width: '100%', height: 120, backgroundColor: '#f6eef2', alignItems: 'center', justifyContent: 'center' },
+  listingCardBody: { padding: 14 },
+  projRegionTag: { position: 'absolute', bottom: 10, left: 10, backgroundColor: 'rgba(33,21,29,0.72)', borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5, maxWidth: '75%' },
+  projRegionTagText: { color: 'white', fontSize: 12, fontWeight: '700' },
   buySearch: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 12, marginBottom: 2, height: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', paddingHorizontal: 12 },
   buySearchIcon: { fontSize: 15 },
   buySearchInput: { flex: 1, fontSize: 15, color: colors.ink, padding: 0 },
