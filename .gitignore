@@ -47,3 +47,4 @@ expo.*.log
 .agents/
 .codex/
 graphify-out/
+.graphify_python

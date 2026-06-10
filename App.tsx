@@ -55,6 +55,8 @@ type Screen =
   | 'cattleMeasure'
   | 'cattlePrice'
   | 'cattleDone'
+  | 'inputsForm'
+  | 'inputsPrice'
   | 'buyCategories'
   | 'buyProducts'
   | 'buyOrder'
@@ -128,14 +130,21 @@ type ApiRow = Record<string, any>;
 type ApiState<T> = { rows: T[]; loading: boolean; error: string | null };
 // Draft for the livestock "List for Sale" flow (form -> measure -> price).
 type ListingDraft = {
+  categorySlug: string;          // 'livestock' | 'inputs' | ...
   animalId: string | null;
   animalName: string;
   species: string | null;
   breedId: string | null;
   breedName: string;
+  saleItemId: string | null;     // for inputs: seeds/feed/fertilizer item
+  saleItemName: string;
+  variety: string;               // for inputs: brand / variety name
+  unit: string;                  // kg / piece / sack
   ageMonths: string;
-  weightKg: string;
+  weightKg: string;              // for inputs this is the quantity in `unit`
   quantity: string;
+  description: string;
+  aiGenerating: boolean;
   images: string[];
   divisionId: string | null;
   divisionName: string;
@@ -143,19 +152,25 @@ type ListingDraft = {
   districtName: string;
   thanaId: string | null;
   thanaName: string;
+  thanaOther: boolean;           // user typed a thana not in the list
+  contactSelf: boolean;          // true = me, false = someone else
   contactName: string;
   contactPhone: string;
+  contactNid: string;
   addressText: string;
   measure: { girth: string; length: string; height: string; weightKg: number } | null;
 };
 function makeListingDraft(): ListingDraft {
   return {
+    categorySlug: 'livestock',
     animalId: null, animalName: '', species: null,
     breedId: null, breedName: '',
-    ageMonths: '24', weightKg: '', quantity: '1', images: [],
+    saleItemId: null, saleItemName: '', variety: '', unit: 'kg',
+    ageMonths: '24', weightKg: '', quantity: '1',
+    description: '', aiGenerating: false, images: [],
     divisionId: null, divisionName: '', districtId: null, districtName: '',
-    thanaId: null, thanaName: '',
-    contactName: '', contactPhone: '', addressText: '', measure: null,
+    thanaId: null, thanaName: '', thanaOther: false,
+    contactSelf: true, contactName: '', contactPhone: '', contactNid: '', addressText: '', measure: null,
   };
 }
 type WeatherApiState = { data: ApiRow | null; loading: boolean; error: string | null; usingFallback: boolean };
@@ -300,6 +315,7 @@ type AuthUser = {
   division?: string | null;
   is_kyc_verified?: boolean;
   nid_number?: string | null;
+  kyc?: { nid?: string; selfie?: string; trade_license?: string; banking?: boolean; document_count?: number } | null;
   preferences?: { categories?: string[]; items?: Record<string, string[]> } | null;
   needs_personal_info?: boolean;
   needs_preferences?: boolean;
@@ -1069,6 +1085,32 @@ async function askShathiApaImage(uri: string, lang: Lang) {
   return response.text || '';
 }
 
+// Generates a short, plain sale-listing description from the first uploaded
+// photo. Used by every listing type's description field.
+// Category-gated AI sale-description (Shathi Apa). Returns NOT_RELEVANT when the
+// photo is not the expected category so the caller can show a polite message.
+async function generateListingDescription(uri: string, lang: Lang, opts: { kind: 'livestock' | 'inputs'; context?: string }) {
+  const inlineData = await uriToInlineData(uri, 'image/jpeg');
+  const rules = opts.kind === 'livestock'
+    ? `The photo MUST clearly show a farm animal of one of these types only: cow, bull, buffalo, goat, sheep, poultry (chicken/duck). If it does NOT show such an animal, reply with EXACTLY the single token NOT_RELEVANT and nothing else. If it does, write a marketplace product sale description in 2-4 plain sentences (no markdown, no headings) covering the animal type, visible health/condition and approximate body size.`
+    : `The photo MUST clearly show an agricultural input for sale: seeds, animal feed, or fertilizer (e.g. seed packets, feed/fertilizer sacks or containers). If it does NOT show such an input, reply with EXACTLY the single token NOT_RELEVANT and nothing else. If it does, write a marketplace product sale description in 2-4 plain sentences (no markdown, no headings) covering the input type, visible quality/condition and approximate quantity/packaging.`;
+  const ctx = opts.context ? ` Where sensible, incorporate these seller-provided details: ${opts.context}.` : '';
+  const response = await requireGenAI().models.generateContent({
+    model: GEMINI_TEXT_MODEL,
+    config: GEMINI_TEXT_CONFIG,
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { inlineData },
+          { text: `You are Shathi Apa, writing short marketplace sale descriptions for a Bangladeshi farmer app. ${rules}${ctx} Be factual; never invent prices. Reply in ${lang === 'bn' ? 'Bengali Bangla' : 'English'}.` },
+        ],
+      },
+    ],
+  });
+  return (response.text || '').trim();
+}
+
 async function askShathiApaImageFollowup(uri: string, question: string, lang: Lang, history: ChatMessage[] = []) {
   const inlineData = await uriToInlineData(uri, 'image/jpeg');
   const response = await requireGenAI().models.generateContent({
@@ -1470,7 +1512,7 @@ function Shell({
 }
 
 // Full-screen crash fallback so a render error never leaves a blank screen.
-function CrashScreen({ message, onRetry, onHome }: { message: string; onRetry: () => void; onHome?: () => void }) {
+function CrashScreen({ message, detail, onRetry, onHome }: { message: string; detail?: string; onRetry: () => void; onHome?: () => void }) {
   return (
     <View style={styles.crashScreen}>
       <View style={styles.crashCard}>
@@ -1478,6 +1520,11 @@ function CrashScreen({ message, onRetry, onHome }: { message: string; onRetry: (
         <Text style={styles.crashTitle}>কিছু একটা সমস্যা হয়েছে</Text>
         <Text style={styles.crashTitleEn}>Something went wrong</Text>
         <Text style={styles.crashMsg}>{message || 'Unexpected error'}</Text>
+        {detail ? (
+          <ScrollView style={styles.crashDetail} contentContainerStyle={{ padding: 10 }}>
+            <Text style={styles.crashDetailText} selectable>{detail}</Text>
+          </ScrollView>
+        ) : null}
         <Pressable onPress={onRetry} style={({ pressed }) => [styles.crashBtn, pressed && styles.pressed]}>
           <Text style={styles.crashBtnText}>↻ আবার চেষ্টা করুন / Try again</Text>
         </Pressable>
@@ -1491,16 +1538,21 @@ function CrashScreen({ message, onRetry, onHome }: { message: string; onRetry: (
   );
 }
 
-class ErrorBoundary extends Component<{ children: React.ReactNode; onHome?: () => void }, { hasError: boolean; message: string }> {
-  state = { hasError: false, message: '' };
+class ErrorBoundary extends Component<{ children: React.ReactNode; onHome?: () => void }, { hasError: boolean; message: string; detail: string }> {
+  state = { hasError: false, message: '', detail: '' };
   static getDerivedStateFromError(error: any) {
-    return { hasError: true, message: error?.message ? String(error.message) : 'Unexpected error' };
+    return { hasError: true, message: error?.message ? String(error.message) : 'Unexpected error', detail: '' };
   }
-  componentDidCatch() { /* could log to a service here */ }
-  reset = () => this.setState({ hasError: false, message: '' });
+  componentDidCatch(error: any, info: any) {
+    const stack = (info && info.componentStack ? String(info.componentStack) : '').split('\n').slice(0, 8).join('\n');
+    // Surface to the Metro terminal and onto the crash screen for diagnosis.
+    console.error('[ErrorBoundary]', error?.message, '\n', error?.stack, '\nComponent stack:', stack);
+    this.setState({ detail: `${error?.message || ''}\n${stack}`.trim() });
+  }
+  reset = () => this.setState({ hasError: false, message: '', detail: '' });
   render() {
     if (this.state.hasError) {
-      return <CrashScreen message={this.state.message} onRetry={this.reset} onHome={this.props.onHome ? () => { this.reset(); this.props.onHome?.(); } : undefined} />;
+      return <CrashScreen message={this.state.message} detail={this.state.detail} onRetry={this.reset} onHome={this.props.onHome ? () => { this.reset(); this.props.onHome?.(); } : undefined} />;
     }
     return this.props.children;
   }
@@ -1924,12 +1976,14 @@ async function sendApaMessage(text: string) {
       marketUpdates: <MarketUpdates setScreen={go} onSelect={(id) => { setSelectedMarketId(id); go('marketDetail'); }} />,
       marketDetail: <MarketDetail setScreen={go} id={selectedMarketId} />,
       officers: <OfficersScreen setScreen={go} />,
-      saleCategories: <SaleCategories setScreen={go} />,
+      saleCategories: <SaleCategories setScreen={go} patchDraft={patchDraft} />,
       livestock: <Livestock setScreen={go} />,
       cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       cattleMeasure: <CattleMeasure setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       cattlePrice: <CattlePrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
       cattleDone: <CattleDone setScreen={go} listing={latestListing} />,
+      inputsForm: <InputsForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
+      inputsPrice: <InputsPrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
       buyCategories: <BuyCategories setScreen={go} />,
       buyProducts: <BuyProducts setScreen={go} onSelectProduct={setSelectedProduct} />,
       buyOrder: <BuyOrder setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />,
@@ -3692,13 +3746,11 @@ function Alert({ title, sub, badge, gold }: { title: string; sub: string; badge:
   );
 }
 
-function SaleCategories({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen) => void; patchDraft: (patch: Partial<ListingDraft>) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const categories = useApiList<ApiRow>('sale/categories');
   const categoryRows = shouldUseFallback(categories) ? fallbackSaleCategories : categories.rows;
-  // Region gating: a category is enabled only if an active project of that
-  // category exists in the user's region (or an open/all-region project).
   const [available, setAvailable] = useState<string[] | null>(null);
   useEffect(() => {
     let alive = true;
@@ -3708,38 +3760,54 @@ function SaleCategories({ setScreen }: { setScreen: (screen: Screen) => void }) 
       .catch(() => { if (alive) setAvailable([]); });
     return () => { alive = false; };
   }, [user?.id]);
+
+  function startListing(category: ApiRow) {
+    const slug = String(category.slug || '').toLowerCase();
+    const isLivestock = slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry');
+    const isInputs = slug === 'inputs';
+    patchDraft({ categorySlug: slug, animalId: null, animalName: '', species: null, breedId: null, breedName: '', saleItemId: null, saleItemName: '', variety: '', weightKg: '', quantity: '1', description: '', images: [], measure: null });
+    setScreen(isLivestock ? 'cattleForm' : isInputs ? 'inputsForm' : 'inactive');
+  }
+
+  function renderTile(category: ApiRow) {
+    const slug = String(category.slug || '').toLowerCase();
+    const interestSlug = String(category.interest_slug || '');
+    const catKey = interestSlug || slug; // inputs/machinery projects use the slug as interest_slug
+    const isLivestock = slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry');
+    const isInputs = slug === 'inputs';
+    const built = isLivestock || isInputs;
+    const hasProject = available === null ? built : available.includes(catKey);
+    const enabled = built && hasProject;
+    const emoji = category.emoji
+      || (isLivestock ? '🐄' : slug.includes('crop') ? '🌾' : slug.includes('fish') ? '🐟' : slug.includes('veg') ? '🥬' : slug.includes('fruit') ? '🥭' : slug.includes('mach') ? '🚜' : isInputs ? '🌱' : '🌿');
+    const sub = !hasProject
+      ? tx('এই এলাকায় কোনো প্রকল্প নেই', 'No project in your area')
+      : isLivestock ? tx('গবাদিপশু ও পোল্ট্রি বিক্রি', 'Sell cattle & poultry')
+      : isInputs ? tx('বীজ, ফিড, সার বিক্রি', 'Sell seeds, feed, fertilizer')
+      : tx('শীঘ্রই আসছে', 'Coming soon');
+    return (
+      <Tile key={category.id || slug} icon={emoji} title={rowTitle(category, lang, tx('বিভাগ', 'Category'))} subtitle={sub} dimmed={!enabled} onPress={() => (enabled ? startListing(category) : setScreen('inactive'))} />
+    );
+  }
+
+  const mainCats = categoryRows.filter((c) => Number(c.pref_selectable) !== 0);
+  const extraCats = categoryRows.filter((c) => Number(c.pref_selectable) === 0);
+
   return (
     <>
       <Header title={tx('বিক্রির তালিকা করুন', 'List for Sale')} onBack={() => setScreen('home')} />
       <Text style={styles.pageHint}>{tx('আপনার পণ্যের বিভাগ বেছে নিন', 'Choose your product category')}</Text>
-      <SectionTitle title={tx('বিভাগ', 'Categories')} warning={fallbackWarning(categories)} />
       {categories.loading ? <ApiStatus state={categories} empty={tx('বিক্রির কোনো বিভাগ পাওয়া যায়নি।', 'No sale categories are available.')} /> : null}
-      <View style={styles.grid}>
-        {categoryRows.map((category) => {
-          const slug = String(category.slug || '').toLowerCase();
-          const interestSlug = String(category.interest_slug || '');
-          const isLivestock = slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry');
-          // Enabled only when a matching project is active in the region.
-          const hasProject = available === null ? isLivestock : (interestSlug ? available.includes(interestSlug) : false);
-          // Phase 1: only the livestock listing flow is built.
-          const enabled = isLivestock && hasProject;
-          const emoji = category.emoji
-            || (isLivestock ? '🐄' : slug.includes('crop') ? '🌾' : slug.includes('fish') ? '🐟' : slug.includes('veg') ? '🥬' : slug.includes('fruit') ? '🥭' : slug.includes('mach') ? '🚜' : slug.includes('input') ? '🌱' : '🌿');
-          const sub = !hasProject
-            ? tx('এই এলাকায় কোনো প্রকল্প নেই', 'No project in your area')
-            : isLivestock ? tx('গবাদিপশু ও পোল্ট্রি বিক্রি', 'Sell cattle & poultry') : tx('শীঘ্রই আসছে', 'Coming soon');
-          return (
-            <Tile
-              key={category.id || slug}
-              icon={emoji}
-              title={rowTitle(category, lang, tx('বিভাগ', 'Category'))}
-              subtitle={sub}
-              dimmed={!enabled}
-              onPress={() => setScreen(enabled ? 'cattleForm' : 'inactive')}
-            />
-          );
-        })}
-      </View>
+
+      <SectionTitle title={tx('পণ্য ও উৎপাদন', 'Produce & Livestock')} warning={fallbackWarning(categories)} />
+      <View style={styles.grid}>{mainCats.map(renderTile)}</View>
+
+      {extraCats.length ? (
+        <>
+          <SectionTitle title={tx('উপকরণ ও যন্ত্রপাতি', 'Inputs & Machinery')} />
+          <View style={styles.grid}>{extraCats.map(renderTile)}</View>
+        </>
+      ) : null}
     </>
   );
 }
@@ -3780,7 +3848,7 @@ type CattleStepProps = {
 
 function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
   const { tx, lang } = useLanguage();
-  const { user } = useAuth();
+  const [showInfo, setShowInfo] = useState(false);
   const animalState = useApiList<ApiRow>('sale/animals');
   const breedResource = draft.species ? `sale/breeds?species=${encodeURIComponent(draft.species)}` : 'sale/breeds';
   const breedState = useApiList<ApiRow>(breedResource);
@@ -3801,36 +3869,6 @@ function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animalState.rows.length]);
 
-  useEffect(() => {
-    if (!draft.contactName && user) {
-      patchDraft({
-        contactName: user.display_name || user.full_name || '',
-        contactPhone: user.phone || '',
-        districtName: draft.districtName || user.district || '',
-        thanaName: draft.thanaName || user.upazila || '',
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
-
-  async function pickImages() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsMultipleSelection: true,
-      selectionLimit: 6,
-      quality: 0.72,
-    });
-    if (!result.canceled) {
-      const uris = result.assets.map((a) => a.uri);
-      patchDraft({ images: [...draft.images, ...uris].slice(0, 6) });
-    }
-  }
-  function removeImage(uri: string) {
-    patchDraft({ images: draft.images.filter((u) => u !== uri) });
-  }
-
   function selectAnimal(item: { id: string; raw: ApiRow }) {
     patchDraft({ animalId: item.id, animalName: item.raw.name_en || '', species: item.raw.species || null, breedId: null, breedName: '' });
   }
@@ -3844,37 +3882,38 @@ function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
   return (
     <>
       <Header title={tx('গবাদিপশু বিক্রির তালিকা', 'List Livestock for Sale')} onBack={() => setScreen('saleCategories')} />
-      <View style={styles.infoBar}>
-        <Text style={styles.infoText}>{tx('ⓘ পশুর ধরন, জাত, বয়স ও ওজন দিন এবং ছবি যুক্ত করুন। মাঠ কর্মকর্তা প্রকৃত ওজন যাচাই করবেন।', 'ⓘ Enter animal type, breed, age and weight, and add photos. The field officer verifies the actual weight.')}</Text>
+      {showInfo ? (
+        <View style={styles.infoBar}>
+          <Text style={styles.infoText}>{tx('পশুর ধরন, জাত, বয়স ও ওজন দিন এবং ছবি যুক্ত করুন। মাঠ কর্মকর্তা প্রকৃত ওজন যাচাই করবেন।', 'Enter animal type, breed, age and weight, and add photos. The field officer verifies the actual weight.')}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.sectionHeadRow}>
+        <Text style={styles.sectionHeadTitle}>{tx('পশুর তথ্য', 'Animal details')}</Text>
+        <Pressable onPress={() => setShowInfo((v) => !v)} style={({ pressed }) => [styles.infoToggle, showInfo && styles.infoToggleActive, pressed && styles.pressed]}>
+          <Text style={[styles.infoToggleText, showInfo && styles.infoToggleTextActive]}>{showInfo ? '×' : 'i'}</Text>
+        </Pressable>
       </View>
 
-      <FormLabel label={tx('পশুর ধরন', 'Animal Type')} required />
-      {animalState.loading ? <ApiStatus state={animalState} /> : null}
-      <PickerSelect
-        value={selectedAnimalLabel}
-        placeholder={tx('পশুর ধরন বেছে নিন', 'Select animal type')}
-        items={animalItems}
-        onSelect={selectAnimal}
-      />
-
-      <FormLabel label={tx('জাত', 'Breed')} required />
-      {breedState.loading ? <ApiStatus state={breedState} /> : null}
-      <PickerSelect
-        value={draft.breedName}
-        placeholder={tx('জাত বেছে নিন', 'Select breed')}
-        items={breedItems}
-        onSelect={selectBreed}
-        disabled={!draft.animalId}
-      />
+      <View style={styles.twoCol}>
+        <View style={styles.flex}>
+          <FormLabel label={tx('পশুর ধরন', 'Animal type')} required />
+          <PickerSelect compact value={selectedAnimalLabel} placeholder={tx('ধরন', 'Type')} items={animalItems} onSelect={selectAnimal} />
+        </View>
+        <View style={styles.flex}>
+          <FormLabel label={tx('জাত', 'Breed')} required />
+          <PickerSelect compact value={draft.breedName} placeholder={tx('জাত', 'Breed')} items={breedItems} onSelect={selectBreed} disabled={!draft.animalId} />
+        </View>
+      </View>
 
       <View style={styles.twoCol}>
         <View style={styles.flex}>
           <FormLabel label={tx('বয়স (মাস)', 'Age (months)')} />
-          <TextInput style={styles.input} value={draft.ageMonths} onChangeText={(v) => patchDraft({ ageMonths: v })} keyboardType="number-pad" />
+          <TextInput style={[styles.input, styles.inRowInput]} value={draft.ageMonths} onChangeText={(v) => patchDraft({ ageMonths: v })} keyboardType="number-pad" />
         </View>
         <View style={styles.flex}>
           <FormLabel label={tx('পশুর সংখ্যা', 'Quantity')} />
-          <TextInput style={styles.input} value={draft.quantity} onChangeText={(v) => patchDraft({ quantity: v })} keyboardType="number-pad" />
+          <Stepper value={draft.quantity} onChange={(v) => patchDraft({ quantity: v })} min={1} compact />
         </View>
       </View>
 
@@ -3887,42 +3926,9 @@ function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
       </View>
       <Text style={styles.fieldHint}>{tx('ফিতা পদ্ধতিতে বুকের বেড় ও দৈর্ঘ্য দিয়ে আনুমানিক ওজন বের করুন। চূড়ান্ত ওজন মাঠ কর্মকর্তা স্কেলে নেবেন।', 'Use the tape method (chest girth + body length) to estimate weight. Final weight is taken on the field officer scale.')}</Text>
 
-      <FormLabel label={tx('ছবি (একাধিক)', 'Photos (multiple)')} required />
-      <Pressable onPress={pickImages} style={({ pressed }) => [styles.uploadCompact, pressed && styles.pressed]}>
-        <Text style={styles.uploadIcon}>＋</Text>
-        <Text style={styles.uploadTitle}>{tx('পশুর ছবি যোগ করুন', 'Add animal photos')}</Text>
-        <Text style={styles.uploadSub}>{tx('সর্বোচ্চ ৬টি · JPG, PNG', 'Up to 6 · JPG, PNG')}</Text>
-      </Pressable>
-      {draft.images.length ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.thumbRow}>
-          {draft.images.map((uri) => (
-            <View key={uri} style={styles.thumbWrap}>
-              <Image source={{ uri }} style={styles.thumb} />
-              <Pressable onPress={() => removeImage(uri)} style={styles.thumbRemove}>
-                <Text style={styles.thumbRemoveText}>×</Text>
-              </Pressable>
-            </View>
-          ))}
-        </ScrollView>
-      ) : null}
+      <MediaDescription draft={draft} patchDraft={patchDraft} kind="livestock" context={[draft.animalName && `type: ${draft.animalName}`, draft.breedName && `breed: ${draft.breedName}`, draft.ageMonths && `age ${draft.ageMonths} months`, Number(draft.weightKg) > 0 && `approx ${draft.weightKg} kg`].filter(Boolean).join(', ')} />
 
-      <View style={styles.formCard}>
-        <Text style={styles.formCardTitle}>{tx('যোগাযোগ ও ঠিকানা', 'Contact & Address')}</Text>
-        <Text style={styles.contactSectionHint}>{tx('আপনার প্রোফাইল থেকে পূরণ — দরকারে বদলান', 'Prefilled from your profile — edit if needed')}</Text>
-        <View style={styles.twoCol}>
-          <View style={styles.flex}>
-            <FormLabel small required label={tx('নাম', 'Name')} />
-            <TextInput style={styles.inputSm} value={draft.contactName} onChangeText={(v) => patchDraft({ contactName: v })} />
-          </View>
-          <View style={styles.flex}>
-            <FormLabel small required label={tx('মোবাইল', 'Mobile')} />
-            <TextInput style={styles.inputSm} value={draft.contactPhone} onChangeText={(v) => patchDraft({ contactPhone: v })} keyboardType="phone-pad" />
-          </View>
-        </View>
-        <GeoPicker draft={draft} patchDraft={patchDraft} small />
-        <FormLabel small label={tx('বিস্তারিত ঠিকানা (গ্রাম)', 'Address (village)')} />
-        <TextInput style={styles.inputSm} value={draft.addressText} onChangeText={(v) => patchDraft({ addressText: v })} placeholder={tx('গ্রাম / বাড়ি', 'Village / house')} placeholderTextColor={colors.muted} />
-      </View>
+      <ContactSection draft={draft} patchDraft={patchDraft} />
 
       {!canContinue ? (
         <Text style={styles.fieldHint}>{tx('পশুর ধরন, জাত, ওজন ও অন্তত একটি ছবি দিন।', 'Add animal type, breed, weight and at least one photo to continue.')}</Text>
@@ -4000,6 +4006,19 @@ function FormLabel({ label, required, small }: { label: string; required?: boole
   );
 }
 
+// +/- counter for quantities. Compact mode drops the outer margin for cards.
+function Stepper({ value, onChange, min = 0, max = 99999, step = 1, compact = false }: { value: string; onChange: (v: string) => void; min?: number; max?: number; step?: number; compact?: boolean }) {
+  const n = Number(value) || 0;
+  const set = (x: number) => onChange(String(Math.max(min, Math.min(max, x))));
+  return (
+    <View style={[styles.stepper, compact && styles.stepperCompact]}>
+      <Pressable onPress={() => set(n - step)} style={({ pressed }) => [styles.stepperBtn, pressed && styles.pressed]}><Text style={styles.stepperBtnText}>−</Text></Pressable>
+      <TextInput style={styles.stepperInput} value={value} onChangeText={(v) => onChange(v.replace(/[^0-9.]/g, ''))} keyboardType="number-pad" />
+      <Pressable onPress={() => set(n + step)} style={({ pressed }) => [styles.stepperBtn, pressed && styles.pressed]}><Text style={styles.stepperBtnText}>＋</Text></Pressable>
+    </View>
+  );
+}
+
 function FakeSelect({ value, options, onChange, disabled = false }: { value: string; options?: string[]; onChange?: (value: string) => void; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const interactive = !disabled && !!options?.length && !!onChange;
@@ -4009,17 +4028,19 @@ function FakeSelect({ value, options, onChange, disabled = false }: { value: str
         <Text style={styles.fakeSelectText}>{value}</Text>
         <Text style={styles.chevron}>⌄</Text>
       </Pressable>
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
-          <View style={styles.dropdownCard}>
+          <Pressable style={styles.dropdownCard} onPress={() => {}}>
+            <View style={styles.dropdownHandle} />
             <ScrollView showsVerticalScrollIndicator={false}>
               {(options || []).map((opt) => (
                 <Pressable key={opt} style={[styles.dropdownOption, opt === value && styles.dropdownOptionActive]} onPress={() => { onChange?.(opt); setOpen(false); }}>
-                  <Text style={[styles.dropdownOptionText, opt === value && styles.dropdownOptionTextActive]}>{opt}</Text>
+                  <Text style={[styles.dropdownOptionText, opt === value && styles.dropdownOptionTextActive]} numberOfLines={1}>{opt}</Text>
+                  {opt === value ? <Text style={styles.dropdownCheck}>✓</Text> : null}
                 </Pressable>
               ))}
             </ScrollView>
-          </View>
+          </Pressable>
         </Pressable>
       </Modal>
     </>
@@ -4043,17 +4064,23 @@ function PickerSelect({ value, placeholder, items, onSelect, disabled = false, c
         <Text style={[styles.fakeSelectText, !value && styles.fakeSelectPlaceholder]} numberOfLines={1}>{value || placeholder}</Text>
         <Text style={styles.chevron}>⌄</Text>
       </Pressable>
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
-          <View style={styles.dropdownCard}>
+          <Pressable style={styles.dropdownCard} onPress={() => {}}>
+            <View style={styles.dropdownHandle} />
+            <Text style={styles.dropdownSheetTitle}>{placeholder}</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
-              {items.map((item) => (
-                <Pressable key={item.id} style={[styles.dropdownOption, item.label === value && styles.dropdownOptionActive]} onPress={() => { onSelect(item); setOpen(false); }}>
-                  <Text style={[styles.dropdownOptionText, item.label === value && styles.dropdownOptionTextActive]}>{item.label}</Text>
-                </Pressable>
-              ))}
+              {items.map((item) => {
+                const sel = item.label === value;
+                return (
+                  <Pressable key={item.id} style={[styles.dropdownOption, sel && styles.dropdownOptionActive]} onPress={() => { onSelect(item); setOpen(false); }}>
+                    <Text style={[styles.dropdownOptionText, sel && styles.dropdownOptionTextActive]} numberOfLines={1}>{item.label}</Text>
+                    {sel ? <Text style={styles.dropdownCheck}>✓</Text> : null}
+                  </Pressable>
+                );
+              })}
             </ScrollView>
-          </View>
+          </Pressable>
         </Pressable>
       </Modal>
     </>
@@ -4061,16 +4088,41 @@ function PickerSelect({ value, placeholder, items, onSelect, disabled = false, c
 }
 
 // Cascading Division -> District -> Thana picker sourced from the geo API.
-function GeoPicker({ draft, patchDraft, small = false }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void; small?: boolean }) {
+function GeoPicker({ draft, patchDraft, small = false, hideGps = false, gpsRef }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void; small?: boolean; hideGps?: boolean; gpsRef?: React.MutableRefObject<(() => void) | undefined> }) {
   const { tx, lang } = useLanguage();
+  const appLocation = useAppLocation();
   const divisions = useApiList<ApiRow>('geo/divisions');
   const districts = useApiList<ApiRow>(draft.divisionId ? `geo/districts?division_id=${draft.divisionId}` : 'geo/districts');
   const thanas = useApiList<ApiRow>(draft.districtId ? `geo/upazilas?district_id=${draft.districtId}` : 'geo/upazilas');
   const toItems = (rows: ApiRow[]) => rows.map((r) => ({ id: String(r.id), label: rowTitle(r, lang, r.name_en || 'N/A'), raw: r }));
+  const matchByName = (rows: ApiRow[], name?: string) => {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return undefined;
+    return rows.find((r) => String(r.name_en).toLowerCase() === n) || rows.find((r) => String(r.name_en).toLowerCase().includes(n) || n.includes(String(r.name_en).toLowerCase()));
+  };
+  function useGps() {
+    const d = appLocation.detected;
+    if (!appLocation.granted || !d) return;
+    const dv = matchByName(divisions.rows, d.division);
+    patchDraft({
+      divisionId: dv ? String(dv.id) : draft.divisionId,
+      divisionName: dv ? String(dv.name_en) : (d.division || draft.divisionName),
+      districtId: null, districtName: d.district || '',
+      thanaId: null, thanaName: d.thana || '', thanaOther: false,
+    });
+  }
+  if (gpsRef) gpsRef.current = useGps;
   return (
     <>
+      {!hideGps ? (
+        <View style={styles.gpsPillRow}>
+          <Pressable onPress={useGps} style={({ pressed }) => [styles.gpsPill, pressed && styles.pressed]}>
+            <Text style={styles.gpsPillText}>⌖ {tx('GPS দিয়ে পূরণ', 'Use GPS')}</Text>
+          </Pressable>
+        </View>
+      ) : null}
       {!small ? <FormLabel required label={tx('বিভাগ', 'Division')} /> : null}
-      {small ? <View style={{ height: 4 }} /> : null}
+      {small ? <View style={{ height: 2 }} /> : null}
       <PickerSelect
         value={draft.divisionName}
         placeholder={tx('বিভাগ বেছে নিন', 'Select division')}
@@ -4093,15 +4145,198 @@ function GeoPicker({ draft, patchDraft, small = false }: { draft: ListingDraft; 
         <View style={styles.flex}>
           {!small ? <FormLabel label={tx('থানা / উপজেলা', 'Thana / Upazila')} /> : null}
           <PickerSelect
-            value={draft.thanaName}
+            value={draft.thanaOther ? tx('অন্যান্য', 'Other') : draft.thanaName}
             placeholder={tx('থানা বেছে নিন', 'Select thana')}
-            items={toItems(thanas.rows)}
+            items={[...toItems(thanas.rows), { id: '__other__', label: tx('অন্যান্য (নিজে লিখুন)', 'Other (type manually)'), raw: {} as ApiRow }]}
             disabled={!draft.districtId}
             compact={small}
-            onSelect={(item) => patchDraft({ thanaId: item.id, thanaName: item.raw.name_en || '' })}
+            onSelect={(item) => item.id === '__other__'
+              ? patchDraft({ thanaOther: true, thanaId: null, thanaName: '' })
+              : patchDraft({ thanaOther: false, thanaId: item.id, thanaName: item.raw.name_en || '' })}
           />
         </View>
       </View>
+      {draft.thanaOther ? (
+        <TextInput style={small ? styles.inputSm : styles.input} value={draft.thanaName} onChangeText={(v) => patchDraft({ thanaName: v })} placeholder={tx('থানার নাম লিখুন', 'Type thana name')} placeholderTextColor={colors.muted} />
+      ) : null}
+    </>
+  );
+}
+
+// KYC status pill colour by status string.
+function kycTone(s?: string): 'green' | 'gold' | 'rose' | 'muted' {
+  return s === 'verified' ? 'green' : s === 'pending' ? 'gold' : s === 'rejected' ? 'rose' : 'muted';
+}
+
+// Compact, reusable contact + address block for every listing type.
+// Radio: "Me" (prefilled + KYC status chips) vs "Someone else" (manual incl NID).
+function ContactSection({ draft, patchDraft }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const kyc = user?.kyc || {};
+  const gpsRef = useRef<(() => void) | undefined>(undefined);
+
+  useEffect(() => {
+    if (draft.contactSelf && !draft.contactName && user) {
+      patchDraft({
+        contactName: user.display_name || user.full_name || '',
+        contactPhone: user.phone || '',
+        contactNid: user.nid_number || '',
+        districtName: draft.districtName || user.district || '',
+        thanaName: draft.thanaName || user.upazila || '',
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  function chooseSelf(self: boolean) {
+    if (self) {
+      patchDraft({ contactSelf: true, contactName: user?.display_name || user?.full_name || '', contactPhone: user?.phone || '', contactNid: user?.nid_number || '' });
+    } else {
+      patchDraft({ contactSelf: false, contactName: '', contactPhone: '', contactNid: '' });
+    }
+  }
+
+  const chips: Array<[string, string, string | undefined]> = [
+    ['🪪', tx('NID', 'NID'), kyc.nid],
+    ['🤳', tx('সেলফি', 'Selfie'), kyc.selfie],
+    ['🏦', tx('ব্যাংক', 'Bank'), kyc.banking ? 'verified' : 'none'],
+  ];
+
+  return (
+    <View style={styles.formCard}>
+      <View style={styles.formCardTitleRow}>
+        <Text style={styles.formCardTitle}>{tx('যোগাযোগের ব্যক্তি', 'Contact person')}</Text>
+        <Pressable onPress={() => gpsRef.current?.()} style={({ pressed }) => [styles.gpsPill, pressed && styles.pressed]}>
+          <Text style={styles.gpsPillText}>⌖ {tx('GPS', 'Use GPS')}</Text>
+        </Pressable>
+      </View>
+      <View style={styles.radioRow}>
+        {([[true, tx('আমি', 'Me')], [false, tx('অন্য কেউ', 'Someone else')]] as Array<[boolean, string]>).map(([val, label]) => {
+          const active = draft.contactSelf === val;
+          return (
+            <Pressable key={String(val)} onPress={() => chooseSelf(val)} style={[styles.radioPill, active && styles.radioPillActive]}>
+              <View style={[styles.radioDot, active && styles.radioDotActive]}>{active ? <View style={styles.radioDotInner} /> : null}</View>
+              <Text style={[styles.radioText, active && styles.radioTextActive]}>{label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {draft.contactSelf ? (
+        <>
+          <View style={styles.kycChips}>
+            {chips.map(([icon, label, st]) => {
+              const tone = kycTone(st);
+              return (
+                <View key={label} style={[styles.kycChip, styles[`kycChip_${tone}` as 'kycChip_green']]}>
+                  <Text style={styles.kycChipText}>{icon} {label}: {st === 'verified' ? '✓' : st === 'pending' ? tx('অপেক্ষমাণ', 'pending') : st === 'rejected' ? '✕' : tx('নেই', 'none')}</Text>
+                </View>
+              );
+            })}
+          </View>
+          {!user?.is_kyc_verified ? (
+            <Text style={styles.fieldHint}>{tx('সম্পূর্ণ যাচাইয়ের জন্য মেনু → KYC ডকুমেন্ট থেকে আপলোড করুন।', 'Upload from Menu → KYC Documents to complete verification.')}</Text>
+          ) : null}
+        </>
+      ) : (
+        <Text style={styles.fieldHint}>{tx('এই ব্যক্তির নাম, মোবাইল ও NID দিন। যাচাইয়ের সময় মাঠ কর্মকর্তা তথ্য মিলিয়ে দেখবেন।', "Enter this person's name, mobile and NID. The field officer will verify these details.")}</Text>
+      )}
+
+      <View style={styles.geoRow}>
+        <View style={styles.flex}>
+          <FormLabel small required label={tx('নাম', 'Name')} />
+          <TextInput style={styles.inputSm} value={draft.contactName} onChangeText={(v) => patchDraft({ contactName: v })} placeholder={tx('পূর্ণ নাম', 'Full name')} placeholderTextColor={colors.muted} />
+        </View>
+        <View style={styles.flex}>
+          <FormLabel small required label={tx('মোবাইল', 'Mobile')} />
+          <TextInput style={styles.inputSm} value={draft.contactPhone} onChangeText={(v) => patchDraft({ contactPhone: v })} keyboardType="phone-pad" placeholder="01XXXXXXXXX" placeholderTextColor={colors.muted} />
+        </View>
+      </View>
+      {!draft.contactSelf ? (
+        <>
+          <FormLabel small required label={tx('NID নম্বর', 'NID number')} />
+          <TextInput style={styles.inputSm} value={draft.contactNid} onChangeText={(v) => patchDraft({ contactNid: v })} keyboardType="number-pad" placeholder={tx('১০ বা ১৭ সংখ্যা', '10 or 17 digits')} placeholderTextColor={colors.muted} />
+        </>
+      ) : null}
+      <GeoPicker draft={draft} patchDraft={patchDraft} small hideGps gpsRef={gpsRef} />
+      <FormLabel small label={tx('বিস্তারিত ঠিকানা (গ্রাম)', 'Address (village)')} />
+      <TextInput style={styles.inputSm} value={draft.addressText} onChangeText={(v) => patchDraft({ addressText: v })} placeholder={tx('গ্রাম / বাড়ি', 'Village / house')} placeholderTextColor={colors.muted} />
+    </View>
+  );
+}
+
+// Reusable multi-image upload + category-gated AI description (Shathi Apa).
+// Read-only while generating; editable after. Refuses off-category photos.
+function MediaDescription({ draft, patchDraft, kind, context }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void; kind: 'livestock' | 'inputs'; context?: string }) {
+  const { tx, lang } = useLanguage();
+  const [aiError, setAiError] = useState('');
+  const [genDone, setGenDone] = useState(false);
+
+  async function pickImages() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return;
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsMultipleSelection: true, selectionLimit: 6, quality: 0.72 });
+    if (!result.canceled) patchDraft({ images: [...draft.images, ...result.assets.map((a) => a.uri)].slice(0, 6) });
+  }
+  function removeImage(uri: string) { patchDraft({ images: draft.images.filter((u) => u !== uri) }); }
+
+  async function generate() {
+    if (!draft.images.length) { setAiError(tx('আগে অন্তত একটি ছবি যোগ করুন।', 'Add at least one photo first.')); return; }
+    setAiError('');
+    patchDraft({ aiGenerating: true });
+    try {
+      const text = await generateListingDescription(draft.images[0], lang, { kind, context });
+      if (/NOT_RELEVANT/i.test(text) || text.length < 4) {
+        patchDraft({ aiGenerating: false });
+        setAiError(kind === 'livestock'
+          ? tx('এই ছবিটি গরু, বলদ, মহিষ, ছাগল, ভেড়া বা পোল্ট্রির স্পষ্ট ছবি মনে হচ্ছে না। অনুগ্রহ করে উল্লিখিত পশুর একটি ছবি আপলোড করুন।', 'This does not look like a clear photo of a cow, bull, buffalo, goat, sheep or poultry. Please upload a photo of the listed animal.')
+          : tx('এই ছবিটি বীজ, ফিড বা সারের স্পষ্ট ছবি মনে হচ্ছে না। অনুগ্রহ করে উপকরণের একটি ছবি আপলোড করুন।', 'This does not look like a clear photo of seeds, feed or fertilizer. Please upload a photo of the input.'));
+        return;
+      }
+      patchDraft({ description: text, aiGenerating: false });
+      setGenDone(true);
+    } catch (e) {
+      patchDraft({ aiGenerating: false });
+      setAiError(friendlyAiError(e, lang));
+    }
+  }
+
+  const canGen = !draft.aiGenerating && draft.images.length > 0;
+  return (
+    <>
+      <FormLabel label={tx('ছবি (একাধিক)', 'Photos (multiple)')} required />
+      <Pressable onPress={pickImages} style={({ pressed }) => [styles.uploadCompact, pressed && styles.pressed]}>
+        <Text style={styles.uploadIcon}>＋</Text>
+        <Text style={styles.uploadTitle}>{tx('ছবি যোগ করুন', 'Add photos')}</Text>
+        <Text style={styles.uploadSub}>{tx('সর্বোচ্চ ৬টি · JPG, PNG', 'Up to 6 · JPG, PNG')}</Text>
+      </Pressable>
+      {draft.images.length ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.thumbRow}>
+          {draft.images.map((uri) => (
+            <View key={uri} style={styles.thumbWrap}>
+              <Image source={{ uri }} style={styles.thumb} />
+              <Pressable onPress={() => removeImage(uri)} style={styles.thumbRemove}><Text style={styles.thumbRemoveText}>×</Text></Pressable>
+            </View>
+          ))}
+        </ScrollView>
+      ) : null}
+
+      <FormLabel label={tx('বিবরণ', 'Description')} />
+      <Pressable onPress={generate} disabled={!canGen} style={({ pressed }) => [styles.aiBtnBlock, !canGen && styles.aiBtnDisabled, pressed && canGen && styles.pressed]}>
+        <Text style={styles.aiBtnBlockText}>{draft.aiGenerating ? tx('শাথী আপা তৈরি করছে...', 'Shathi Apa is writing…') : genDone ? tx('✨ আবার তৈরি করুন', '✨ Regenerate') : tx('✨ শাথী আপা দিয়ে তৈরি করুন', '✨ Generate by Shathi Apa')}</Text>
+      </Pressable>
+      <TextInput
+        style={[styles.input, styles.descInput, draft.aiGenerating && styles.inputDisabled]}
+        value={draft.description}
+        editable={!draft.aiGenerating}
+        onChangeText={(v) => patchDraft({ description: v })}
+        multiline
+        placeholder={tx('ছবি যোগ করে শাথী আপা দিয়ে বিবরণ তৈরি করুন, অথবা নিজে লিখুন।', 'Add a photo and let Shathi Apa write the description, or write your own.')}
+        placeholderTextColor={colors.muted}
+      />
+      {draft.aiGenerating ? <Text style={styles.fieldHint}>{tx('শাথী আপা ছবি বিশ্লেষণ করছে... সম্পন্ন হলে বিবরণ সম্পাদনা করা যাবে।', 'Shathi Apa is analyzing the photo… you can edit once it finishes.')}</Text> : null}
+      {aiError ? <Text style={styles.apiNotice}>{aiError}</Text> : null}
     </>
   );
 }
@@ -4164,6 +4399,7 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         breed_id: draft.breedId ? Number(draft.breedId) : undefined,
         title_en: `${draft.animalName || 'Livestock'} listing from mobile app`,
         title_bn: 'মোবাইল অ্যাপ থেকে পশুর তালিকা',
+        description: draft.description || undefined,
         age_months: Number(draft.ageMonths) || undefined,
         weight_kg: w,
         quantity: Number(draft.quantity) || 1,
@@ -4171,6 +4407,9 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         farmer_expected_price: farmerRate,
         estimated_earning: w * farmerRate,
         contact_phone: draft.contactPhone,
+        contact_name: draft.contactName || undefined,
+        contact_nid: draft.contactNid || undefined,
+        contact_is_self: draft.contactSelf ? 1 : 0,
         division: draft.divisionName || undefined,
         district: draft.districtName || user?.district || undefined,
         upazila: draft.thanaName || user?.upazila || undefined,
@@ -4272,6 +4511,210 @@ function CattleDone({ setScreen, listing }: { setScreen: (screen: Screen) => voi
         <Text style={styles.officerMeta}>☎ 01812-556677 · {tx('ময়মনসিংহ সদর', 'Mymensingh Sadar')}</Text>
       </Card>
     </SuccessScreen>
+  );
+}
+
+function InputsForm({ setScreen, draft, patchDraft }: CattleStepProps) {
+  const { tx, lang } = useLanguage();
+  const itemsState = useApiList<ApiRow>('sale/items');
+  const inputItems = itemsState.rows
+    .filter((r) => String(r.category_slug) === 'inputs' && r.status !== 'inactive')
+    .map((r) => ({ id: String(r.id), label: rowTitle(r, lang, r.name_en || 'Item'), raw: r }));
+
+  useEffect(() => {
+    if (!draft.saleItemId && inputItems.length) {
+      const f = inputItems[0];
+      patchDraft({ saleItemId: f.id, saleItemName: f.raw.name_en || f.label, unit: 'kg' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemsState.rows.length]);
+
+  const canContinue = Boolean(draft.saleItemId && Number(draft.weightKg) > 0 && draft.images.length > 0);
+  const selectedLabel = inputItems.find((i) => i.id === draft.saleItemId)?.label ?? draft.saleItemName;
+
+  return (
+    <>
+      <Header title={tx('উপকরণ বিক্রির তালিকা', 'List Inputs for Sale')} onBack={() => setScreen('saleCategories')} />
+      <View style={styles.infoBar}>
+        <Text style={styles.infoText}>{tx('ⓘ উদ্বৃত্ত বীজ, ফিড বা সার ন্যায্য দরে বিক্রি করুন। ধরন, পরিমাণ ও ছবি দিন।', 'ⓘ Sell surplus seeds, feed or fertilizer at a fair rate. Add type, quantity and photos.')}</Text>
+      </View>
+
+      <SectionTitle title={tx('উপকরণের তথ্য', 'Input details')} />
+      {itemsState.loading ? <ApiStatus state={itemsState} /> : null}
+      <View style={styles.twoCol}>
+        <View style={styles.flex}>
+          <FormLabel label={tx('উপকরণের ধরন', 'Input type')} required />
+          <PickerSelect compact value={selectedLabel} placeholder={tx('ধরন', 'Type')} items={inputItems} onSelect={(item) => patchDraft({ saleItemId: item.id, saleItemName: item.raw.name_en || '', unit: 'kg' })} />
+        </View>
+        <View style={styles.flex}>
+          <FormLabel label={tx('নাম / জাত', 'Name / variety')} />
+          <TextInput style={[styles.input, styles.inRowInput]} value={draft.variety} onChangeText={(v) => patchDraft({ variety: v })} placeholder={tx('যেমন BRRI ধান২৮', 'e.g. BRRI 28')} placeholderTextColor={colors.muted} />
+        </View>
+      </View>
+
+      <View style={styles.twoCol}>
+        <View style={styles.flex}>
+          <FormLabel label={tx('পরিমাণ (কেজি)', 'Quantity (kg)')} required />
+          <TextInput style={[styles.input, styles.inRowInput]} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v })} keyboardType="number-pad" placeholder={tx('যেমন ১০০', 'e.g. 100')} placeholderTextColor={colors.muted} />
+        </View>
+        <View style={styles.flex}>
+          <FormLabel label={tx('লট সংখ্যা', 'Lots')} />
+          <Stepper value={draft.quantity} onChange={(v) => patchDraft({ quantity: v })} min={1} compact />
+        </View>
+      </View>
+
+      <MediaDescription draft={draft} patchDraft={patchDraft} kind="inputs" context={[draft.saleItemName && `type: ${draft.saleItemName}`, draft.variety && `name: ${draft.variety}`, Number(draft.weightKg) > 0 && `quantity ${draft.weightKg} kg`].filter(Boolean).join(', ')} />
+
+      <ContactSection draft={draft} patchDraft={patchDraft} />
+
+      {!canContinue ? (
+        <Text style={styles.fieldHint}>{tx('উপকরণের ধরন, পরিমাণ ও অন্তত একটি ছবি দিন।', 'Add input type, quantity and at least one photo to continue.')}</Text>
+      ) : null}
+      <AppButton title={tx('তালিকা নিশ্চিত করুন  →', 'Confirm listing  →')} onPress={() => setScreen('inputsPrice')} disabled={!canContinue} />
+    </>
+  );
+}
+
+function InputsPrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepProps & { onSubmitted: (listing: ApiRow) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [quote, setQuote] = useState<ApiRow | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+
+  const district = draft.districtName || user?.district || '';
+  const qty = Number(draft.weightKg) || 0;
+
+  useEffect(() => {
+    let alive = true;
+    setQuoteLoading(true);
+    const params = new URLSearchParams();
+    if (draft.saleItemId) params.set('sale_item_id', draft.saleItemId);
+    if (district) params.set('district', district);
+    if (qty > 0) params.set('weight', String(qty));
+    apiRequest<{ data?: ApiRow }>(`app/sale/price-quote?${params.toString()}`)
+      .then((json) => { if (alive) setQuote(json.data?.breakdown ?? null); })
+      .catch(() => { if (alive) setQuote(null); })
+      .finally(() => { if (alive) setQuoteLoading(false); });
+    return () => { alive = false; };
+  }, [draft.saleItemId, district, qty]);
+
+  const b2bRate = Number(quote?.b2b_market_rate ?? 0);
+  const platformFee = Number(quote?.platform_fee ?? 0);
+  const logisticsFee = Number(quote?.logistics_fee ?? 0);
+  const handlingFee = Number(quote?.warehouse_vet_fee ?? 0);
+  const farmerRate = Number(quote?.net_farmer_rate ?? (b2bRate - platformFee - logisticsFee - handlingFee)) || 0;
+  const unit = String(quote?.unit || draft.unit || 'kg');
+  const rows: Array<[string, string, number, boolean]> = [
+    [tx('B2B বাজার দর', 'B2B market rate'), tx('পাইকারি ক্রয় মূল্য', 'Wholesale buy rate'), b2bRate, false],
+    [tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), '', -platformFee, false],
+    [tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), '', -logisticsFee, false],
+    [tx('গুদাম ও হ্যান্ডলিং', 'Warehouse & handling'), '', -handlingFee, false],
+    [tx('নিট কৃষক মূল্য', 'Net farmer rate'), tx('আপনি পাবেন এই দরে', 'Your selling rate'), farmerRate, true],
+  ];
+
+  async function submitListing() {
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      let mediaUrls: string[] = [];
+      try { mediaUrls = await Promise.all(draft.images.map((uri) => uploadImage(uri, 'sale-listings'))); } catch { mediaUrls = draft.images; }
+      const listingCode = `INP-APP-${Date.now()}`;
+      const response = await apiCreate('sale/listings', {
+        listing_code: listingCode,
+        user_id: Number(user?.id) || 1,
+        sale_item_id: draft.saleItemId ? Number(draft.saleItemId) : undefined,
+        title_en: `${[draft.saleItemName || 'Input', draft.variety].filter(Boolean).join(' — ')} listing from mobile app`,
+        title_bn: `${[draft.variety, draft.saleItemName].filter(Boolean).join(' ')} উপকরণের তালিকা`.trim() || 'মোবাইল অ্যাপ থেকে উপকরণের তালিকা',
+        description: draft.description || undefined,
+        weight_kg: qty,
+        quantity: Number(draft.quantity) || 1,
+        unit,
+        farmer_expected_price: farmerRate,
+        estimated_earning: qty * farmerRate,
+        contact_phone: draft.contactPhone,
+        contact_name: draft.contactName || undefined,
+        contact_nid: draft.contactNid || undefined,
+        contact_is_self: draft.contactSelf ? 1 : 0,
+        division: draft.divisionName || undefined,
+        district: draft.districtName || user?.district || undefined,
+        upazila: draft.thanaName || user?.upazila || undefined,
+        address_text: [draft.addressText, draft.thanaName, draft.districtName, draft.divisionName].filter(Boolean).join(', '),
+        media_json: mediaUrls,
+        ai_analysis_json: { source: 'mobile_app', category: 'inputs' },
+        status: 'submitted',
+      });
+      onSubmitted({ listing_code: listingCode, id: response.result?.insertId, estimated_earning: qty * farmerRate });
+      setScreen('cattleDone');
+    } catch (error) {
+      setSubmitError(naturalApiError(error, lang));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <Header title={tx('মূল্য ও আয়ের বিবরণ', 'Price & Earning')} onBack={() => setScreen('inputsForm')} />
+      <Card style={styles.weightCard}>
+        <Text style={styles.weightIcon}>⚖</Text>
+        <View style={styles.flex}>
+          <Text style={styles.smallUpper}>{tx('পরিমাণ', 'Quantity')} ({unit})</Text>
+          <View style={styles.weightInputRow}>
+            <TextInput style={styles.weightInput} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v })} keyboardType="number-pad" />
+            <Text style={styles.kgText}>{unit}</Text>
+          </View>
+        </View>
+        <View>
+          <Text style={styles.miniMuted}>{tx('সম্ভাব্য আয়', 'Earning')}</Text>
+          <Text style={styles.quickEarn}>{amount(qty * farmerRate, lang)}</Text>
+        </View>
+      </Card>
+
+      <View style={styles.summaryChips}>
+        <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{draft.saleItemName || tx('উপকরণ', 'Input')}</Text></View>
+        {district ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⌖ {district}</Text></View> : null}
+      </View>
+
+      {quoteLoading ? <Text style={styles.fieldHint}>{tx('অনুমোদিত B2B দর আনা হচ্ছে...', 'Fetching approved B2B rate...')}</Text> : null}
+      {!quoteLoading && !quote ? <Text style={styles.fieldHint}>{tx('এই উপকরণের জন্য অনুমোদিত দর নেই।', 'No approved rate for this input yet.')}</Text> : null}
+
+      <View style={styles.priceTable}>
+        <View style={styles.priceHead}>
+          <Text style={styles.priceHeadTitle}>{tx('মূল্য বিবরণী', 'Price Breakdown')}</Text>
+          <Text style={styles.priceHeadSub}>{tx(`সব মূল্য প্রতি ${unit} হিসেবে`, `All values per ${unit}`)}</Text>
+        </View>
+        <View style={styles.priceColumns}>
+          <Text style={[styles.colLabel, styles.flex]}>{tx('বিবরণ', 'Item')}</Text>
+          <Text style={styles.colLabel}>/{unit}</Text>
+          <Text style={styles.colLabel}>{tx('মোট', 'Total')} ({num(qty, lang)})</Text>
+        </View>
+        {rows.map(([title, sub, rate, highlight]) => (
+          <View key={title} style={[styles.priceRow, highlight && styles.priceRowHighlight]}>
+            <View style={styles.flex}>
+              <Text style={[styles.priceTitle, highlight && styles.priceTitleStrong]}>{title}</Text>
+              {sub ? <Text style={styles.priceSub}>{sub}</Text> : null}
+            </View>
+            <Text style={styles.rateText}>৳{num(Math.abs(rate), lang)}</Text>
+            <Text style={styles.totalText}>{amount(rate * qty, lang)}</Text>
+          </View>
+        ))}
+        <View style={styles.finalRow}>
+          <View style={styles.flex}>
+            <Text style={styles.finalLabel}>{tx('আপনার আনুমানিক আয়', 'Your estimated earning')}</Text>
+            <Text style={styles.finalSub}>৳{num(farmerRate, lang)} × {num(qty, lang)} {unit}</Text>
+          </View>
+          <Text style={styles.finalValue}>{amount(qty * farmerRate, lang)}</Text>
+        </View>
+      </View>
+      <View style={styles.noteGold}>
+        <Text style={styles.noteText}>{tx('মাঠ কর্মকর্তা গুণগত মান যাচাই করে নগদ বা চেকে পেমেন্ট করবেন।', 'Field officer verifies quality, then pays by cash or cheque.')}</Text>
+      </View>
+      {submitError ? <Text style={styles.apiNotice}>{submitError}</Text> : null}
+      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('তালিকা নিশ্চিত করুন ✓', 'Confirm listing ✓')} onPress={submitListing} disabled={submitting} />
+      <AppButton title={tx('তথ্য পরিবর্তন করুন', 'Edit Details')} variant="outline" onPress={() => setScreen('inputsForm')} />
+    </>
   );
 }
 
@@ -5116,7 +5559,7 @@ function Kyc({ setScreen, projectId, onSubmitted }: { setScreen: (screen: Screen
           </View>
           <View style={styles.flex}>
             <FormLabel small label={tx('পশুর সংখ্যা', 'Livestock count')} />
-            <TextInput style={styles.inputSm} value={livestock} onChangeText={setLivestock} keyboardType="number-pad" placeholder={tx('যেমন ৫', 'e.g. 5')} placeholderTextColor={colors.muted} />
+            <Stepper value={livestock} onChange={setLivestock} min={0} compact />
           </View>
         </View>
         <FormLabel small label={tx('প্রধান আয়ের উৎস', 'Primary income source')} />
@@ -5605,17 +6048,20 @@ function DropdownField({ value, placeholder, options, onSelect, flexBasis }: { v
         <Text style={[styles.dropdownValue, !selected && { color: colors.muted }]} numberOfLines={1}>{selected ? selected.label : placeholder}</Text>
         <Text style={styles.dropdownCaret}>▾</Text>
       </Pressable>
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
-          <View style={styles.dropdownCard}>
+          <Pressable style={styles.dropdownCard} onPress={() => {}}>
+            <View style={styles.dropdownHandle} />
+            <Text style={styles.dropdownSheetTitle}>{placeholder}</Text>
             <ScrollView showsVerticalScrollIndicator={false}>
               {options.map((o) => (
                 <Pressable key={o.value} style={[styles.dropdownOption, o.value === value && styles.dropdownOptionActive]} onPress={() => { onSelect(o.value); setOpen(false); }}>
-                  <Text style={[styles.dropdownOptionText, o.value === value && styles.dropdownOptionTextActive]}>{o.label}</Text>
+                  <Text style={[styles.dropdownOptionText, o.value === value && styles.dropdownOptionTextActive]} numberOfLines={1}>{o.label}</Text>
+                  {o.value === value ? <Text style={styles.dropdownCheck}>✓</Text> : null}
                 </Pressable>
               ))}
             </ScrollView>
-          </View>
+          </Pressable>
         </Pressable>
       </Modal>
     </View>
@@ -5771,7 +6217,8 @@ function FarmScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <MenuField label={tx('মোট জমি (শতাংশ)', 'Total land (decimals)')} value={land} onChangeText={setLand} keyboardType="number-pad" />
         <MenuField label={tx('প্রধান কাজ', 'Primary focus')} value={focus} onChangeText={setFocus} placeholder={tx('যেমন: গবাদিপশু, ফসল', 'e.g. livestock, crops')} />
         <MenuField label={tx('ফসলের ধরন', 'Crop types')} value={crops} onChangeText={setCrops} placeholder={tx('ধান, ভুট্টা', 'rice, maize')} />
-        <MenuField label={tx('পশুর সংখ্যা', 'Livestock count')} value={livestock} onChangeText={setLivestock} keyboardType="number-pad" />
+        <Text style={styles.label}>{tx('পশুর সংখ্যা', 'Livestock count')}</Text>
+        <Stepper value={livestock} onChange={setLivestock} min={0} />
         <MenuField label={tx('পুকুরের সংখ্যা', 'Pond count')} value={ponds} onChangeText={setPonds} keyboardType="number-pad" />
         <MenuField label={tx('খামারের ঠিকানা', 'Farm address')} value={address} onChangeText={setAddress} multiline />
         {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
@@ -5789,7 +6236,9 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const [docs, setDocs] = useState<ApiRow[]>([]);
   const [docType, setDocType] = useState('nid_front');
   const [pickedUri, setPickedUri] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const kyc = user?.kyc || {};
 
   const docTypes: Array<{ key: string; label: string; icon: string; sample: string; guide: string }> = [
     { key: 'nid_front', label: tx('NID সামনে', 'NID front'), icon: '🪪', sample: tx('NID-এর সামনের অংশ', 'NID front side'), guide: tx('ছবি, নাম ও NID নম্বর স্পষ্ট দেখা যাবে এমনভাবে ফ্রেমের ভেতরে রাখুন।', 'Place inside the frame so photo, name and NID number are clearly readable.') },
@@ -5879,6 +6328,20 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
 
         {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
 
+        <SectionTitle title={tx('যাচাই অবস্থা', 'Verification status')} />
+        <View style={styles.kycSummaryRow}>
+          {([['🪪', tx('NID', 'NID'), kyc.nid], ['🤳', tx('সেলফি', 'Selfie'), kyc.selfie], ['🏦', tx('ব্যাংক', 'Bank'), kyc.banking ? 'verified' : 'none']] as Array<[string, string, string | undefined]>).map(([icon, label, st]) => {
+            const tone = kycTone(st);
+            return (
+              <View key={label} style={[styles.kycSummaryChip, styles[`kycChip_${tone}` as 'kycChip_green']]}>
+                <Text style={styles.kycSummaryIcon}>{icon}</Text>
+                <Text style={styles.kycSummaryLabel}>{label}</Text>
+                <Text style={styles.kycSummaryStatus}>{st === 'verified' ? tx('যাচাইকৃত ✓', 'Verified ✓') : st === 'pending' ? tx('অপেক্ষমাণ', 'Pending') : st === 'rejected' ? tx('বাতিল ✕', 'Rejected ✕') : tx('নেই', 'Not added')}</Text>
+              </View>
+            );
+          })}
+        </View>
+
         <SectionTitle title={tx('আপলোড করা ডকুমেন্ট', 'Uploaded documents')} />
         <Card style={{ marginHorizontal: 16 }}>
           {docs.length === 0 ? (
@@ -5886,10 +6349,14 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
           ) : (
             docs.map((d) => (
               <View key={String(d.id)} style={styles.kycDocRow}>
-                <Image source={{ uri: String(d.document_url) }} style={styles.kycDocThumb} />
+                <Pressable onPress={() => setPreview(String(d.document_url))}>
+                  <Image source={{ uri: String(d.document_url) }} style={styles.kycDocThumb} />
+                  <View style={styles.kycDocThumbZoom}><Text style={styles.kycDocThumbZoomText}>⤢</Text></View>
+                </Pressable>
                 <View style={styles.flex}>
                   <Text style={styles.menuTitle}>{docTypes.find((t) => t.key === d.doc_type)?.label || humanizeLabel(d.doc_type)}</Text>
                   <Text style={styles.menuSub}>{formatDate(d.created_at, lang)}</Text>
+                  <Text style={styles.kycUpdateLink} onPress={() => { setDocType(String(d.doc_type)); setPickedUri(null); }}>{tx('↻ আপডেট করুন', '↻ Update')}</Text>
                 </View>
                 <Badge label={statusLabel(String(d.status))} tone={d.status === 'verified' ? 'green' : d.status === 'rejected' ? 'rose' : 'gold'} />
               </View>
@@ -5897,6 +6364,13 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
           )}
         </Card>
       </RefreshScroll>
+
+      <Modal visible={!!preview} transparent animationType="fade" onRequestClose={() => setPreview(null)}>
+        <Pressable style={styles.previewBackdrop} onPress={() => setPreview(null)}>
+          {preview ? <Image source={{ uri: preview }} style={styles.previewImage} resizeMode="contain" /> : null}
+          <Text style={styles.previewClose}>{tx('বন্ধ করতে ট্যাপ করুন', 'Tap to close')}</Text>
+        </Pressable>
+      </Modal>
     </>
   );
 }
@@ -6172,15 +6646,26 @@ const styles = StyleSheet.create({
   logoutButtonIcon: { color: colors.danger, fontSize: 18, fontWeight: '900' },
   logoutButtonText: { color: colors.danger, fontSize: 16, fontWeight: '800' },
   dobRow: { flexDirection: 'row', gap: 8, marginHorizontal: 20, marginTop: 6 },
-  dropdownField: { height: 48, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  dropdownValue: { color: colors.ink, fontSize: 14, fontWeight: '600', flex: 1 },
+  dropdownField: { height: 44, borderRadius: 11, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  dropdownValue: { color: colors.ink, fontSize: 14.5, fontWeight: '600', flex: 1 },
   dropdownCaret: { color: colors.muted, fontSize: 12, marginLeft: 6 },
-  dropdownBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center', padding: 32 },
-  dropdownCard: { width: '100%', maxHeight: 360, backgroundColor: 'white', borderRadius: 14, paddingVertical: 6 },
-  dropdownOption: { paddingVertical: 13, paddingHorizontal: 18, borderBottomWidth: 1, borderBottomColor: '#F1F1F1' },
-  dropdownOptionActive: { backgroundColor: '#FBEAF1' },
-  dropdownOptionText: { color: colors.ink, fontSize: 15 },
+  stepper: { flexDirection: 'row', alignItems: 'center', height: 46, borderRadius: 11, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, marginHorizontal: 16, overflow: 'hidden' },
+  stepperBtn: { width: 46, height: 46, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.rose },
+  stepperBtnText: { color: colors.maroon, fontSize: 22, fontWeight: '800', lineHeight: 24 },
+  stepperInput: { flex: 1, textAlign: 'center', color: colors.ink, fontSize: 16, fontWeight: '700' },
+  stepperCompact: { marginHorizontal: 0, height: 44 },
+  gpsPillRow: { flexDirection: 'row', justifyContent: 'flex-end', marginHorizontal: 16, marginTop: 2 },
+  gpsPill: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
+  gpsPillText: { color: colors.blue, fontSize: 11.5, fontWeight: '800' },
+  dropdownBackdrop: { flex: 1, backgroundColor: 'rgba(20,8,16,0.45)', justifyContent: 'flex-end' },
+  dropdownCard: { width: '100%', maxHeight: '70%', backgroundColor: colors.card, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingTop: 8, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, shadowOffset: { width: 0, height: -4 }, elevation: 12 },
+  dropdownHandle: { alignSelf: 'center', width: 38, height: 4, borderRadius: 4, backgroundColor: colors.line, marginBottom: 8 },
+  dropdownSheetTitle: { color: colors.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4, paddingHorizontal: 20, paddingBottom: 6 },
+  dropdownOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14, paddingHorizontal: 20 },
+  dropdownOptionActive: { backgroundColor: colors.rose },
+  dropdownOptionText: { color: colors.ink, fontSize: 15.5, flex: 1 },
   dropdownOptionTextActive: { color: colors.maroon, fontWeight: '800' },
+  dropdownCheck: { color: colors.maroon, fontSize: 17, fontWeight: '800', marginLeft: 12 },
   menuFormScroll: { paddingBottom: 28 },
   kycDocRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
   kycDocThumb: { width: 44, height: 44, borderRadius: 8, backgroundColor: '#FBEAF1' },
@@ -6233,17 +6718,17 @@ const styles = StyleSheet.create({
   loginCard: { marginHorizontal: 0, padding: 32, borderRadius: 18 },
   loginTitle: { color: colors.maroon, fontSize: 29, lineHeight: 36, fontWeight: '700', textAlign: 'center' },
   loginSub: { color: colors.muted, fontSize: 18, textAlign: 'center', marginBottom: 22 },
-  label: { color: colors.maroon, fontSize: 13, fontWeight: '700', marginHorizontal: 20, marginTop: 14, marginBottom: 6 },
+  label: { color: colors.ink, fontSize: 12.5, fontWeight: '700', marginHorizontal: 16, marginTop: 12, marginBottom: 5, letterSpacing: 0.1 },
   input: {
-    height: 48,
-    borderRadius: 10,
+    height: 46,
+    borderRadius: 11,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: '#FFFDFE',
+    backgroundColor: colors.card,
     paddingHorizontal: 14,
     marginHorizontal: 16,
     color: colors.ink,
-    fontSize: 17,
+    fontSize: 15,
   },
   inputDisabled: { opacity: 0.58, backgroundColor: '#F2E9EE' },
   button: {
@@ -6694,11 +7179,11 @@ const styles = StyleSheet.create({
   infoText: { color: colors.maroon, fontSize: 14, lineHeight: 21, fontWeight: '500' },
   twoCol: { flexDirection: 'row', gap: 10, paddingHorizontal: 16 },
   fakeSelect: {
-    height: 48,
-    borderRadius: 10,
+    height: 46,
+    borderRadius: 11,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: '#FFFDFE',
+    backgroundColor: colors.card,
     paddingHorizontal: 14,
     marginHorizontal: 16,
     flexDirection: 'row',
@@ -6706,9 +7191,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   fakeSelectCompact: { height: 44, marginHorizontal: 0, paddingHorizontal: 12 },
-  fakeSelectText: { color: colors.ink, fontSize: 16, flex: 1 },
+  fakeSelectText: { color: colors.ink, fontSize: 15, flex: 1 },
   fakeSelectPlaceholder: { color: colors.muted },
   fieldHint: { color: colors.muted, fontSize: 12, marginHorizontal: 16, marginTop: 6, lineHeight: 17 },
+  inRowInput: { marginHorizontal: 0, height: 44, fontSize: 14 },
+  sectionHeadRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 16, marginTop: 14, marginBottom: 2 },
+  sectionHeadTitle: { color: colors.maroon, fontSize: 15, fontWeight: '800' },
+  infoToggle: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: colors.muted, alignItems: 'center', justifyContent: 'center' },
+  infoToggleActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
+  infoToggleText: { color: colors.muted, fontSize: 13, fontWeight: '800', fontStyle: 'italic' },
+  infoToggleTextActive: { color: 'white', fontStyle: 'normal' },
   weightRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16 },
   weightRowInput: { marginHorizontal: 0 },
   measureBtn: { height: 48, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', alignItems: 'center', justifyContent: 'center' },
@@ -6810,6 +7302,8 @@ const styles = StyleSheet.create({
   crashTitle: { color: colors.maroon, fontSize: 20, fontWeight: '800', marginTop: 12 },
   crashTitleEn: { color: colors.muted, fontSize: 14, fontWeight: '700', marginTop: 2 },
   crashMsg: { color: colors.ink, fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 12 },
+  crashDetail: { maxHeight: 180, alignSelf: 'stretch', marginTop: 10, borderRadius: 8, backgroundColor: '#FBF1F5', borderWidth: 1, borderColor: colors.line },
+  crashDetailText: { color: '#7A1230', fontSize: 11, lineHeight: 16, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
   crashBtn: { marginTop: 18, backgroundColor: colors.maroon, borderRadius: 12, paddingHorizontal: 22, paddingVertical: 13, alignSelf: 'stretch', alignItems: 'center' },
   crashBtnText: { color: 'white', fontSize: 15, fontWeight: '700' },
   crashBtnOutline: { marginTop: 10, borderRadius: 12, borderWidth: 1.5, borderColor: colors.maroon, paddingVertical: 12, alignSelf: 'stretch', alignItems: 'center' },
@@ -6821,11 +7315,45 @@ const styles = StyleSheet.create({
   genderPillSm: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
   formCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
   formCardTitle: { color: colors.maroon, fontSize: 14, fontWeight: '800', marginBottom: 4 },
+  formCardTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
   kycProjectBar: { marginHorizontal: 16, marginTop: 10, backgroundColor: colors.rose, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, borderLeftWidth: 4, borderLeftColor: colors.maroon },
   kycProjectLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
   kycProjectName: { color: colors.maroon, fontSize: 15, fontWeight: '800', marginTop: 2 },
   verifiedBanner: { backgroundColor: colors.greenPale, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, marginVertical: 6, borderWidth: 1, borderColor: '#A7F3D0' },
   verifiedBannerText: { color: '#166534', fontSize: 12, lineHeight: 17, fontWeight: '600' },
+  radioRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
+  radioPill: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 9, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
+  radioPillActive: { borderColor: colors.maroon, backgroundColor: colors.rose },
+  radioDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  radioDotActive: { borderColor: colors.maroon },
+  radioDotInner: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.maroon },
+  radioText: { color: colors.muted, fontSize: 14, fontWeight: '700' },
+  radioTextActive: { color: colors.maroon },
+  kycChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 8 },
+  kycChip: { paddingVertical: 5, paddingHorizontal: 10, borderRadius: 999, borderWidth: 1 },
+  kycChip_green: { backgroundColor: colors.greenPale, borderColor: '#A7F3D0' },
+  kycChip_gold: { backgroundColor: colors.goldPale, borderColor: '#F4D385' },
+  kycChip_rose: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
+  kycChip_muted: { backgroundColor: colors.rose, borderColor: colors.line },
+  kycChipText: { color: colors.ink, fontSize: 11, fontWeight: '700' },
+  kycSummaryRow: { flexDirection: 'row', gap: 8, marginHorizontal: 16, marginTop: 6 },
+  kycSummaryChip: { flex: 1, alignItems: 'center', borderRadius: 12, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 4 },
+  kycSummaryIcon: { fontSize: 20 },
+  kycSummaryLabel: { color: colors.ink, fontSize: 12, fontWeight: '700', marginTop: 3 },
+  kycSummaryStatus: { color: colors.muted, fontSize: 10, fontWeight: '600', marginTop: 1, textAlign: 'center' },
+  kycDocThumbZoom: { position: 'absolute', right: 4, bottom: 4, width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(74,17,43,0.8)', alignItems: 'center', justifyContent: 'center' },
+  kycDocThumbZoomText: { color: 'white', fontSize: 11 },
+  kycUpdateLink: { color: colors.blue, fontSize: 12, fontWeight: '700', marginTop: 4 },
+  previewBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', alignItems: 'center', justifyContent: 'center', padding: 16 },
+  previewImage: { width: '100%', height: '80%' },
+  previewClose: { color: 'rgba(255,255,255,0.8)', fontSize: 13, marginTop: 14 },
+  descHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginRight: 16 },
+  descInput: { minHeight: 92, textAlignVertical: 'top', paddingTop: 10 },
+  aiBtn: { backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
+  aiBtnDisabled: { opacity: 0.5 },
+  aiBtnText: { color: colors.blue, fontSize: 12, fontWeight: '700' },
+  aiBtnBlock: { marginHorizontal: 16, marginTop: 2, marginBottom: 6, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', borderRadius: 11, paddingVertical: 11, alignItems: 'center' },
+  aiBtnBlockText: { color: colors.blue, fontSize: 14, fontWeight: '800' },
   upload: {
     marginHorizontal: 16,
     borderWidth: 2,
