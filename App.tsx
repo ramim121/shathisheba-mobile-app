@@ -363,8 +363,13 @@ function naturalApiError(error: unknown, lang: Lang) {
   }
   if (/network request failed|failed to fetch|load failed/i.test(message)) {
     return lang === 'bn'
-      ? 'এখন সার্ভার থেকে তথ্য আনা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।'
-      : 'We could not load this from the server right now. Please try again shortly.';
+      ? 'ব্যাকএন্ড সার্ভারে পৌঁছানো যাচ্ছে না। ইন্টারনেট বা সার্ভার ঠিকানা পরীক্ষা করুন।'
+      : 'Cannot reach the backend server. Check your internet connection or the server address.';
+  }
+  if (/ETIMEDOUT|ECONNREFUSED|ER_|mysql|database/i.test(message)) {
+    return lang === 'bn'
+      ? `ডাটাবেস সমস্যা: ${message}`
+      : `Database problem: ${message}`;
   }
   return lang === 'bn'
     ? `তথ্য আনতে সমস্যা হয়েছে: ${message}`
@@ -557,19 +562,42 @@ async function apiCreate(resource: string, payload: ApiRow) {
   });
 }
 
-// Tracks which resources are currently serving cached (stale) data after a failed
-// server fetch, so a single global banner can offer a refresh.
+// Tracks which CURRENTLY-MOUNTED resources are serving cached (stale) data after a
+// failed server fetch, so a single global banner can offer a refresh. Marks are
+// removed when the resource refetches successfully OR its screen unmounts, so the
+// banner never lingers after the data on screen is fresh again. Repeated failed
+// refreshes surface the underlying error so the user learns the real cause.
 const staleStore = {
   resources: new Set<string>(),
-  listeners: new Set<(count: number) => void>(),
-  mark(resource: string) {
+  listeners: new Set<() => void>(),
+  failedRefreshes: 0,
+  lastError: null as string | null,
+  notify() {
+    this.listeners.forEach((fn) => fn());
+  },
+  mark(resource: string, error: string) {
     this.resources.add(resource);
-    this.listeners.forEach((fn) => fn(this.resources.size));
+    this.lastError = error;
+    this.notify();
   },
   clear(resource: string) {
-    if (this.resources.delete(resource)) this.listeners.forEach((fn) => fn(this.resources.size));
+    if (this.resources.delete(resource)) this.notify();
   },
-  subscribe(fn: (count: number) => void) {
+  // Called on any successful fetch: the server is reachable again.
+  resetFailures() {
+    if (this.failedRefreshes > 0 || this.lastError !== null) {
+      this.failedRefreshes = 0;
+      this.lastError = null;
+      this.notify();
+    }
+  },
+  noteRefreshAttempt() {
+    if (this.resources.size > 0) {
+      this.failedRefreshes += 1;
+      this.notify();
+    }
+  },
+  subscribe(fn: () => void) {
     this.listeners.add(fn);
     return () => {
       this.listeners.delete(fn);
@@ -577,10 +605,16 @@ const staleStore = {
   },
 };
 
-function useStaleCount() {
-  const [count, setCount] = useState(staleStore.resources.size);
-  useEffect(() => staleStore.subscribe(setCount), []);
-  return count;
+function useStaleState() {
+  const [snapshot, setSnapshot] = useState({ count: staleStore.resources.size, fails: staleStore.failedRefreshes, lastError: staleStore.lastError });
+  useEffect(
+    () =>
+      staleStore.subscribe(() =>
+        setSnapshot({ count: staleStore.resources.size, fails: staleStore.failedRefreshes, lastError: staleStore.lastError })
+      ),
+    []
+  );
+  return snapshot;
 }
 
 const API_CACHE_PREFIX = 'apicache:';
@@ -597,6 +631,7 @@ function useApiList<T = ApiRow>(resource: string): ApiState<T> {
         if (!alive) return;
         setState({ rows, loading: false, error: null });
         staleStore.clear(resource);
+        staleStore.resetFailures();
         // Persist the last good response so the app still works offline next time.
         AsyncStorage.setItem(API_CACHE_PREFIX + resource, JSON.stringify(rows)).catch(() => {});
       })
@@ -609,11 +644,14 @@ function useApiList<T = ApiRow>(resource: string): ApiState<T> {
           cached = [];
         }
         if (!alive) return;
-        if (cached.length > 0) staleStore.mark(resource);
-        setState({ rows: cached, loading: false, error: naturalApiError(error, lang), stale: cached.length > 0 });
+        const friendly = naturalApiError(error, lang);
+        if (cached.length > 0) staleStore.mark(resource, friendly);
+        setState({ rows: cached, loading: false, error: friendly, stale: cached.length > 0 });
       });
     return () => {
       alive = false;
+      // Leaving the screen: its stale mark must not keep the global banner alive.
+      staleStore.clear(resource);
     };
   }, [resource, lang, refreshTick]);
   return state;
@@ -678,13 +716,28 @@ function useAppHome(userId?: string | null) {
     const resource = userId ? `app/home?user_id=${encodeURIComponent(String(userId))}` : 'app/home';
     apiRequest<{ data?: ApiRow }>(resource)
       .then((json) => {
-        if (alive) setState({ data: json.data ?? null, loading: false });
+        if (!alive) return;
+        setState({ data: json.data ?? null, loading: false });
+        staleStore.clear(resource);
+        staleStore.resetFailures();
+        AsyncStorage.setItem(API_CACHE_PREFIX + resource, JSON.stringify(json.data ?? null)).catch(() => {});
       })
-      .catch(() => {
-        if (alive) setState({ data: null, loading: false });
+      .catch(async (error) => {
+        // Fall back to the last good home payload so the dashboard never blanks out.
+        let cached: ApiRow | null = null;
+        try {
+          const raw = await AsyncStorage.getItem(API_CACHE_PREFIX + resource);
+          if (raw) cached = JSON.parse(raw) as ApiRow;
+        } catch {
+          cached = null;
+        }
+        if (!alive) return;
+        if (cached) staleStore.mark(resource, naturalApiError(error, lang));
+        setState({ data: cached, loading: false });
       });
     return () => {
       alive = false;
+      staleStore.clear(resource);
     };
   }, [userId, lang, refreshTick]);
   return state;
@@ -885,18 +938,35 @@ function ApiStatus({ state, empty }: { state: ApiState<any>; empty?: string }) {
   return null;
 }
 
-// Slim global banner shown when any resource is serving cached data after a
-// failed server fetch. One tap refreshes every visible list.
+// Slim global banner shown only while a visible list is serving cached data after
+// a failed server fetch. Hides itself the moment a refresh succeeds (or the screen
+// changes). After repeated failed refreshes it shows the exact underlying error.
+const STALE_DETAIL_AFTER = 3;
+
 function StaleBanner() {
   const { tx } = useLanguage();
-  const count = useStaleCount();
+  const { count, fails, lastError } = useStaleState();
   if (count === 0) return null;
+  const showDetail = fails >= STALE_DETAIL_AFTER && !!lastError;
   return (
     <View style={styles.staleBanner}>
-      <Text style={styles.staleBannerText} numberOfLines={1}>
-        📡 {tx('সার্ভার থেকে আনা যায়নি — আগের তথ্য দেখানো হচ্ছে', 'Server fetch failed — showing previous data')}
-      </Text>
-      <Pressable onPress={() => refreshStore.trigger()} style={({ pressed }) => [styles.staleBannerBtn, pressed && styles.pressed]}>
+      <View style={styles.flex}>
+        <Text style={styles.staleBannerText} numberOfLines={1}>
+          📡 {tx('সার্ভার থেকে আনা যায়নি — আগের তথ্য দেখানো হচ্ছে', 'Server fetch failed — showing previous data')}
+        </Text>
+        {showDetail ? (
+          <Text style={styles.staleBannerDetail} numberOfLines={2}>
+            {tx('কারণ', 'Cause')}: {lastError}
+          </Text>
+        ) : null}
+      </View>
+      <Pressable
+        onPress={() => {
+          staleStore.noteRefreshAttempt();
+          refreshStore.trigger();
+        }}
+        style={({ pressed }) => [styles.staleBannerBtn, pressed && styles.pressed]}
+      >
         <Text style={styles.staleBannerBtnText}>↻ {tx('রিফ্রেশ', 'Refresh')}</Text>
       </Pressable>
     </View>
@@ -7623,7 +7693,8 @@ const styles = StyleSheet.create({
   statusStaleText: { flex: 1, color: '#8A6418', fontSize: 12, fontWeight: '600' },
   statusStaleRefresh: { color: colors.maroon, fontSize: 12, fontWeight: '800' },
   staleBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#FFF4DD', borderBottomWidth: 1, borderColor: '#F0DDB5' },
-  staleBannerText: { flex: 1, color: '#8A6418', fontSize: 12, fontWeight: '700' },
+  staleBannerText: { color: '#8A6418', fontSize: 12, fontWeight: '700' },
+  staleBannerDetail: { color: '#A11B3A', fontSize: 11, marginTop: 2 },
   staleBannerBtn: { backgroundColor: colors.maroon, borderRadius: 999, paddingVertical: 5, paddingHorizontal: 12 },
   staleBannerBtnText: { color: 'white', fontSize: 12, fontWeight: '800' },
   statusError: { marginHorizontal: 16, marginTop: 12, padding: 18, backgroundColor: '#FEF2F2', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', alignItems: 'center' },
