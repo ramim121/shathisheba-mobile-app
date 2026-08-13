@@ -27,140 +27,28 @@ import {
   Image,
   View,
 } from 'react-native';
+import { colors } from './src/theme/colors';
+import { androidNavigationInset, androidStatusBarInset, styles } from './src/theme/styles';
+import type {
+  ApiRow, ApiState, AppRole, AuthUser, CattleAiResult, ChatMessage, Lang, LearnCat, LearnMod,
+  ListingDraft, LocationState, MainTab, PreferenceKey, PreferenceOption, PreferenceSection,
+  Screen, TrainingContentKind, TrainingModule, WeatherApiState,
+} from './src/types';
+import {
+  analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
+  askShathiApaImageFollowup, askShathiApaText, generateListingDescription, generateResponseSuggestions,
+  friendlyAiError, isAiSpeaking, parseJsonArray, parseJsonObject, playAiSpeech, stopAiSpeech,
+  summarizeMarkdown, toggleSpeech, withSuggestions,
+} from './src/ai/gemini';
+import {
+  API_BASE_URL, API_CACHE_PREFIX, SERVER_FALLBACK_MESSAGE, WEATHERAPI_KEY, WEATHERAPI_LOCATION,
+  apiCreate, apiList, apiRequest, apiUrl, authHeaders, loadingStore, naturalApiError, refreshStore,
+  setApiAuthToken, setAuthExpiredHandler, staleStore, uploadImage, weatherApiUrl,
+} from './src/api/client';
 
-type MainTab = 'home' | 'community' | 'projects' | 'profile';
-type Lang = 'bn' | 'en';
-type Screen =
-  | 'onboarding'
-  | 'gpsGrant'
-  | 'shathiApa'
-  | 'apaVoice'
-  | 'apaCamera'
-  | 'login'
-  | 'personalInfo'
-  | 'prefAnimal'
-  | 'prefLivestock'
-  | 'prefCrops'
-  | 'prefFish'
-  | 'prefVegetable'
-  | 'prefFruits'
-  | 'home'
-  | 'weather'
-  | 'community'
-  | 'projects'
-  | 'profile'
-  | 'saleCategories'
-  | 'livestock'
-  | 'cattleForm'
-  | 'cattleMeasure'
-  | 'cattlePrice'
-  | 'cattleDone'
-  | 'inputsForm'
-  | 'inputsPrice'
-  | 'myListings'
-  | 'buyCategories'
-  | 'buyProducts'
-  | 'buyOrder'
-  | 'buyDone'
-  | 'training'
-  | 'trainingCategory'
-  | 'trainingModule'
-  | 'trainingArticle'
-  | 'trainingVideo'
-  | 'trainingQuiz'
-  | 'partnerRegister'
-  | 'kyc'
-  | 'regDone'
-  | 'menuPersonal'
-  | 'menuBanking'
-  | 'menuFarm'
-  | 'menuKyc'
-  | 'menuFaq'
-  | 'marketUpdates'
-  | 'marketDetail'
-  | 'officers'
-  | 'inactive';
 
-const colors = {
-  maroon: '#871449',
-  maroonDark: '#4A112B',
-  rose: '#F4E8EE',
-  cream: '#FCFAF8',
-  card: '#FFFFFF',
-  gold: '#F59E0B',
-  goldPale: '#FFF3C4',
-  green: '#16A34A',
-  greenPale: '#DCFCE7',
-  blue: '#2563EB',
-  bluePale: '#DBEAFE',
-  ink: '#2B0B1E',
-  muted: '#9B5173',
-  line: '#E8D7DF',
-  danger: '#DC2626',
-};
 
-type PreferenceKey = 'cattle' | 'crops' | 'fishery' | 'vegetables' | 'fruits';
-type PreferenceOption = { id: string; icon: string; label: string };
-type PreferenceSection = { title: string; items: PreferenceOption[] };
-type TrainingContentKind = 'article' | 'video';
-type ChatMessage = { role: 'user' | 'model'; text: string; imageUri?: string; suggestions?: string[] };
-type CattleAiResult = {
-  ageMonths?: number;
-  weightKg?: number;
-  animalType?: string;
-  breed?: string;
-  count?: number;
-  healthSummary?: string;
-  accuracyPercent?: number;
-  isCow?: boolean;
-};
-type TrainingModule = {
-  icon: string;
-  title: string;
-  sub: string;
-  count: string;
-  article: string;
-  video: string;
-  quiz: string;
-  progress: string;
-  bg: string;
-  articleBody?: string;
-  videoUrl?: string;
-};
-type ApiRow = Record<string, any>;
-type ApiState<T> = { rows: T[]; loading: boolean; error: string | null; stale?: boolean };
 // Draft for the livestock "List for Sale" flow (form -> measure -> price).
-type ListingDraft = {
-  categorySlug: string;          // 'livestock' | 'inputs' | ...
-  animalId: string | null;
-  animalName: string;
-  species: string | null;
-  breedId: string | null;
-  breedName: string;
-  saleItemId: string | null;     // for inputs: seeds/feed/fertilizer item
-  saleItemName: string;
-  variety: string;               // for inputs: brand / variety name
-  unit: string;                  // kg / piece / sack
-  ageMonths: string;
-  weightKg: string;              // for inputs this is the quantity in `unit`
-  quantity: string;
-  description: string;
-  aiGenerating: boolean;
-  images: string[];
-  divisionId: string | null;
-  divisionName: string;
-  districtId: string | null;
-  districtName: string;
-  thanaId: string | null;
-  thanaName: string;
-  thanaOther: boolean;           // user typed a thana not in the list
-  contactSelf: boolean;          // true = me, false = someone else
-  contactName: string;
-  contactPhone: string;
-  contactNid: string;
-  addressText: string;
-  measure: { girth: string; length: string; height: string; weightKg: number } | null;
-};
 function makeListingDraft(): ListingDraft {
   return {
     categorySlug: 'livestock',
@@ -174,33 +62,9 @@ function makeListingDraft(): ListingDraft {
     contactSelf: true, contactName: '', contactPhone: '', contactNid: '', addressText: '', measure: null,
   };
 }
-type WeatherApiState = { data: ApiRow | null; loading: boolean; error: string | null; usingFallback: boolean };
-type LocationState = {
-  query: string;
-  label: string;
-  loading: boolean;
-  granted: boolean;
-  error: string | null;
-  fallback: boolean;
-  latitude?: number | null;
-  longitude?: number | null;
-  detected?: { division?: string; district?: string; thana?: string } | null;
-};
 
 const preferenceOrder: PreferenceKey[] = ['cattle', 'crops', 'fishery', 'vegetables', 'fruits'];
 
-const androidStatusBarInset = Platform.OS === 'android' ? NativeStatusBar.currentHeight ?? 0 : 0;
-const androidNavigationInset = Platform.OS === 'android' ? 24 : 0;
-const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  'http://localhost:3000/api/v1';
-const WEATHERAPI_KEY =
-  process.env.EXPO_PUBLIC_WEATHERAPI_KEY ||
-  process.env.WEATHERAPI_KEY ||
-  '0912cecdd77a45d99d350953261405';
-const WEATHERAPI_LOCATION = process.env.EXPO_PUBLIC_WEATHERAPI_LOCATION || '23.783200747913025,90.3994';
-const SERVER_FALLBACK_MESSAGE = 'We could not load this from current server.';
 
 const bnDigits = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
 
@@ -299,28 +163,7 @@ function useAppLocation() {
   return useContext(LocationContext);
 }
 
-type AppRole = 'field_officer' | 'shathisheba_seller' | 'shathisheba_buyer';
 
-type AuthUser = {
-  id: string;
-  full_name?: string | null;
-  display_name?: string | null;
-  phone?: string | null;
-  gender?: string | null;
-  date_of_birth?: string | null;
-  district?: string | null;
-  upazila?: string | null;
-  profile_image_url?: string | null;
-  status?: string | null;
-  roles?: AppRole[];
-  division?: string | null;
-  is_kyc_verified?: boolean;
-  nid_number?: string | null;
-  kyc?: { nid?: string; selfie?: string; trade_license?: string; banking?: boolean; document_count?: number } | null;
-  preferences?: { categories?: string[]; items?: Record<string, string[]> } | null;
-  needs_personal_info?: boolean;
-  needs_preferences?: boolean;
-};
 
 const AUTH_STORAGE_KEY = 'shathi.auth.v1';
 
@@ -353,81 +196,6 @@ function routeAfterAuth(user: AuthUser): Screen {
   if (user.needs_preferences) return 'prefAnimal';
   return 'home';
 }
-
-function naturalApiError(error: unknown, lang: Lang) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/^TIMEOUT|timed out|took too long/i.test(message)) {
-    return lang === 'bn'
-      ? 'সার্ভার সাড়া দিতে দেরি করছে। ইন্টারনেট সংযোগ দেখে আবার চেষ্টা করুন।'
-      : 'The server is taking too long to respond. Check your connection and try again.';
-  }
-  if (/network request failed|failed to fetch|load failed/i.test(message)) {
-    return lang === 'bn'
-      ? 'ব্যাকএন্ড সার্ভারে পৌঁছানো যাচ্ছে না। ইন্টারনেট বা সার্ভার ঠিকানা পরীক্ষা করুন।'
-      : 'Cannot reach the backend server. Check your internet connection or the server address.';
-  }
-  if (/ETIMEDOUT|ECONNREFUSED|ER_|mysql|database/i.test(message)) {
-    return lang === 'bn'
-      ? `ডাটাবেস সমস্যা: ${message}`
-      : `Database problem: ${message}`;
-  }
-  return lang === 'bn'
-    ? `তথ্য আনতে সমস্যা হয়েছে: ${message}`
-    : `Could not fetch the latest content: ${message}`;
-}
-
-function apiUrl(resource: string) {
-  return `${API_BASE_URL.replace(/\/$/, '')}/${resource.replace(/^\//, '')}`;
-}
-
-function weatherApiUrl(lang: Lang, query: string) {
-  const params = new URLSearchParams({
-    key: WEATHERAPI_KEY,
-    q: query,
-    days: '3',
-    aqi: 'yes',
-    alerts: 'yes',
-    lang,
-  });
-  return `https://api.weatherapi.com/v1/forecast.json?${params.toString()}`;
-}
-
-// Lightweight global loading store: any in-flight apiRequest increments the
-// counter; the GlobalLoader overlay subscribes and shows a branded spinner.
-const loadingStore = {
-  active: 0,
-  listeners: new Set<(active: number) => void>(),
-  begin() {
-    this.active += 1;
-    this.listeners.forEach((fn) => fn(this.active));
-  },
-  end() {
-    this.active = Math.max(0, this.active - 1);
-    this.listeners.forEach((fn) => fn(this.active));
-  },
-  subscribe(fn: (active: number) => void) {
-    this.listeners.add(fn);
-    return () => {
-      this.listeners.delete(fn);
-    };
-  },
-};
-
-// Global pull-to-refresh signal: bumping `tick` makes data hooks refetch.
-const refreshStore = {
-  tick: 0,
-  listeners: new Set<(tick: number) => void>(),
-  trigger() {
-    this.tick += 1;
-    this.listeners.forEach((fn) => fn(this.tick));
-  },
-  subscribe(fn: (tick: number) => void) {
-    this.listeners.add(fn);
-    return () => {
-      this.listeners.delete(fn);
-    };
-  },
-};
 
 function useRefreshTick() {
   const [tick, setTick] = useState(refreshStore.tick);
@@ -479,64 +247,6 @@ function RefreshScroll({ children, style, contentContainerStyle }: { children: R
   );
 }
 
-const REQUEST_TIMEOUT_MS = 15000;
-
-async function apiRequest<T = any>(resource: string, options?: RequestInit): Promise<T> {
-  loadingStore.begin();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(apiUrl(resource), {
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...(options?.headers || {}),
-      },
-      signal: controller.signal,
-      ...options,
-    });
-    const json = await response.json().catch(() => ({}));
-    if (!response.ok || json.ok === false) {
-      throw new Error(json.message || `Server responded with ${response.status}`);
-    }
-    return json as T;
-  } catch (error) {
-    // Normalise an aborted (timed-out) request into a friendly timeout error.
-    if (error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))) {
-      throw new Error('TIMEOUT: request took too long');
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    loadingStore.end();
-  }
-}
-
-async function uploadImage(uri: string, folder: string): Promise<string> {
-  const name = uri.split('/').pop() || `photo-${Date.now()}.jpg`;
-  const match = /\.(\w+)$/.exec(name);
-  const ext = (match ? match[1] : 'jpg').toLowerCase();
-  const type = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-  const form = new FormData();
-  form.append('folder', folder);
-  // React Native FormData file shape.
-  form.append('file', { uri, name, type } as any);
-  loadingStore.begin();
-  try {
-    const base = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
-    const response = await fetch(`${base}/api/upload`, { method: 'POST', body: form as any });
-    const json = await response.json().catch(() => ({}));
-    if (!response.ok || json.ok === false) {
-      throw new Error(json.message || `Upload failed (${response.status})`);
-    }
-    // Build the URL from the app's own base so the host is always reachable
-    // from the device (the server's request origin can resolve to 0.0.0.0).
-    return json.path ? `${base}${json.path}` : (json.url as string);
-  } finally {
-    loadingStore.end();
-  }
-}
-
 function GlobalLoader() {
   const [active, setActive] = useState(loadingStore.active);
   useEffect(() => loadingStore.subscribe(setActive), []);
@@ -550,61 +260,6 @@ function GlobalLoader() {
   );
 }
 
-async function apiList<T = ApiRow>(resource: string): Promise<T[]> {
-  const json = await apiRequest<{ data?: T[] | { row?: T; related?: unknown } }>(resource);
-  return Array.isArray(json.data) ? json.data : [];
-}
-
-async function apiCreate(resource: string, payload: ApiRow) {
-  return apiRequest<{ result?: { insertId?: number }; [key: string]: any }>(resource, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-}
-
-// Tracks which CURRENTLY-MOUNTED resources are serving cached (stale) data after a
-// failed server fetch, so a single global banner can offer a refresh. Marks are
-// removed when the resource refetches successfully OR its screen unmounts, so the
-// banner never lingers after the data on screen is fresh again. Repeated failed
-// refreshes surface the underlying error so the user learns the real cause.
-const staleStore = {
-  resources: new Set<string>(),
-  listeners: new Set<() => void>(),
-  failedRefreshes: 0,
-  lastError: null as string | null,
-  notify() {
-    this.listeners.forEach((fn) => fn());
-  },
-  mark(resource: string, error: string) {
-    this.resources.add(resource);
-    this.lastError = error;
-    this.notify();
-  },
-  clear(resource: string) {
-    if (this.resources.delete(resource)) this.notify();
-  },
-  // Called on any successful fetch: the server is reachable again.
-  resetFailures() {
-    if (this.failedRefreshes > 0 || this.lastError !== null) {
-      this.failedRefreshes = 0;
-      this.lastError = null;
-      this.notify();
-    }
-  },
-  noteRefreshAttempt() {
-    if (this.resources.size > 0) {
-      this.failedRefreshes += 1;
-      this.notify();
-    }
-  },
-  subscribe(fn: () => void) {
-    this.listeners.add(fn);
-    return () => {
-      this.listeners.delete(fn);
-    };
-  },
-};
-
 function useStaleState() {
   const [snapshot, setSnapshot] = useState({ count: staleStore.resources.size, fails: staleStore.failedRefreshes, lastError: staleStore.lastError });
   useEffect(
@@ -616,8 +271,6 @@ function useStaleState() {
   );
   return snapshot;
 }
-
-const API_CACHE_PREFIX = 'apicache:';
 
 function useApiList<T = ApiRow>(resource: string): ApiState<T> {
   const { lang } = useLanguage();
@@ -1064,333 +717,6 @@ function fallbackTrainingModulesFor(tx: (bnText: string, enText: string) => stri
   ];
 }
 
-const GEMINI_API_KEY =
-  process.env.EXPO_PUBLIC_GEMINI_API_KEY ||
-  process.env.GEMINI_API_KEY ||
-  process.env.gemkini_api_key ||
-  process.env.GEMKINI_API_KEY ||
-  '';
-
-const genAI = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
-const GEMINI_TEXT_MODEL = 'gemma-4-31b-it';
-const GEMINI_TTS_MODEL = 'gemini-3.1-flash-tts-preview';
-const GEMINI_TEXT_CONFIG = {
-  mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
-  tools: [{ googleSearch: {} }],
-};
-const SHATHI_APA_SCOPE =
-  'You are Shathi Apa, a helpful specialist for Bangladesh users on agriculture, farming, cattle, livestock, crops, plants, fruits, vegetables, fishery, feed, weather, farm disease, image-based farm analysis, market price, farm business, and Shathi projects. Answer all relevant questions in these domains. Introduce yourself only once at the start of a new live conversation; for follow-up chat messages answer naturally like a regular conversation without repeating your identity. If the user asks unrelated things, respond cordially and ask for a relevant agriculture, farming, livestock, weather, feed, or Shathi service question. Keep advice safe, practical, and concise.';
-
-function mimeFromUri(uri: string, fallback = 'image/jpeg') {
-  const clean = uri.split('?')[0].toLowerCase();
-  if (clean.endsWith('.png')) return 'image/png';
-  if (clean.endsWith('.webp')) return 'image/webp';
-  if (clean.endsWith('.mp4') || clean.endsWith('.m4a')) return 'audio/mp4';
-  if (clean.endsWith('.wav')) return 'audio/wav';
-  if (clean.endsWith('.mp3')) return 'audio/mpeg';
-  return fallback;
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let output = '';
-  for (let index = 0; index < bytes.length; index += 3) {
-    const a = bytes[index];
-    const b = bytes[index + 1] ?? 0;
-    const c = bytes[index + 2] ?? 0;
-    const triplet = (a << 16) | (b << 8) | c;
-    output += alphabet[(triplet >> 18) & 63];
-    output += alphabet[(triplet >> 12) & 63];
-    output += index + 1 < bytes.length ? alphabet[(triplet >> 6) & 63] : '=';
-    output += index + 2 < bytes.length ? alphabet[triplet & 63] : '=';
-  }
-  return output;
-}
-
-function base64ToBytes(base64: string) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const clean = base64.replace(/[^A-Za-z0-9+/]/g, '');
-  const bytes: number[] = [];
-  for (let index = 0; index < clean.length; index += 4) {
-    const a = alphabet.indexOf(clean[index]);
-    const b = alphabet.indexOf(clean[index + 1]);
-    const c = alphabet.indexOf(clean[index + 2] ?? 'A');
-    const d = alphabet.indexOf(clean[index + 3] ?? 'A');
-    const triplet = (a << 18) | (b << 12) | ((c < 0 ? 0 : c) << 6) | (d < 0 ? 0 : d);
-    bytes.push((triplet >> 16) & 255);
-    if (clean[index + 2]) bytes.push((triplet >> 8) & 255);
-    if (clean[index + 3]) bytes.push(triplet & 255);
-  }
-  return new Uint8Array(bytes);
-}
-
-function pcm16Base64ToWavBase64(pcmBase64: string, sampleRate = 24000, channels = 1) {
-  const pcm = base64ToBytes(pcmBase64);
-  const header = new Uint8Array(44);
-  const view = new DataView(header.buffer);
-  const writeString = (offset: number, value: string) => {
-    for (let index = 0; index < value.length; index += 1) header[offset + index] = value.charCodeAt(index);
-  };
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + pcm.length, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * channels * 2, true);
-  view.setUint16(32, channels * 2, true);
-  view.setUint16(34, 16, true);
-  writeString(36, 'data');
-  view.setUint32(40, pcm.length, true);
-  const wav = new Uint8Array(header.length + pcm.length);
-  wav.set(header);
-  wav.set(pcm, header.length);
-  return bytesToBase64(wav);
-}
-
-async function uriToInlineData(uri: string, fallbackMime = 'image/jpeg') {
-  const response = await fetch(uri);
-  const buffer = await response.arrayBuffer();
-  return {
-    data: bytesToBase64(new Uint8Array(buffer)),
-    mimeType: mimeFromUri(uri, fallbackMime),
-  };
-}
-
-function requireGenAI() {
-  if (!genAI) {
-    throw new Error('Gemini API key missing. Add gemkini_api_key or EXPO_PUBLIC_GEMINI_API_KEY to .env and restart Expo.');
-  }
-  return genAI;
-}
-
-function friendlyAiError(error: unknown, lang: Lang) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes('@google/genai') || message.includes('conditional exports')) {
-    return lang === 'bn'
-      ? 'AI সংযোগের সেটআপ আপডেট করা হচ্ছে। অ্যাপ রিস্টার্ট করে আবার চেষ্টা করুন।'
-      : 'AI connection setup was updated. Restart the app and try again.';
-  }
-  if (message.includes('Audio input modality') || message.includes('INVALID_ARGUMENT')) {
-    return lang === 'bn'
-      ? 'এই লাইভ মডেলে সরাসরি মাইক ইনপুট সীমিত। আপাতত নিচের চ্যাট বা ছবি ব্যবহার করুন, লাইভ উত্তর ভয়েসে চালু থাকবে।'
-      : 'Direct mic input is limited for this live model. Use chat or image for now; live voice output remains enabled.';
-  }
-  if (message.includes('languageCodes')) {
-    return lang === 'bn'
-      ? 'লাইভ ভাষা সেটিং ঠিক করা হয়েছে। অ্যাপ রিলোড করে আবার চেষ্টা করুন।'
-      : 'Live language setting was fixed. Reload the app and try again.';
-  }
-  return message;
-}
-
-function markdownInstruction(lang: Lang) {
-  return `Use concise Markdown formatting in the answer: short headings with **bold**, bullet points for actions, and no long paragraphs. Reply in ${lang === 'bn' ? 'Bengali Bangla' : 'English'}.`;
-}
-
-async function askShathiApaText(question: string, lang: Lang, history: ChatMessage[] = []) {
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      ...history.slice(-8).map((message) => ({
-        role: message.role,
-        parts: [{ text: message.text }],
-      })),
-      {
-        role: 'user',
-        parts: [
-          { text: `${SHATHI_APA_SCOPE}\n${markdownInstruction(lang)}\nUser question: ${question}` },
-        ],
-      },
-    ],
-  });
-  return response.text || '';
-}
-
-async function askShathiApaImage(uri: string, lang: Lang) {
-  const inlineData = await uriToInlineData(uri, 'image/jpeg');
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inlineData },
-          { text: `${SHATHI_APA_SCOPE}\n${markdownInstruction(lang)}\nAnalyze this new image only. Do not use previous image context. Identify whether it shows cattle, crops, vegetables, fruits, disease symptoms, or risk. If the image is unrelated to farming, say that clearly and ask for a relevant farm image.` },
-        ],
-      },
-    ],
-  });
-  return response.text || '';
-}
-
-// Generates a short, plain sale-listing description from the first uploaded
-// photo. Used by every listing type's description field.
-// Category-gated AI sale-description (Shathi Apa). Returns NOT_RELEVANT when the
-// photo is not the expected category so the caller can show a polite message.
-async function generateListingDescription(uri: string, lang: Lang, opts: { kind: 'livestock' | 'inputs'; context?: string }) {
-  const inlineData = await uriToInlineData(uri, 'image/jpeg');
-  const rules = opts.kind === 'livestock'
-    ? `The photo MUST clearly show a farm animal of one of these types only: cow, bull, buffalo, goat, sheep, poultry (chicken/duck). If it does NOT show such an animal, reply with EXACTLY the single token NOT_RELEVANT and nothing else. If it does, write a marketplace product sale description in 2-4 plain sentences (no markdown, no headings) covering the animal type, visible health/condition and approximate body size.`
-    : `The photo MUST clearly show an agricultural input for sale: seeds, animal feed, or fertilizer (e.g. seed packets, feed/fertilizer sacks or containers). If it does NOT show such an input, reply with EXACTLY the single token NOT_RELEVANT and nothing else. If it does, write a marketplace product sale description in 2-4 plain sentences (no markdown, no headings) covering the input type, visible quality/condition and approximate quantity/packaging.`;
-  const ctx = opts.context ? ` Where sensible, incorporate these seller-provided details: ${opts.context}.` : '';
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inlineData },
-          { text: `You are Shathi Apa, writing short marketplace sale descriptions for a Bangladeshi farmer app. ${rules}${ctx} Be factual; never invent prices. Reply in ${lang === 'bn' ? 'Bengali Bangla' : 'English'}.` },
-        ],
-      },
-    ],
-  });
-  return (response.text || '').trim();
-}
-
-async function askShathiApaImageFollowup(uri: string, question: string, lang: Lang, history: ChatMessage[] = []) {
-  const inlineData = await uriToInlineData(uri, 'image/jpeg');
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      ...history.slice(-8).map((message) => ({
-        role: message.role,
-        parts: [{ text: message.text }],
-      })),
-      {
-        role: 'user',
-        parts: [
-          { inlineData },
-          { text: `${SHATHI_APA_SCOPE}\n${markdownInstruction(lang)}\nUse the attached image and the prior chat context on this page to answer the follow-up.\nFollow-up question: ${question}` },
-        ],
-      },
-    ],
-  });
-  return response.text || '';
-}
-
-async function generateResponseSuggestions(answer: string, lang: Lang, history: ChatMessage[] = []) {
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      ...history.slice(-6).map((message) => ({
-        role: message.role,
-        parts: [{ text: message.text }],
-      })),
-      {
-        role: 'user',
-        parts: [
-          {
-            text: `${SHATHI_APA_SCOPE}\nBased on the latest assistant answer below, generate exactly 3 short follow-up suggestion questions a farmer may tap next. Return only a JSON array of strings in ${lang === 'bn' ? 'Bengali Bangla' : 'English'}.\nLatest answer:\n${answer}`,
-          },
-        ],
-      },
-    ],
-  });
-  try {
-    const parsed = parseJsonArray(response.text || '[]');
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string').slice(0, 3) : [];
-  } catch {
-    return [];
-  }
-}
-
-async function withSuggestions(answer: string, lang: Lang, history: ChatMessage[]): Promise<ChatMessage> {
-  try {
-    const suggestions = await generateResponseSuggestions(answer, lang, history);
-    return { role: 'model', text: answer, suggestions };
-  } catch {
-    return { role: 'model', text: answer };
-  }
-}
-
-async function askShathiApaAudio(uri: string, lang: Lang) {
-  const inlineData = await uriToInlineData(uri, 'audio/mp4');
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inlineData },
-          { text: `${SHATHI_APA_SCOPE}\n${markdownInstruction(lang)}\nTranscribe the user's farming question from this audio if needed, then answer as Shathi Apa. Keep the answer short and useful.` },
-        ],
-      },
-    ],
-  });
-  return response.text || '';
-}
-
-async function askShathiApaAudioWithTranscript(uri: string, lang: Lang) {
-  const inlineData = await uriToInlineData(uri, 'audio/mp4');
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inlineData },
-          {
-            text: `${SHATHI_APA_SCOPE}\nTranscribe the user's voice question and answer it. Return only JSON with keys "transcript" and "answer". The transcript and answer must be in ${lang === 'bn' ? 'Bengali Bangla' : 'English'}. Use concise Markdown in the answer.`,
-          },
-        ],
-      },
-    ],
-  });
-  try {
-    const parsed = parseJsonObject(response.text || '{}') as { transcript?: string; answer?: string };
-    return {
-      transcript: parsed.transcript || (lang === 'bn' ? 'ভয়েস থেকে প্রশ্নটি স্পষ্ট বোঝা যায়নি' : 'Voice transcript was unclear'),
-      answer: parsed.answer || '',
-    };
-  } catch {
-    return {
-      transcript: lang === 'bn' ? 'ভয়েস থেকে প্রশ্নটি স্পষ্ট বোঝা যায়নি' : 'Voice transcript was unclear',
-      answer: response.text || '',
-    };
-  }
-}
-
-function parseJsonObject(text: string) {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1];
-  const raw = fenced || text.match(/\{[\s\S]*\}/)?.[0] || text;
-  return JSON.parse(raw);
-}
-
-function parseJsonArray(text: string) {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i)?.[1];
-  const raw = fenced || text.match(/\[[\s\S]*\]/)?.[0] || text;
-  return JSON.parse(raw);
-}
-
-async function analyzeCattlePhoto(uri: string, lang: Lang): Promise<CattleAiResult> {
-  const inlineData = await uriToInlineData(uri, 'image/jpeg');
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    config: GEMINI_TEXT_CONFIG,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inlineData },
-          { text: `Analyze this new image only for a cattle sale listing form in Bangladesh. Do not use prior images or prior context. Return only JSON with keys: isCow boolean, ageMonths number|null, weightKg number|null, animalType string|null, breed string|null, count number|null, healthSummary string, accuracyPercent number. If the image is not clearly a cow/cattle, set isCow false, use null for unavailable cattle fields, set low accuracyPercent, and say "Please provide a clear cow image" in healthSummary. If details like age, weight, breed or type cannot be visually extracted, use null for those fields and explain uncertainty in healthSummary. Accuracy should be your confidence from 0 to 100.` },
-        ],
-      },
-    ],
-  });
-  return parseJsonObject(response.text || '{}') as CattleAiResult;
-}
-
 function LangToggle({ subtle = false }: { subtle?: boolean }) {
   const { lang, toggleLang } = useLanguage();
   return (
@@ -1505,62 +831,6 @@ function MarkdownText({
   );
 }
 
-let activeTtsSound: Audio.Sound | null = null;
-
-async function stopAiSpeech() {
-  if (activeTtsSound) {
-    await activeTtsSound.stopAsync().catch(() => undefined);
-    await activeTtsSound.unloadAsync().catch(() => undefined);
-    activeTtsSound = null;
-  }
-}
-
-async function playAiSpeech(text: string, lang: Lang, onStart?: () => void, onEnd?: () => void) {
-  await stopAiSpeech();
-  onStart?.();
-  try {
-    const response = await requireGenAI().models.generateContent({
-      model: GEMINI_TTS_MODEL,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: `Read this in a warm, clear female voice. Use ${lang === 'bn' ? 'Bengali Bangla' : 'English'} pronunciation. Do not add extra words.\n\n${text.replace(/\*\*/g, '')}`,
-            },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } } },
-      },
-    } as any);
-    const inlineData = (response as any).candidates?.[0]?.content?.parts?.find((part: any) => part.inlineData)?.inlineData;
-    const audioBase64 = inlineData?.data;
-    const mimeType = inlineData?.mimeType || 'audio/wav';
-    if (!audioBase64) throw new Error('No TTS audio returned.');
-    const playableBase64 = mimeType.includes('wav') ? audioBase64 : pcm16Base64ToWavBase64(audioBase64);
-    const created = await Audio.Sound.createAsync({ uri: `data:audio/wav;base64,${playableBase64}` }, { shouldPlay: true });
-    activeTtsSound = created.sound;
-    activeTtsSound.setOnPlaybackStatusUpdate((status) => {
-      if ('didJustFinish' in status && status.didJustFinish) {
-        stopAiSpeech().finally(() => onEnd?.());
-      }
-    });
-  } catch (error) {
-    onEnd?.();
-    throw error;
-  }
-}
-
-function toggleSpeech(text: string, lang: Lang = 'bn') {
-  if (activeTtsSound) {
-    stopAiSpeech();
-    return;
-  }
-  playAiSpeech(text, lang).catch(() => undefined);
-}
 
 function Card({ children, style }: { children: React.ReactNode; style?: object }) {
   return <View style={[styles.card, style]}>{children}</View>;
@@ -1755,9 +1025,12 @@ export default function App() {
         if (!parsed?.user?.id) return;
         setAuthUser(parsed.user);
         setAuthToken(parsed.token ?? null);
+        // Restore the token into the fetch helpers before the first request below,
+        // otherwise app/me goes out unauthenticated and comes back 401.
+        setApiAuthToken(parsed.token ?? null);
         // Refresh onboarding gates from the server, then route accordingly.
         try {
-          const me = await apiRequest<{ data?: AuthUser }>(`app/me?user_id=${parsed.user.id}`);
+          const me = await apiRequest<{ data?: AuthUser }>('app/me');
           if (!alive) return;
           const merged = me.data ? { ...parsed.user, ...me.data } : parsed.user;
           setAuthUser(merged);
@@ -1782,6 +1055,7 @@ export default function App() {
       signIn: async (user: AuthUser, token: string) => {
         setAuthUser(user);
         setAuthToken(token);
+        setApiAuthToken(token);
         await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user, token }));
       },
       updateUser: async (patch: Partial<AuthUser>) => {
@@ -1795,6 +1069,7 @@ export default function App() {
       signOut: async () => {
         setAuthUser(null);
         setAuthToken(null);
+        setApiAuthToken(null);
         await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
         setScreen('onboarding');
         setOnboarding(0);
@@ -1802,6 +1077,14 @@ export default function App() {
     }),
     [authUser, authToken],
   );
+
+  // Let the fetch helpers drop us back to login when the server rejects our token.
+  useEffect(() => {
+    setAuthExpiredHandler(() => {
+      authValue.signOut().catch(() => {});
+    });
+    return () => setAuthExpiredHandler(null);
+  }, [authValue]);
 
   const refreshLocation = useCallback(async () => {
     let alive = true;
@@ -3527,7 +2810,7 @@ function ApaVoice({ setScreen }: { setScreen: (screen: Screen) => void }) {
   }, [isRecording, isSpeaking, pulse]);
 
   async function toggleRecording() {
-    if (activeTtsSound) {
+    if (isAiSpeaking()) {
       await stopAiSpeech();
       setIsSpeaking(false);
       setLiveStatus(tx('শুনছি...', 'Listening...'));
@@ -4551,7 +3834,7 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
       const listingCode = `SAL-APP-${Date.now()}`;
       const response = await apiCreate('sale/listings', {
         listing_code: listingCode,
-        user_id: Number(user?.id) || 1,
+        user_id: Number(user?.id) || undefined,
         sale_item_id: 1,
         animal_id: draft.animalId ? Number(draft.animalId) : undefined,
         breed_id: draft.breedId ? Number(draft.breedId) : undefined,
@@ -4781,7 +4064,7 @@ function InputsPrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
       const listingCode = `INP-APP-${Date.now()}`;
       const response = await apiCreate('sale/listings', {
         listing_code: listingCode,
-        user_id: Number(user?.id) || 1,
+        user_id: Number(user?.id) || undefined,
         sale_item_id: draft.saleItemId ? Number(draft.saleItemId) : undefined,
         title_en: `${[draft.saleItemName || 'Input', draft.variety].filter(Boolean).join(' — ')} listing from mobile app`,
         title_bn: `${[draft.variety, draft.saleItemName].filter(Boolean).join(' ')} উপকরণের তালিকা`.trim() || 'মোবাইল অ্যাপ থেকে উপকরণের তালিকা',
@@ -5093,32 +4376,31 @@ function BuyOrder({
     setSubmitting(true);
     setSubmitError('');
     try {
-      const orderCode = `ORD-APP-${Date.now()}`;
-      const orderResponse = await apiCreate('buy/orders', {
-        order_code: orderCode,
-        user_id: Number(user?.id) || 1,
-        total_amount: total,
+      // One call, one transaction. This used to create the order header and its
+      // line item as two independent requests: a failure between them left an
+      // order with nothing in it, which the buyer could neither see nor cancel.
+      const orderResponse = await apiCreate('app/orders', {
+        user_id: Number(user?.id) || undefined,
         delivery_fee: 0,
-        payable_amount: total,
         payment_method: paymentMethod,
-        payment_status: 'pending',
-        fulfillment_status: 'placed',
         delivery_address: address,
-        district: 'Mymensingh',
-        upazila: 'Mymensingh Sadar',
+        district: user?.district || null,
+        upazila: user?.upazila || null,
         notes: 'Placed from mobile app.',
+        items: [
+          {
+            product_id: Number(product.id),
+            quantity: qty,
+            unit_price: unitPrice,
+          },
+        ],
       });
-      const orderId = orderResponse.result?.insertId;
-      if (orderId) {
-        await apiCreate('orders/items', {
-          order_id: orderId,
-          product_id: Number(product.id),
-          quantity: qty,
-          unit_price: unitPrice,
-          line_total: total,
-        });
-      }
-      onOrdered({ id: orderId, order_code: orderCode, payable_amount: total });
+      const placed = (orderResponse as any).result ?? {};
+      onOrdered({
+        id: placed.order_id,
+        order_code: placed.order_code,
+        payable_amount: placed.payable_amount ?? total,
+      });
       setScreen('buyDone');
     } catch (error) {
       setSubmitError(naturalApiError(error, lang));
@@ -5213,30 +4495,12 @@ function BuyDone({ setScreen, qty, product, order }: { setScreen: (screen: Scree
 
 // ── Training module (gamified: categories > subcategories > content) ──────────
 
-type LearnCat = { id: string; name: string; emoji?: string };
-type LearnMod = { id: string; title: string; level: number };
 
 async function learnFetch<T = any>(path: string): Promise<T> {
   const json = await apiRequest<{ data: T }>(path);
   return json.data;
 }
 
-async function summarizeMarkdown(text: string, lang: Lang): Promise<string> {
-  const response = await requireGenAI().models.generateContent({
-    model: GEMINI_TEXT_MODEL,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          {
-            text: `Summarize the following farm training content ${lang === 'bn' ? 'in Bengali Bangla' : 'in English'} as concise Markdown: a one-line intro then up to 5 short bullet points of the key practical takeaways. Content:\n\n${text}`,
-          },
-        ],
-      },
-    ],
-  });
-  return response.text || '';
-}
 
 function useUid() {
   const { user } = useAuth();
@@ -5772,7 +5036,7 @@ function Kyc({ setScreen, projectId, onSubmitted }: { setScreen: (screen: Screen
     setSubmitError('');
     try {
       const response = await apiCreate('app/kyc/submit', {
-        user_id: Number(user?.id) || 1,
+        user_id: Number(user?.id) || undefined,
         partner_project_id: Number(project?.id || 1),
         full_name_per_nid: fullName.trim(),
         nid_number: nid.trim(),
@@ -5914,7 +5178,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
       let imageUrl: string | undefined;
       if (postImage) imageUrl = await uploadImage(postImage, 'community');
       await apiCreate('community/posts', {
-        user_id: Number(user?.id) || 1,
+        user_id: Number(user?.id) || undefined,
         scope: 'upazila',
         post_type: 'general',
         body,
@@ -6962,1203 +6226,4 @@ function SuccessScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.card },
-  safeOnboarding: { backgroundColor: colors.maroon },
-  shell: { flex: 1, backgroundColor: colors.cream },
-  shellContent: { paddingBottom: 104 + androidNavigationInset },
-  shellContentWithAccessory: { paddingBottom: 218 + androidNavigationInset },
-  fixedAccessory: { position: 'absolute', left: 0, right: 0, bottom: 72 + androidNavigationInset, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12, backgroundColor: colors.cream },
-  flex: { flex: 1 },
-  pressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
-  onboarding: {
-    flex: 1,
-    backgroundColor: colors.maroon,
-    padding: 32,
-    justifyContent: 'flex-end',
-  },
-  lang: {
-    position: 'absolute',
-    top: 28,
-    right: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  langToggle: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  langToggleSubtle: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'transparent',
-  },
-  langText: { color: 'white', fontWeight: '700' },
-  langToggleText: { color: 'white', fontWeight: '700', fontSize: 14 },
-  langToggleTextDark: { color: colors.ink },
-  onboardingCopy: { paddingBottom: 54 },
-  onboardingTitle: { color: 'white', fontSize: 30, lineHeight: 37, fontWeight: '700', marginBottom: 18, maxWidth: 330 },
-  onboardingBody: { color: 'white', fontSize: 16, lineHeight: 25, fontWeight: '500', maxWidth: 330 },
-  onboardingFooter: { marginTop: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  slideBack: { color: 'white', fontSize: 34 },
-  dotSpacer: { width: 34 },
-  dots: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  dot: { width: 8, height: 5, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.45)' },
-  dotActive: { width: 34, backgroundColor: 'white' },
-  nextCircle: { width: 58, height: 58, borderRadius: 29, backgroundColor: 'white', alignItems: 'center', justifyContent: 'center' },
-  nextText: { color: colors.maroon, fontSize: 30, lineHeight: 30 },
-  authScreen: {
-    flex: 1,
-    backgroundColor: '#F9F2F6',
-    padding: 20,
-    justifyContent: 'center',
-  },
-  authLang: { position: 'absolute', right: 30, top: 30 },
-  card: {
-    backgroundColor: colors.card,
-    borderRadius: 14,
-    marginHorizontal: 16,
-    marginTop: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: colors.line,
-    shadowColor: '#000',
-    shadowOpacity: 0.07,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  profileAvatarImage: { width: '100%', height: '100%' },
-  roleChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginTop: 10 },
-  roleChip: { backgroundColor: 'rgba(255,255,255,0.22)', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5 },
-  roleChipText: { color: 'white', fontSize: 12.5, fontWeight: '800' },
-  menuIconWrap: { width: 38, height: 38, borderRadius: 10, backgroundColor: '#FBEAF1', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
-  menuItemLast: { borderBottomWidth: 0 },
-  menuItemPressed: { backgroundColor: '#FAFAFA' },
-  logoutButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginHorizontal: 16, marginTop: 16, height: 52, borderRadius: 12, backgroundColor: '#FEF2F2', borderWidth: 1.5, borderColor: colors.danger },
-  logoutButtonIcon: { color: colors.danger, fontSize: 18, fontWeight: '900' },
-  logoutButtonText: { color: colors.danger, fontSize: 16, fontWeight: '800' },
-  dobRow: { flexDirection: 'row', gap: 8, marginHorizontal: 20, marginTop: 6 },
-  dropdownField: { height: 44, borderRadius: 11, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  dropdownValue: { color: colors.ink, fontSize: 14.5, fontWeight: '600', flex: 1 },
-  dropdownCaret: { color: colors.muted, fontSize: 12, marginLeft: 6 },
-  stepper: { flexDirection: 'row', alignItems: 'center', height: 46, borderRadius: 11, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card, marginHorizontal: 16, overflow: 'hidden' },
-  stepperBtn: { width: 46, height: 46, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.rose },
-  stepperBtnText: { color: colors.maroon, fontSize: 22, fontWeight: '800', lineHeight: 24 },
-  stepperInput: { flex: 1, textAlign: 'center', color: colors.ink, fontSize: 16, fontWeight: '700' },
-  stepperCompact: { marginHorizontal: 0, height: 44 },
-  gpsPillRow: { flexDirection: 'row', justifyContent: 'flex-end', marginHorizontal: 16, marginTop: 2 },
-  gpsPill: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
-  gpsPillText: { color: colors.blue, fontSize: 11.5, fontWeight: '800' },
-  dropdownBackdrop: { flex: 1, backgroundColor: 'rgba(20,8,16,0.45)', justifyContent: 'flex-end' },
-  dropdownCard: { width: '100%', maxHeight: '70%', backgroundColor: colors.card, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingTop: 8, paddingBottom: 24, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, shadowOffset: { width: 0, height: -4 }, elevation: 12 },
-  dropdownHandle: { alignSelf: 'center', width: 38, height: 4, borderRadius: 4, backgroundColor: colors.line, marginBottom: 8 },
-  dropdownSheetTitle: { color: colors.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4, paddingHorizontal: 20, paddingBottom: 6 },
-  dropdownOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14, paddingHorizontal: 20 },
-  dropdownOptionActive: { backgroundColor: colors.rose },
-  dropdownOptionText: { color: colors.ink, fontSize: 15.5, flex: 1 },
-  dropdownOptionTextActive: { color: colors.maroon, fontWeight: '800' },
-  dropdownCheck: { color: colors.maroon, fontSize: 17, fontWeight: '800', marginLeft: 12 },
-  menuFormScroll: { paddingBottom: 28 },
-  kycDocRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
-  kycDocThumb: { width: 44, height: 44, borderRadius: 8, backgroundColor: '#FBEAF1' },
-  kycChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 20, marginTop: 6 },
-  kycSampleBox: { marginHorizontal: 16, marginTop: 14, backgroundColor: '#FBF7F9', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  kycSampleFrame: { height: 150, borderRadius: 12, borderWidth: 2, borderStyle: 'dashed', borderColor: '#D9A8C0', alignItems: 'center', justifyContent: 'center', backgroundColor: 'white' },
-  kycSampleIcon: { fontSize: 54 },
-  kycSampleTag: { color: colors.maroon, fontSize: 12.5, fontWeight: '800', marginTop: 8 },
-  kycSampleText: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 10 },
-  kycPreviewWrap: { marginHorizontal: 16, marginTop: 14 },
-  kycPreviewImage: { width: '100%', height: 220, borderRadius: 12, borderWidth: 1, borderColor: colors.line, marginTop: 6 },
-  kycPreviewActions: { marginTop: 8 },
-  marketCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
-  marketCardImage: { width: '100%', height: 150 },
-  marketCardBody: { padding: 14 },
-  marketCardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  marketCardTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', lineHeight: 22 },
-  marketCardSub: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
-  marketReadMore: { color: colors.maroon, fontSize: 13, fontWeight: '700', marginTop: 8 },
-  marketDetailImage: { width: '100%', height: 220 },
-  marketDetailTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', lineHeight: 30, marginTop: 10 },
-  marketDetailBody: { color: colors.ink, fontSize: 15, lineHeight: 24, marginTop: 14 },
-  postImageIcon: { fontSize: 20, marginHorizontal: 6 },
-  postPreviewWrap: { marginHorizontal: 16, marginTop: 8, alignItems: 'flex-start' },
-  postPreview: { width: 120, height: 90, borderRadius: 10, borderWidth: 1, borderColor: colors.line },
-  postPreviewRemove: { color: colors.danger, fontSize: 12, fontWeight: '700', marginTop: 4 },
-  postImage: { width: '100%', height: 180, borderRadius: 10, marginTop: 8 },
-  officialCard: { borderColor: colors.maroon, borderWidth: 1.5, backgroundColor: '#FFF6FB' },
-  officialRibbon: { alignSelf: 'flex-start', backgroundColor: colors.maroon, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, marginBottom: 8 },
-  officialRibbonText: { color: 'white', fontSize: 11, fontWeight: '800' },
-  officialImage: { width: '100%', height: 160, borderRadius: 10, marginBottom: 8 },
-  faqCard: { marginHorizontal: 16, marginTop: 10, padding: 16 },
-  faqQuestion: { color: colors.ink, fontSize: 15, fontWeight: '700', lineHeight: 21 },
-  faqAnswer: { color: colors.muted, fontSize: 13.5, lineHeight: 20, marginTop: 8 },
-  loaderOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
-  loaderCard: { width: 76, height: 76, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.96)', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 8, borderWidth: 1, borderColor: colors.line },
-  otpResend: { color: colors.maroon, fontSize: 14, fontWeight: '700', textAlign: 'center', marginTop: 14 },
-  otpTimer: { color: colors.muted, fontSize: 13, fontWeight: '600', textAlign: 'center', marginTop: 10 },
-  otpExpired: { color: colors.danger, fontSize: 13, fontWeight: '700', textAlign: 'center', marginTop: 10 },
-  otpResendWait: { color: colors.muted, fontSize: 13, textAlign: 'center', marginTop: 14 },
-  otpEditPhone: { color: colors.muted, fontSize: 13, textAlign: 'center', marginTop: 8 },
-  genderRow: { flexDirection: 'row', gap: 10, marginHorizontal: 20, marginTop: 6 },
-  genderPill: { flex: 1, height: 46, borderRadius: 10, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
-  genderPillActive: { borderColor: colors.maroon, backgroundColor: '#FBEAF1' },
-  genderPillText: { color: colors.ink, fontSize: 14, fontWeight: '600' },
-  genderPillTextActive: { color: colors.maroon, fontWeight: '800' },
-  avatarPick: { alignSelf: 'center', width: 96, height: 96, borderRadius: 48, backgroundColor: '#FBEAF1', alignItems: 'center', justifyContent: 'center', marginTop: 6, marginBottom: 4, overflow: 'hidden', borderWidth: 1, borderColor: colors.line },
-  avatarPickImage: { width: 96, height: 96 },
-  avatarPickIcon: { fontSize: 34, color: colors.maroon },
-  loginCard: { marginHorizontal: 0, padding: 32, borderRadius: 18 },
-  loginTitle: { color: colors.maroon, fontSize: 29, lineHeight: 36, fontWeight: '700', textAlign: 'center' },
-  loginSub: { color: colors.muted, fontSize: 18, textAlign: 'center', marginBottom: 22 },
-  label: { color: colors.ink, fontSize: 12.5, fontWeight: '700', marginHorizontal: 16, marginTop: 12, marginBottom: 5, letterSpacing: 0.1 },
-  input: {
-    height: 46,
-    borderRadius: 11,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.card,
-    paddingHorizontal: 14,
-    marginHorizontal: 16,
-    color: colors.ink,
-    fontSize: 15,
-  },
-  inputDisabled: { opacity: 0.58, backgroundColor: '#F2E9EE' },
-  button: {
-    marginHorizontal: 16,
-    marginTop: 16,
-    backgroundColor: colors.maroon,
-    borderRadius: 9,
-    minHeight: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  goldButton: { backgroundColor: colors.gold },
-  outlineButton: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.maroon },
-  buttonDisabled: { backgroundColor: '#D9C9D1', borderColor: '#D9C9D1' },
-  buttonText: { color: 'white', fontSize: 17, fontWeight: '700' },
-  buttonTextDisabled: { color: '#FFF8FB' },
-  outlineButtonText: { color: colors.maroon },
-  prefScreen: { flex: 1, backgroundColor: '#FCF7FA' },
-  header: {
-    minHeight: 62,
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderColor: colors.line,
-  },
-  backButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3EEF1', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
-  backText: { fontSize: 28, color: colors.ink, lineHeight: 28 },
-  headerTitle: { flex: 1, color: colors.ink, fontSize: 22, fontWeight: '700' },
-  headerRight: { color: colors.muted, fontSize: 15 },
-  headerSpacer: { width: 36 },
-  prefLangCenter: { position: 'absolute', top: 20, alignSelf: 'center', zIndex: 2 },
-  prefScrollContent: { paddingBottom: 24 },
-  prefTitle: { color: colors.ink, fontSize: 25, lineHeight: 33, fontWeight: '600', marginHorizontal: 18, marginTop: 18 },
-  prefSub: { color: colors.muted, fontSize: 15, lineHeight: 22, marginHorizontal: 18, marginTop: 8, marginBottom: 12 },
-  prefSection: { marginTop: 8 },
-  prefSectionTitle: { color: colors.maroon, fontSize: 15, fontWeight: '700', marginHorizontal: 18, marginBottom: 10 },
-  prefGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 12, paddingHorizontal: 16 },
-  prefOption: {
-    width: '48%',
-    minHeight: 118,
-    backgroundColor: colors.card,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.line,
-    padding: 13,
-    justifyContent: 'space-between',
-    shadowColor: '#8A3A5A',
-    shadowOpacity: 0.07,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 5 },
-    elevation: 2,
-    position: 'relative',
-  },
-  prefOptionSelected: { borderColor: colors.maroon, backgroundColor: '#FFF6FA', borderWidth: 1.5 },
-  prefOptionIconWrap: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-    backgroundColor: '#F8EEF3',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  prefOptionIconWrapSelected: { backgroundColor: colors.rose },
-  prefOptionIcon: { fontSize: 36, lineHeight: 42, textAlign: 'center' },
-  prefOptionTitle: { color: colors.ink, fontSize: 16, lineHeight: 21, fontWeight: '600', paddingRight: 16 },
-  prefCheck: {
-    position: 'absolute',
-    right: 10,
-    top: 10,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 1,
-    borderColor: colors.line,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'white',
-  },
-  prefCheckActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
-  prefCheckText: { color: 'white', fontSize: 13, fontWeight: '700', lineHeight: 16 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 12, paddingHorizontal: 16, paddingTop: 8 },
-  tile: {
-    width: '48%',
-    minHeight: 94,
-    backgroundColor: 'white',
-    borderRadius: 9,
-    borderWidth: 1,
-    borderColor: colors.line,
-    padding: 14,
-    justifyContent: 'center',
-  },
-  tileSelected: { borderColor: colors.maroon, backgroundColor: colors.rose, borderWidth: 2 },
-  tileIcon: { fontSize: 31, lineHeight: 38, marginBottom: 8, textAlign: 'center' },
-  tileTitle: { color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
-  tileSub: { color: colors.muted, fontSize: 12, marginTop: 3 },
-  prefBottom: { marginTop: 'auto', paddingTop: 10, paddingBottom: 18, borderTopWidth: 1, borderColor: colors.line, backgroundColor: colors.cream },
-  prefHint: { color: colors.muted, fontSize: 16, textAlign: 'center', padding: 14 },
-  prefStepText: { color: colors.muted, fontSize: 13, fontWeight: '700', textAlign: 'center', marginBottom: 8 },
-  stepDots: { flexDirection: 'row', justifyContent: 'center', gap: 5, paddingBottom: 12, paddingHorizontal: 16 },
-  stepDot: { flex: 1, maxWidth: 38, height: 6, borderRadius: 10, backgroundColor: '#E7E0E4' },
-  stepDotActive: { backgroundColor: colors.maroon },
-  prefActionRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, alignItems: 'center' },
-  prefActionRowFinal: { justifyContent: 'center' },
-  prefSkipButton: {
-    flex: 0.45,
-    minHeight: 50,
-    borderRadius: 9,
-    borderWidth: 1.5,
-    borderColor: colors.line,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'white',
-  },
-  prefSkipText: { color: colors.maroon, fontSize: 15, fontWeight: '700' },
-  prefProceedButton: {
-    flex: 1,
-    minHeight: 50,
-    borderRadius: 9,
-    backgroundColor: colors.maroon,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  prefProceedButtonFinal: { flex: 1 },
-  prefProceedDisabled: { backgroundColor: '#D9C9D1' },
-  prefProceedText: { color: 'white', fontSize: 16, fontWeight: '700' },
-  prefSelectHint: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 8, minHeight: 16 },
-  brandHeader: {
-    height: 62,
-    backgroundColor: 'white',
-    paddingHorizontal: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottomWidth: 1,
-    borderColor: colors.line,
-  },
-  brandLockup: { flexDirection: 'row', alignItems: 'center', gap: 10, flexShrink: 1 },
-  shathiLogo: { width: 36, height: 36, position: 'relative' },
-  logoLeaf: { position: 'absolute', width: 20, height: 20, borderTopLeftRadius: 20, borderBottomRightRadius: 20 },
-  logoLeafGreen: { backgroundColor: colors.gold, right: 2, top: 0, transform: [{ rotate: '-12deg' }] },
-  logoLeafPurpleOne: { backgroundColor: colors.maroon, left: 1, top: 10, transform: [{ rotate: '-38deg' }] },
-  logoLeafPurpleTwo: { backgroundColor: '#C989A5', right: 7, bottom: 2, transform: [{ rotate: '42deg' }] },
-  brandTitle: { color: colors.maroon, fontSize: 23, lineHeight: 29, fontWeight: '700', flexShrink: 1 },
-  brandActions: { flexDirection: 'row', alignItems: 'center', gap: 12, marginLeft: 10 },
-  brandIconButton: { minWidth: 32, minHeight: 32, alignItems: 'center', justifyContent: 'center' },
-  brandActionIcon: { color: colors.maroon, fontSize: 20 },
-  geminiIcon: { color: colors.maroon, fontSize: 25, fontWeight: '700' },
-  userAvatarMini: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  userAvatarText: { color: colors.maroon, fontWeight: '700' },
-  topBar: { height: 44, backgroundColor: colors.maroon, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  topMenu: { color: 'white', fontSize: 20 },
-  topText: { color: 'white', fontSize: 15, fontWeight: '700' },
-  topIcon: { color: 'white', fontSize: 18 },
-  heroCard: {
-    marginTop: 10,
-    backgroundColor: colors.maroon,
-    borderRadius: 10,
-    borderColor: colors.maroon,
-    padding: 18,
-  },
-  heroGreeting: { marginBottom: 2 },
-  heroSmall: { color: 'rgba(255,255,255,0.82)', fontSize: 16 },
-  heroName: { color: 'white', fontSize: 18, fontWeight: '800' },
-  heroMeta: { color: 'rgba(255,255,255,0.78)', fontSize: 13, marginTop: 8 },
-  weatherHomeCard: { marginTop: 10, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.14)', paddingVertical: 9, paddingHorizontal: 11, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
-  weatherHomeTop: { flexDirection: 'row', alignItems: 'center', gap: 9 },
-  weatherHomeIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
-  weatherHomeEmoji: { fontSize: 20 },
-  weatherHomeTitle: { color: 'white', fontSize: 14, fontWeight: '700' },
-  weatherHomeLocation: { color: 'rgba(255,255,255,0.8)', fontSize: 11, marginTop: 1 },
-  weatherHomeTemp: { alignItems: 'flex-end' },
-  weatherHomeTempText: { color: colors.goldPale, fontSize: 19, fontWeight: '700' },
-  weatherHomeMeta: { color: 'rgba(255,255,255,0.76)', fontSize: 10 },
-  weatherHomeAlert: { color: 'rgba(255,255,255,0.84)', fontSize: 11, fontWeight: '700', marginTop: 6 },
-  metricsBand: { flexDirection: 'row', alignItems: 'stretch', marginHorizontal: 16, marginTop: 14, marginBottom: 4, backgroundColor: colors.card, borderRadius: 16, borderWidth: 1, borderColor: colors.line, paddingVertical: 12, shadowColor: colors.maroon, shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
-  metricDivider: { width: 1, backgroundColor: colors.line, marginVertical: 6 },
-  metricCard: { flex: 1, alignItems: 'center', paddingHorizontal: 4 },
-  metricIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  metricIconText: { fontSize: 17 },
-  metricValue: { fontSize: 18, fontWeight: '800', marginTop: 6 },
-  metricLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', marginTop: 2 },
-  sourceBadge: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 8, alignSelf: 'flex-start', maxWidth: '100%', backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FDBA74', borderRadius: 10, paddingHorizontal: 9, paddingVertical: 7 },
-  sourceBadgeIcon: { color: '#92400E', fontSize: 12, fontWeight: '700' },
-  sourceBadgeText: { color: '#92400E', fontSize: 11, lineHeight: 15, flexShrink: 1 },
-  weatherTicker: { marginTop: 10, minHeight: 32, borderRadius: 10, backgroundColor: 'rgba(255,243,196,0.16)', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8 },
-  weatherTickerLabel: { color: colors.goldPale, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
-  weatherTickerText: { color: 'white', fontSize: 12, flex: 1 },
-  weatherChipArrow: { color: 'white', fontSize: 18, lineHeight: 20 },
-  heroStats: { flexDirection: 'row', justifyContent: 'space-around', borderTopWidth: 1, borderColor: 'rgba(255,255,255,0.22)', marginTop: 18, paddingTop: 10 },
-  heroStat: { alignItems: 'center', minWidth: 80 },
-  heroStatValue: { color: colors.goldPale, fontSize: 20, fontWeight: '700' },
-  heroStatLabel: { color: 'rgba(255,255,255,0.72)', fontSize: 12 },
-  sectionBlock: { marginTop: 18, marginBottom: 8 },
-  sectionRow: { paddingHorizontal: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 },
-  sectionTitleWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
-  sectionTitle: { color: colors.ink, fontSize: 19, fontWeight: '700' },
-  sectionRight: { color: colors.maroon, fontSize: 13, fontWeight: '700' },
-  sectionWarningButton: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FDBA74' },
-  sectionWarningIcon: { color: '#92400E', fontSize: 13, fontWeight: '900', lineHeight: 16 },
-  sectionTooltip: { marginHorizontal: 16, marginTop: 8, alignSelf: 'flex-start', maxWidth: '92%', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FDBA74' },
-  sectionTooltipText: { color: '#92400E', fontSize: 12, lineHeight: 17, fontWeight: '600' },
-  serviceGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, paddingHorizontal: 16 },
-  serviceCard: {
-    width: '48%',
-    minHeight: 112,
-    backgroundColor: 'white',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.line,
-    padding: 14,
-  },
-  serviceCardFull: { width: '100%' },
-  serviceCardHighlight: { backgroundColor: colors.rose, borderColor: '#E8C4D4', borderWidth: 1.5, shadowColor: colors.maroon, shadowOpacity: 0.1, shadowRadius: 9, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
-  serviceBadge: { position: 'absolute', top: 10, right: 10, backgroundColor: colors.gold, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3, zIndex: 2 },
-  serviceBadgeText: { color: '#4A2C00', fontSize: 10, fontWeight: '800' },
-  serviceIcon: { width: 50, height: 50, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
-  serviceIconHighlight: { width: 52, height: 52, backgroundColor: colors.card },
-  serviceIconText: { color: colors.maroon, fontSize: 27, lineHeight: 32, textAlign: 'center' },
-  serviceTitle: { color: colors.ink, fontSize: 15, lineHeight: 19, fontWeight: '700', flexShrink: 1 },
-  serviceTitleHighlight: { color: colors.maroon, fontSize: 16, fontWeight: '800' },
-  serviceSub: { color: colors.muted, fontSize: 11, lineHeight: 15, marginTop: 2 },
-  serviceSubHighlight: { color: colors.maroon, opacity: 0.75 },
-  serviceArrow: { position: 'absolute', bottom: 12, right: 12, color: colors.maroon, opacity: 0.55, fontSize: 22, lineHeight: 22 },
-  homeApaCard: {
-    marginHorizontal: 16,
-    marginTop: 16,
-    backgroundColor: '#FFF8ED',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#F4D385',
-    padding: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  homeApaIcon: { width: 58, height: 58, borderRadius: 18, backgroundColor: 'white', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F4D385' },
-  homeApaLogo: { width: 38, height: 38, position: 'relative' },
-  homeApaKicker: { color: '#A16207', fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
-  homeApaTitle: { color: colors.ink, fontSize: 18, lineHeight: 23, fontWeight: '700', marginTop: 2 },
-  homeApaSub: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
-  homeApaArrow: { color: colors.maroon, fontSize: 26, fontWeight: '700' },
-  alert: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 70 },
-  alertIcon: { width: 42, height: 42, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  alertTitle: { color: colors.ink, fontSize: 15, fontWeight: '700' },
-  alertSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
-  badge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start' },
-  badgeRose: { backgroundColor: colors.rose },
-  badgeGreen: { backgroundColor: colors.greenPale },
-  badgeGold: { backgroundColor: colors.goldPale },
-  badgeBlue: { backgroundColor: colors.bluePale },
-  badgeText: { color: colors.maroon, fontSize: 12, fontWeight: '700' },
-  badgeGreenText: { color: colors.green },
-  navBar: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingTop: 8,
-    paddingBottom: 8 + androidNavigationInset,
-    backgroundColor: colors.maroon,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    paddingHorizontal: 6,
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    shadowColor: '#000',
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: -3 },
-    elevation: 12,
-  },
-  navItem: { flex: 1, alignItems: 'center', justifyContent: 'flex-start', paddingVertical: 2 },
-  navIconWrap: { width: 48, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
-  navIconWrapActive: { backgroundColor: 'rgba(255,255,255,0.18)' },
-  navIcon: { color: 'rgba(255,255,255,0.85)', fontSize: 23, lineHeight: 28, textAlign: 'center' },
-  navIconActive: { color: 'white' },
-  navLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11.5, fontWeight: '700' },
-  navLabelActive: { color: 'white' },
-  weatherHero: {
-    margin: 16,
-    borderRadius: 18,
-    backgroundColor: colors.maroon,
-    padding: 18,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 14,
-    overflow: 'hidden',
-  },
-  weatherLocation: { color: 'rgba(255,255,255,0.76)', fontSize: 14, fontWeight: '600' },
-  weatherSummary: { color: 'white', fontSize: 23, lineHeight: 30, fontWeight: '700', marginTop: 8, flexShrink: 1 },
-  weatherHint: { color: 'rgba(255,255,255,0.76)', fontSize: 13, lineHeight: 20, marginTop: 8, flexShrink: 1 },
-  weatherTempBlock: { alignItems: 'center', justifyContent: 'center', minWidth: 70 },
-  weatherSun: { fontSize: 38 },
-  weatherTemp: { color: colors.goldPale, fontSize: 34, fontWeight: '700' },
-  weatherMetrics: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16 },
-  weatherMetric: { width: '31.5%', minHeight: 82, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 8, alignItems: 'center', justifyContent: 'center' },
-  weatherBulletTicker: { backgroundColor: colors.maroon, minHeight: 34, justifyContent: 'center', paddingHorizontal: 16 },
-  weatherBulletText: { color: 'white', fontSize: 13, fontWeight: '600' },
-  weatherMetricIcon: { fontSize: 18 },
-  weatherMetricValue: { color: colors.ink, fontSize: 14, fontWeight: '700', marginTop: 4 },
-  weatherMetricLabel: { color: colors.muted, fontSize: 10, lineHeight: 13, textAlign: 'center', marginTop: 2 },
-  forecastGrid: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, gap: 8 },
-  forecastCard: { flex: 1, minHeight: 126, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 9, alignItems: 'center' },
-  forecastDay: { color: colors.maroon, fontSize: 12, fontWeight: '700', textAlign: 'center' },
-  forecastIcon: { fontSize: 24, marginTop: 6 },
-  forecastTemp: { color: colors.ink, fontSize: 14, fontWeight: '700', marginTop: 6 },
-  forecastMeta: { color: colors.muted, fontSize: 10, lineHeight: 14, marginTop: 3, textAlign: 'center' },
-  weatherAlert: { flexDirection: 'row', gap: 12, alignItems: 'flex-start' },
-  weatherAlertIcon: { width: 48, height: 48, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.rose },
-  weatherAlertBlue: { backgroundColor: colors.bluePale },
-  weatherAlertGreen: { backgroundColor: colors.greenPale },
-  weatherAlertGold: { backgroundColor: colors.goldPale },
-  weatherAlertEmoji: { fontSize: 24 },
-  weatherAlertTitle: { color: colors.ink, fontSize: 16, fontWeight: '700' },
-  weatherAlertBody: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 4 },
-  adviceGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, paddingHorizontal: 16 },
-  adviceCard: { flex: 1, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  adviceIcon: { fontSize: 24 },
-  adviceTitle: { color: colors.ink, fontSize: 14, lineHeight: 18, fontWeight: '700', marginTop: 8 },
-  adviceText: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 6 },
-  apaHero: { alignItems: 'center', paddingHorizontal: 24, paddingTop: 22, paddingBottom: 16 },
-  apaAvatar: { width: 76, height: 76, borderRadius: 38, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#D8A4BC' },
-  apaAvatarText: { color: colors.maroon, fontSize: 32, fontWeight: '700' },
-  apaLogoMark: { width: 42, height: 42, position: 'relative' },
-  markdownStrong: { fontWeight: '700', color: colors.maroon },
-  apaTitle: { color: colors.ink, fontSize: 24, fontWeight: '700', marginTop: 14 },
-  apaHeroCompact: { flexDirection: 'row', alignItems: 'center', paddingTop: 14, paddingBottom: 8 },
-  apaTitleCompact: { fontSize: 18, marginTop: 0, textAlign: 'left' },
-  apaSubtitleCompact: { textAlign: 'left', marginTop: 2 },
-  apaSubtitle: { color: colors.muted, fontSize: 14, textAlign: 'center', marginTop: 6 },
-  suggestionWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingHorizontal: 18, justifyContent: 'center', marginTop: 22, marginBottom: 12 },
-  suggestionBubble: { backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '100%' },
-  suggestionText: { color: colors.maroon, fontSize: 13, fontWeight: '600' },
-  apaChatPreview: { marginHorizontal: 16, marginTop: 16, gap: 8 },
-  apaMessageBubble: { maxWidth: '88%', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 9 },
-  apaUserBubble: { alignSelf: 'flex-end', backgroundColor: colors.maroon },
-  apaModelBubble: { alignSelf: 'flex-start', backgroundColor: 'white', borderWidth: 1, borderColor: colors.line },
-  apaMessageText: { color: colors.ink, fontSize: 15, lineHeight: 22 },
-  apaUserText: { color: 'white' },
-  chatAttachedImage: { width: 210, height: 150, borderRadius: 14, marginTop: 8, resizeMode: 'cover', backgroundColor: colors.rose },
-  speakerButton: { alignSelf: 'flex-end', marginTop: 6, minWidth: 30, minHeight: 26, borderRadius: 13, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  speakerIcon: { fontSize: 14 },
-  responseSuggestionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
-  responseSuggestionBubble: { backgroundColor: '#FFF7FA', borderWidth: 1, borderColor: colors.line, borderRadius: 14, paddingHorizontal: 10, paddingVertical: 7 },
-  responseSuggestionText: { color: colors.maroon, fontSize: 12, fontWeight: '700' },
-  apaThinking: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 3 },
-  apaActions: { paddingHorizontal: 16, marginTop: 20, marginBottom: 22, gap: 12, flexDirection: 'row' },
-  apaActionsCompact: { marginTop: 4, marginBottom: 4 },
-  apaMiniAction: { flex: 1, minHeight: 44, borderRadius: 12, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  apaMiniActionIcon: { fontSize: 18 },
-  apaMiniActionText: { color: colors.maroon, fontSize: 13, fontWeight: '700' },
-  apaActionPrimary: { flex: 1, minHeight: 112, backgroundColor: 'white', borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 14, alignItems: 'center', justifyContent: 'center' },
-  apaActionSecondary: { flex: 1, minHeight: 112, backgroundColor: 'white', borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 14, alignItems: 'center', justifyContent: 'center' },
-  apaActionIcon: { fontSize: 30 },
-  apaActionTitle: { color: colors.maroon, fontSize: 15, fontWeight: '700', marginTop: 8, textAlign: 'center' },
-  apaActionSub: { color: colors.muted, fontSize: 12, marginTop: 4, textAlign: 'center' },
-  apaInputBar: { minHeight: 104, borderRadius: 24, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, padding: 8, shadowColor: colors.maroon, shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 4 },
-  apaComposerTop: { minHeight: 48 },
-  apaComposerBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 6 },
-  apaComposerTools: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  apaInputIconButton: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FBF4F7' },
-  apaInputIconButtonActive: { backgroundColor: colors.goldPale },
-  apaInputIcon: { fontSize: 18 },
-  apaTextInput: { color: colors.ink, fontSize: 16, lineHeight: 22, minHeight: 48, maxHeight: 76, paddingHorizontal: 8, paddingTop: 4 },
-  apaSendButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center' },
-  apaSendButtonDisabled: { backgroundColor: '#CDA8B9' },
-  apaSendText: { color: 'white', fontSize: 28, lineHeight: 30 },
-  apaLiveScreen: { flex: 1, backgroundColor: colors.cream },
-  voiceLiveHero: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 26 },
-  voiceStage: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, paddingBottom: 18 },
-  liveBrandDot: { width: 82, height: 82, borderRadius: 41, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#D8A4BC', marginBottom: 14 },
-  voiceOrb: { color: colors.maroon, fontSize: 96, opacity: 0.9 },
-  liveStatus: { color: colors.maroon, fontSize: 12, fontWeight: '700', backgroundColor: colors.rose, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 999, overflow: 'hidden' },
-  voiceTitle: { color: colors.ink, fontSize: 28, fontWeight: '700', marginTop: 18, textAlign: 'center' },
-  voiceHint: { color: colors.muted, fontSize: 15, lineHeight: 23, textAlign: 'center', marginTop: 10 },
-  voiceOrbWrap: { width: 210, height: 210, alignItems: 'center', justifyContent: 'center', marginTop: 34 },
-  voicePulseRing: { position: 'absolute', width: 148, height: 148, borderRadius: 74, borderWidth: 3, borderColor: colors.maroon, backgroundColor: colors.rose },
-  voicePulseRingInner: { position: 'absolute', width: 120, height: 120, borderRadius: 60, borderWidth: 2, borderColor: colors.gold, backgroundColor: colors.goldPale },
-  voiceCenterMic: { width: 126, height: 126, borderRadius: 63, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center', shadowColor: colors.maroon, shadowOpacity: 0.22, shadowRadius: 18, shadowOffset: { width: 0, height: 10 }, elevation: 6 },
-  voiceCenterMicListening: { backgroundColor: colors.gold },
-  voiceCenterMicSpeaking: { backgroundColor: colors.maroonDark },
-  voiceCenterMicIcon: { color: 'white', fontSize: 42, fontWeight: '700' },
-  voiceTranscript: { color: colors.maroon, fontSize: 14, lineHeight: 20, textAlign: 'center', minHeight: 24, marginTop: 10, paddingHorizontal: 12 },
-  voiceSubtitle: { color: colors.ink, fontSize: 18, lineHeight: 26, textAlign: 'center', fontWeight: '700', marginTop: 12, paddingHorizontal: 14, minHeight: 54 },
-  voiceWave: { width: 118, height: 118, borderRadius: 59, marginTop: 24, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#D8A4BC' },
-  voiceWaveActive: { backgroundColor: colors.goldPale, borderColor: colors.gold },
-  voiceWaveIcon: { fontSize: 46 },
-  voiceAnswer: { marginTop: 18, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 14, alignSelf: 'stretch' },
-  voiceAnswerText: { color: colors.ink, fontSize: 14, lineHeight: 22, textAlign: 'center' },
-  voiceBottom: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 28, paddingBottom: 34 },
-  voiceRound: { width: 58, height: 58, borderRadius: 29, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  voiceRoundIcon: { fontSize: 24 },
-  voiceMic: { width: 78, height: 78, borderRadius: 39, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center' },
-  voiceMicActive: { backgroundColor: colors.gold },
-  voiceMicIcon: { fontSize: 32 },
-  cameraScreen: { flex: 1, backgroundColor: '#110611' },
-  cameraPreview: { flex: 1, margin: 16, borderRadius: 22, backgroundColor: '#1D121C', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#3A2536' },
-  cameraPhotoPreview: { width: '100%', height: '100%', borderRadius: 22, resizeMode: 'cover' },
-  cameraFocus: { color: 'rgba(255,255,255,0.7)', fontSize: 90 },
-  cameraHint: { color: 'rgba(255,255,255,0.78)', fontSize: 14, textAlign: 'center', marginTop: 20, paddingHorizontal: 34 },
-  cameraAnalysisCard: { marginHorizontal: 16, marginBottom: 12, borderRadius: 14, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, padding: 14 },
-  cameraAnalysisTitle: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
-  cameraAnalysisText: { color: colors.ink, fontSize: 13, lineHeight: 20, marginTop: 6 },
-  cameraBottom: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 28, paddingBottom: 34 },
-  captureButton: { width: 78, height: 78, borderRadius: 39, backgroundColor: 'white', alignItems: 'center', justifyContent: 'center', borderWidth: 5, borderColor: '#D8CBD4' },
-  captureInner: { color: colors.maroon, fontSize: 34 },
-  apaImageScreen: { flex: 1, backgroundColor: colors.cream },
-  apaImageContent: { paddingBottom: 120 + androidNavigationInset },
-  apaImageBrand: { flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginTop: 16, padding: 14, borderRadius: 16, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line },
-  apaImageTitle: { color: colors.ink, fontSize: 19, fontWeight: '700' },
-  apaImageSub: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
-  apaImagePreview: { marginHorizontal: 16, marginTop: 14, minHeight: 220, borderRadius: 18, backgroundColor: '#FFF7FA', borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  apaImagePhoto: { width: '100%', height: 240, resizeMode: 'cover' },
-  apaImageEmptyIcon: { fontSize: 42 },
-  apaImageEmptyTitle: { color: colors.maroon, fontSize: 18, fontWeight: '700', marginTop: 8 },
-  apaImageEmptySub: { color: colors.muted, fontSize: 13, marginTop: 4 },
-  apaImageActions: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, marginTop: 12 },
-  apaImageActionButton: { flex: 1, minHeight: 48, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', alignItems: 'center', justifyContent: 'center' },
-  apaImageActionButtonPrimary: { flex: 1, minHeight: 48, borderRadius: 12, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center' },
-  apaImageActionText: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
-  apaImageActionTextPrimary: { color: 'white', fontSize: 14, fontWeight: '700' },
-  apaImageChat: { marginHorizontal: 16, marginTop: 14, gap: 8 },
-  apaImageInputBar: { position: 'absolute', left: 0, right: 0, bottom: androidNavigationInset, minHeight: 84, backgroundColor: colors.cream, borderTopWidth: 1, borderColor: colors.line, flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 14, paddingTop: 10, paddingBottom: 10, gap: 8 },
-  apaImageTextInput: { flex: 1, minHeight: 54, maxHeight: 82, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8 },
-  pageHint: { marginHorizontal: 20, marginTop: 14, color: colors.muted, fontSize: 15 },
-  listItem: {
-    backgroundColor: 'white',
-    marginHorizontal: 16,
-    marginTop: 10,
-    padding: 16,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.line,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  listItemInactive: { opacity: 0.72, backgroundColor: '#FBF8FA' },
-  listIcon: { fontSize: 28, lineHeight: 34, textAlign: 'center' },
-  listTitle: { color: colors.ink, fontSize: 16, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
-  listSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
-  chevron: { color: colors.muted, fontSize: 22 },
-  infoBar: { backgroundColor: colors.rose, paddingHorizontal: 16, paddingVertical: 13, marginHorizontal: 16, marginTop: 8, borderRadius: 12, borderLeftWidth: 4, borderLeftColor: colors.maroon },
-  infoText: { color: colors.maroon, fontSize: 14, lineHeight: 21, fontWeight: '500' },
-  twoCol: { flexDirection: 'row', gap: 10, paddingHorizontal: 16 },
-  fakeSelect: {
-    height: 46,
-    borderRadius: 11,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.card,
-    paddingHorizontal: 14,
-    marginHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  fakeSelectCompact: { height: 44, marginHorizontal: 0, paddingHorizontal: 12 },
-  fakeSelectText: { color: colors.ink, fontSize: 15, flex: 1 },
-  fakeSelectPlaceholder: { color: colors.muted },
-  fieldHint: { color: colors.muted, fontSize: 12, marginHorizontal: 16, marginTop: 6, lineHeight: 17 },
-  inRowInput: { marginHorizontal: 0, height: 44, fontSize: 14 },
-  sectionHeadRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginHorizontal: 16, marginTop: 14, marginBottom: 2 },
-  sectionHeadTitle: { color: colors.maroon, fontSize: 15, fontWeight: '800' },
-  infoToggle: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: colors.muted, alignItems: 'center', justifyContent: 'center' },
-  infoToggleActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
-  infoToggleText: { color: colors.muted, fontSize: 13, fontWeight: '800', fontStyle: 'italic' },
-  infoToggleTextActive: { color: 'white', fontStyle: 'normal' },
-  weightRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16 },
-  weightRowInput: { marginHorizontal: 0 },
-  measureBtn: { height: 48, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', alignItems: 'center', justifyContent: 'center' },
-  measureBtnText: { color: colors.blue, fontSize: 13, fontWeight: '700' },
-  uploadCompact: { marginHorizontal: 16, borderWidth: 2, borderStyle: 'dashed', borderColor: '#D8A4BC', backgroundColor: colors.rose, borderRadius: 12, minHeight: 84, alignItems: 'center', justifyContent: 'center' },
-  thumbRow: { marginHorizontal: 16, marginTop: 10 },
-  thumbWrap: { width: 84, height: 84, borderRadius: 10, marginRight: 10, overflow: 'hidden', position: 'relative' },
-  thumb: { width: 84, height: 84, resizeMode: 'cover' },
-  thumbRemove: { position: 'absolute', top: 2, right: 2, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(74,17,43,0.85)', alignItems: 'center', justifyContent: 'center' },
-  thumbRemoveText: { color: 'white', fontSize: 15, fontWeight: '700', lineHeight: 17 },
-  measureDiagram: { marginHorizontal: 16, marginTop: 10, backgroundColor: colors.rose, borderRadius: 12, padding: 14, alignItems: 'center' },
-  measureDiagramArt: { fontSize: 30 },
-  measureDiagramText: { color: colors.ink, fontSize: 13, lineHeight: 20, marginTop: 8 },
-  unitToggle: { flexDirection: 'row', gap: 8, marginHorizontal: 16, marginTop: 12 },
-  unitChip: { paddingVertical: 7, paddingHorizontal: 18, borderRadius: 999, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
-  unitChipActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
-  unitChipText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
-  unitChipTextActive: { color: 'white' },
-  summaryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 16, marginTop: 12 },
-  summaryChip: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: colors.rose, borderWidth: 1, borderColor: colors.line },
-  summaryChipText: { color: colors.maroon, fontSize: 12, fontWeight: '700' },
-  projTabBar: { flexDirection: 'row', marginHorizontal: 16, marginTop: 6, marginBottom: 4, backgroundColor: colors.rose, borderRadius: 12, padding: 4, gap: 4 },
-  projTab: { flex: 1, paddingVertical: 9, borderRadius: 9, alignItems: 'center' },
-  projTabActive: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
-  projTabText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
-  projTabTextActive: { color: colors.maroon },
-  projTimelineTitle: { color: colors.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', marginTop: 14, marginBottom: 4 },
-  projCard: { marginHorizontal: 16, marginTop: 12, padding: 0, overflow: 'hidden' },
-  projImageWrap: { position: 'relative', width: '100%', height: 150, backgroundColor: colors.rose },
-  projImage: { width: '100%', height: 150, resizeMode: 'cover' },
-  projImagePlaceholder: { alignItems: 'center', justifyContent: 'center' },
-  projImageEmoji: { fontSize: 44 },
-  projTag: { position: 'absolute', top: 10, left: 10, backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
-  projTagText: { color: 'white', fontSize: 11, fontWeight: '700' },
-  projStatusPill: { position: 'absolute', top: 10, right: 10, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
-  projStatusOpen: { backgroundColor: colors.green },
-  projStatusSoon: { backgroundColor: colors.blue },
-  projStatusText: { color: 'white', fontSize: 11, fontWeight: '700' },
-  projBody: { padding: 14 },
-  projName: { color: colors.ink, fontSize: 16, fontWeight: '700' },
-  projMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
-  projSummary: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 6 },
-  projStatsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, backgroundColor: colors.rose, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14 },
-  projStat: { flex: 1, alignItems: 'center' },
-  projStatLabel: { color: colors.muted, fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.3 },
-  projStatValue: { color: colors.maroon, fontSize: 14, fontWeight: '700', marginTop: 2 },
-  projOverview: { marginTop: 10, backgroundColor: colors.bluePale, borderRadius: 10, padding: 10 },
-  projOverviewText: { color: '#1E40AF', fontSize: 12, lineHeight: 18 },
-  projMineHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  projHealthBar: { height: 7, borderRadius: 7, backgroundColor: colors.line, overflow: 'hidden', marginTop: 10 },
-  projHealthFill: { height: 7, borderRadius: 7, backgroundColor: colors.green },
-  projStepText: { color: colors.ink, fontSize: 12, fontWeight: '700', marginTop: 6 },
-  projStepsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 },
-  projStepItem: { flex: 1, alignItems: 'center', paddingHorizontal: 2 },
-  projStepDot: { width: 26, height: 26, borderRadius: 13, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  projStepDotDone: { backgroundColor: colors.green },
-  projStepDotCur: { backgroundColor: colors.maroon },
-  projStepDotText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  projStepLabel: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 4 },
-  projEmpty: { marginHorizontal: 16, marginTop: 16, padding: 22, backgroundColor: colors.rose, borderRadius: 16, alignItems: 'center', gap: 8 },
-  projEmptyIcon: { fontSize: 34 },
-  projEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', textAlign: 'center' },
-  projEmptyText: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 19 },
-  tileDimmed: { opacity: 0.55 },
-  tileIconDimmed: { opacity: 0.6 },
-  gpsScreen: { flex: 1, backgroundColor: colors.cream, paddingHorizontal: 24, paddingTop: androidStatusBarInset + 24, justifyContent: 'space-between' },
-  gpsHero: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  gpsHeroCircle: { width: 112, height: 112, borderRadius: 56, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#E8C4D4' },
-  gpsHeroEmoji: { fontSize: 52 },
-  gpsTitle: { color: colors.maroon, fontSize: 24, fontWeight: '800', marginTop: 22, textAlign: 'center' },
-  gpsSub: { color: colors.ink, fontSize: 15, lineHeight: 23, textAlign: 'center', marginTop: 12 },
-  gpsPoints: { alignSelf: 'stretch', marginTop: 24, gap: 12 },
-  gpsPoint: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line, paddingVertical: 13, paddingHorizontal: 14 },
-  gpsPointIcon: { fontSize: 22 },
-  gpsPointText: { color: colors.ink, fontSize: 14, fontWeight: '600', flex: 1 },
-  gpsBottom: { paddingBottom: 28, gap: 6 },
-  gpsSkipBtn: { alignItems: 'center', paddingVertical: 10 },
-  gpsSkipText: { color: colors.muted, fontSize: 14, fontWeight: '700' },
-  gpsPrivacy: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 2 },
-  regionCard: { marginTop: 14, backgroundColor: '#FBF4F8', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  regionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  regionTitle: { color: colors.maroon, fontSize: 15, fontWeight: '800' },
-  regionHint: { color: colors.muted, fontSize: 12, marginTop: 4, marginBottom: 4 },
-  gpsBtn: { backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 7 },
-  gpsBtnText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  regionGpsNote: { color: colors.green, fontSize: 12, fontWeight: '600', marginTop: 8 },
-  geoRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
-  statusLoading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginHorizontal: 16, marginTop: 12, paddingVertical: 14, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line },
-  statusLoadingSpinner: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  statusLoadingText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
-  statusStale: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginHorizontal: 16, marginTop: 10, paddingVertical: 9, paddingHorizontal: 12, backgroundColor: '#FFF8E8', borderRadius: 11, borderWidth: 1, borderColor: '#F0DDB5' },
-  statusStaleText: { flex: 1, color: '#8A6418', fontSize: 12, fontWeight: '600' },
-  statusStaleRefresh: { color: colors.maroon, fontSize: 12, fontWeight: '800' },
-  staleBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#FFF4DD', borderBottomWidth: 1, borderColor: '#F0DDB5' },
-  staleBannerText: { color: '#8A6418', fontSize: 12, fontWeight: '700' },
-  staleBannerDetail: { color: '#A11B3A', fontSize: 11, marginTop: 2 },
-  staleBannerBtn: { backgroundColor: colors.maroon, borderRadius: 999, paddingVertical: 5, paddingHorizontal: 12 },
-  staleBannerBtnText: { color: 'white', fontSize: 12, fontWeight: '800' },
-  statusError: { marginHorizontal: 16, marginTop: 12, padding: 18, backgroundColor: '#FEF2F2', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', alignItems: 'center' },
-  statusErrorIcon: { fontSize: 30 },
-  statusErrorTitle: { color: colors.danger, fontSize: 16, fontWeight: '800', marginTop: 8 },
-  statusErrorText: { color: '#7F1D1D', fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 6 },
-  statusRetryBtn: { marginTop: 14, backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 22, paddingVertical: 10 },
-  statusRetryText: { color: 'white', fontSize: 14, fontWeight: '700' },
-  statusEmpty: { marginHorizontal: 16, marginTop: 12, padding: 18, backgroundColor: colors.rose, borderRadius: 14, alignItems: 'center' },
-  statusEmptyText: { color: colors.ink, fontSize: 14, textAlign: 'center', lineHeight: 20 },
-  crashScreen: { flex: 1, backgroundColor: colors.cream, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  crashCard: { backgroundColor: colors.card, borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 26, alignItems: 'center', width: '100%', maxWidth: 360 },
-  crashIcon: { fontSize: 52 },
-  crashTitle: { color: colors.maroon, fontSize: 20, fontWeight: '800', marginTop: 12 },
-  crashTitleEn: { color: colors.muted, fontSize: 14, fontWeight: '700', marginTop: 2 },
-  crashMsg: { color: colors.ink, fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 12 },
-  crashDetail: { maxHeight: 180, alignSelf: 'stretch', marginTop: 10, borderRadius: 8, backgroundColor: '#FBF1F5', borderWidth: 1, borderColor: colors.line },
-  crashDetailText: { color: '#7A1230', fontSize: 11, lineHeight: 16, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
-  crashBtn: { marginTop: 18, backgroundColor: colors.maroon, borderRadius: 12, paddingHorizontal: 22, paddingVertical: 13, alignSelf: 'stretch', alignItems: 'center' },
-  crashBtnText: { color: 'white', fontSize: 15, fontWeight: '700' },
-  crashBtnOutline: { marginTop: 10, borderRadius: 12, borderWidth: 1.5, borderColor: colors.maroon, paddingVertical: 12, alignSelf: 'stretch', alignItems: 'center' },
-  crashBtnOutlineText: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
-  reqStar: { color: colors.danger, fontWeight: '800' },
-  labelSm: { fontSize: 13, marginTop: 10, marginBottom: 4, marginHorizontal: 0 },
-  inputSm: { height: 44, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE', paddingHorizontal: 12, fontSize: 14, color: colors.ink },
-  inputLocked: { backgroundColor: '#F2E9EE', opacity: 0.85 },
-  genderPillSm: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
-  formCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  formCardTitle: { color: colors.maroon, fontSize: 14, fontWeight: '800', marginBottom: 4 },
-  formCardTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
-  kycProjectBar: { marginHorizontal: 16, marginTop: 10, backgroundColor: colors.rose, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, borderLeftWidth: 4, borderLeftColor: colors.maroon },
-  kycProjectLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
-  kycProjectName: { color: colors.maroon, fontSize: 15, fontWeight: '800', marginTop: 2 },
-  verifiedBanner: { backgroundColor: colors.greenPale, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, marginVertical: 6, borderWidth: 1, borderColor: '#A7F3D0' },
-  verifiedBannerText: { color: '#166534', fontSize: 12, lineHeight: 17, fontWeight: '600' },
-  radioRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
-  radioPill: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 9, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFDFE' },
-  radioPillActive: { borderColor: colors.maroon, backgroundColor: colors.rose },
-  radioDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  radioDotActive: { borderColor: colors.maroon },
-  radioDotInner: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.maroon },
-  radioText: { color: colors.muted, fontSize: 14, fontWeight: '700' },
-  radioTextActive: { color: colors.maroon },
-  kycChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 8 },
-  kycChip: { paddingVertical: 5, paddingHorizontal: 10, borderRadius: 999, borderWidth: 1 },
-  kycChip_green: { backgroundColor: colors.greenPale, borderColor: '#A7F3D0' },
-  kycChip_gold: { backgroundColor: colors.goldPale, borderColor: '#F4D385' },
-  kycChip_rose: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
-  kycChip_muted: { backgroundColor: colors.rose, borderColor: colors.line },
-  kycChipText: { color: colors.ink, fontSize: 11, fontWeight: '700' },
-  kycSummaryRow: { flexDirection: 'row', gap: 8, marginHorizontal: 16, marginTop: 6 },
-  kycSummaryChip: { flex: 1, alignItems: 'center', borderRadius: 12, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 4 },
-  kycSummaryIcon: { fontSize: 20 },
-  kycSummaryLabel: { color: colors.ink, fontSize: 12, fontWeight: '700', marginTop: 3 },
-  kycSummaryStatus: { color: colors.muted, fontSize: 10, fontWeight: '600', marginTop: 1, textAlign: 'center' },
-  kycDocThumbZoom: { position: 'absolute', right: 4, bottom: 4, width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(74,17,43,0.8)', alignItems: 'center', justifyContent: 'center' },
-  kycDocThumbZoomText: { color: 'white', fontSize: 11 },
-  kycUpdateLink: { color: colors.blue, fontSize: 12, fontWeight: '700', marginTop: 4 },
-  previewBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', alignItems: 'center', justifyContent: 'center', padding: 16 },
-  previewImage: { width: '100%', height: '80%' },
-  previewClose: { color: 'rgba(255,255,255,0.8)', fontSize: 13, marginTop: 14 },
-  descHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginRight: 16 },
-  descInput: { minHeight: 92, textAlignVertical: 'top', paddingTop: 10 },
-  aiBtn: { backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
-  aiBtnDisabled: { opacity: 0.5 },
-  aiBtnText: { color: colors.blue, fontSize: 12, fontWeight: '700' },
-  aiBtnBlock: { marginHorizontal: 16, marginTop: 2, marginBottom: 6, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', borderRadius: 11, paddingVertical: 11, alignItems: 'center' },
-  aiBtnBlockText: { color: colors.blue, fontSize: 14, fontWeight: '800' },
-  upload: {
-    marginHorizontal: 16,
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderColor: '#D8A4BC',
-    backgroundColor: colors.rose,
-    borderRadius: 12,
-    minHeight: 108,
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  uploadWithImage: { borderStyle: 'solid', borderColor: colors.maroon, minHeight: 170, padding: 0 },
-  uploadPreview: { width: '100%', height: 170, resizeMode: 'cover' },
-  uploadOverlay: { position: 'absolute', left: 10, right: 10, bottom: 10, borderRadius: 10, backgroundColor: 'rgba(74,17,43,0.78)', paddingVertical: 8, alignItems: 'center' },
-  uploadOverlayText: { color: 'white', fontSize: 13, fontWeight: '700' },
-  uploadIcon: { color: colors.maroon, fontSize: 28 },
-  uploadTitle: { color: colors.maroon, fontSize: 16, fontWeight: '700', marginTop: 4 },
-  uploadSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
-  aiAnalysisCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: '#F0FDF4', borderRadius: 12, borderWidth: 1, borderColor: '#BBF7D0', padding: 12 },
-  aiAnalysisTitle: { color: colors.green, fontSize: 13, fontWeight: '700' },
-  aiProgressTrack: { height: 7, borderRadius: 7, backgroundColor: '#DCFCE7', overflow: 'hidden', marginTop: 9 },
-  aiProgressFill: { height: 7, width: '72%', borderRadius: 7, backgroundColor: colors.green },
-  aiAccuracyText: { color: colors.green, fontSize: 12, fontWeight: '700', marginTop: 8 },
-  aiAnalysisText: { color: colors.ink, fontSize: 13, lineHeight: 20, marginTop: 3 },
-  estimate: { margin: 16, backgroundColor: colors.goldPale, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#F4D385' },
-  estimateLabel: { color: '#A16207', fontSize: 13, fontWeight: '700' },
-  estimateValue: { color: '#A16207', fontSize: 24, fontWeight: '700' },
-  weightCard: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  weightIcon: { color: colors.maroon, fontSize: 24 },
-  smallUpper: { color: colors.muted, fontSize: 12, fontWeight: '700', textTransform: 'uppercase' },
-  weightInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
-  weightInput: { borderWidth: 1.5, borderColor: colors.maroon, borderRadius: 8, minWidth: 78, height: 38, color: colors.maroon, fontSize: 18, fontWeight: '700', textAlign: 'center' },
-  kgText: { color: colors.ink, fontWeight: '700' },
-  miniMuted: { color: colors.muted, fontSize: 11, textAlign: 'right' },
-  quickEarn: { color: colors.maroon, fontSize: 18, fontWeight: '700' },
-  priceTable: { margin: 16, borderRadius: 14, overflow: 'hidden', backgroundColor: 'white', borderWidth: 1, borderColor: colors.line },
-  priceHead: { backgroundColor: colors.maroon, padding: 14 },
-  priceHeadTitle: { color: 'white', fontSize: 18, fontWeight: '700' },
-  priceHeadSub: { color: 'rgba(255,255,255,0.7)', marginTop: 2 },
-  priceColumns: { flexDirection: 'row', backgroundColor: '#F7F1F4', paddingHorizontal: 10, paddingVertical: 8, gap: 8 },
-  colLabel: { color: colors.muted, fontSize: 10, fontWeight: '700', width: 72, textAlign: 'right' },
-  priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingVertical: 11, borderTopWidth: 1, borderColor: colors.line },
-  priceRowHighlight: { backgroundColor: '#FFF7FA' },
-  priceTitle: { color: colors.ink, fontSize: 13, lineHeight: 17, fontWeight: '600', flexShrink: 1 },
-  priceTitleStrong: { color: colors.maroon, fontWeight: '700' },
-  priceSub: { color: colors.muted, fontSize: 11 },
-  rateText: { width: 62, color: colors.ink, textAlign: 'right', fontWeight: '700', fontSize: 13 },
-  totalText: { width: 82, color: colors.maroon, textAlign: 'right', fontWeight: '700', fontSize: 13 },
-  finalRow: { backgroundColor: colors.maroon, padding: 14, flexDirection: 'row', alignItems: 'center' },
-  finalLabel: { color: 'rgba(255,255,255,0.75)', fontSize: 14 },
-  finalSub: { color: 'rgba(255,255,255,0.55)', fontSize: 12 },
-  finalValue: { color: colors.goldPale, fontSize: 24, fontWeight: '700' },
-  noteBlue: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderWidth: 1, marginHorizontal: 16, marginBottom: 10, borderRadius: 10, padding: 12 },
-  noteGold: { backgroundColor: '#FFF7ED', borderColor: '#FDBA74', borderWidth: 1, marginHorizontal: 16, marginBottom: 4, borderRadius: 10, padding: 12 },
-  noteGreen: { backgroundColor: colors.greenPale, borderColor: '#86EFAC', borderWidth: 1, marginHorizontal: 16, marginTop: 12, borderRadius: 10, padding: 12 },
-  noteText: { color: colors.maroon, fontSize: 14, lineHeight: 21, fontWeight: '500' },
-  contactSection: { marginHorizontal: 16, marginTop: 12, paddingTop: 2, paddingBottom: 14, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line },
-  contactSectionHead: { padding: 14, borderBottomWidth: 1, borderColor: colors.line },
-  contactSectionTitle: { color: colors.ink, fontSize: 17, fontWeight: '700' },
-  contactSectionHint: { color: colors.muted, fontSize: 12, marginTop: 3 },
-  success: { flex: 1, alignItems: 'center', paddingHorizontal: 28, paddingTop: 74 },
-  successCircle: { width: 76, height: 76, borderRadius: 38, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  successGold: { backgroundColor: colors.goldPale },
-  successIcon: { fontSize: 34 },
-  successTitle: { color: colors.maroon, fontSize: 28, fontWeight: '700', marginTop: 18, textAlign: 'center' },
-  successGoldText: { color: '#B45309' },
-  refNo: { marginTop: 16, borderWidth: 1, borderColor: '#F7C948', borderRadius: 10, paddingHorizontal: 18, paddingVertical: 10, color: colors.maroon, fontSize: 17, fontWeight: '700', letterSpacing: 2 },
-  successDesc: { color: colors.muted, fontSize: 15, lineHeight: 24, textAlign: 'center', marginTop: 18, marginBottom: 10 },
-  officerCard: { width: '100%', marginHorizontal: 0 },
-  officerName: { color: colors.ink, fontSize: 18, fontWeight: '700' },
-  officerMeta: { color: colors.muted, fontSize: 12, marginTop: 2 },
-  comingSoonPage: { flex: 1, alignItems: 'center', paddingHorizontal: 24, paddingTop: 62 },
-  comingSoonArt: { width: 104, height: 104, borderRadius: 52, backgroundColor: colors.goldPale, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F7C948' },
-  comingSoonIcon: { fontSize: 42 },
-  comingSoonKicker: { color: colors.gold, fontSize: 13, fontWeight: '700', textTransform: 'uppercase', marginTop: 22 },
-  comingSoonTitle: { color: colors.ink, fontSize: 25, lineHeight: 32, fontWeight: '700', textAlign: 'center', marginTop: 8 },
-  comingSoonDesc: { color: colors.muted, fontSize: 15, lineHeight: 24, textAlign: 'center', marginTop: 12 },
-  comingSoonList: { alignSelf: 'stretch', backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14, marginTop: 18, marginBottom: 8 },
-  comingSoonListItem: { color: colors.maroon, fontSize: 14, lineHeight: 23 },
-  deliveryBanner: { margin: 16, backgroundColor: colors.maroon, borderRadius: 9, padding: 12 },
-  deliveryText: { color: 'white', fontSize: 14, fontWeight: '700' },
-  segment: { margin: 16, padding: 4, borderRadius: 24, backgroundColor: '#EEE9EC', flexDirection: 'row' },
-  segmentActive: { flex: 1, color: 'white', backgroundColor: colors.maroon, padding: 10, borderRadius: 20, textAlign: 'center', fontWeight: '700' },
-  segmentInactive: { flex: 1, color: colors.muted, padding: 10, textAlign: 'center', fontWeight: '700' },
-  productCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 10, padding: 14, flexDirection: 'row', gap: 12, borderWidth: 1, borderColor: colors.line },
-  disabledCard: { opacity: 0.55 },
-  catCard: { width: '48%', backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, paddingVertical: 18, paddingHorizontal: 12, alignItems: 'center' },
-  catCardIcon: { fontSize: 30, marginBottom: 8 },
-  catCardTitle: { color: colors.ink, fontSize: 14, fontWeight: '800', textAlign: 'center' },
-  catCardCount: { marginTop: 4, color: colors.green, fontSize: 12, fontWeight: '700' },
-  catCardCountMuted: { marginTop: 4, color: colors.muted, fontSize: 12 },
-  catCardInactive: { opacity: 0.45 },
-  orderCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  orderCardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  orderCardCode: { color: colors.ink, fontSize: 14, fontWeight: '800' },
-  orderCardItems: { color: colors.muted, fontSize: 13, marginTop: 6, lineHeight: 18 },
-  orderCardFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
-  orderCardDate: { color: colors.muted, fontSize: 12 },
-  orderCardTotal: { color: colors.maroon, fontSize: 16, fontWeight: '800' },
-  orderCardHint: { color: '#8A6418', fontSize: 12, marginTop: 8, backgroundColor: '#FFF8E8', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 9 },
-  orderProgress: { flexDirection: 'row', marginTop: 12, marginBottom: 2 },
-  orderProgressStep: { flex: 1, alignItems: 'center', position: 'relative' },
-  orderProgressLine: { position: 'absolute', top: 9, right: '50%', left: '-50%', height: 3, backgroundColor: colors.line },
-  orderProgressLineDone: { backgroundColor: colors.green },
-  orderProgressDot: { width: 20, height: 20, borderRadius: 10, backgroundColor: 'white', borderWidth: 2, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  orderProgressDotDone: { backgroundColor: colors.green, borderColor: colors.green },
-  orderProgressDotText: { fontSize: 10, color: 'transparent' },
-  orderProgressDotTextDone: { color: 'white', fontWeight: '800' },
-  orderProgressLabel: { marginTop: 4, fontSize: 10, color: colors.muted, fontWeight: '600' },
-  orderProgressLabelDone: { color: colors.green, fontWeight: '800' },
-  feedFilterRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginTop: 8, marginBottom: 2, flexWrap: 'wrap' },
-  feedFilterChip: { paddingVertical: 7, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white' },
-  feedFilterChipActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
-  feedFilterText: { fontSize: 13, color: colors.muted, fontWeight: '600' },
-  feedFilterTextActive: { color: 'white', fontWeight: '700' },
-  listingPostCard: { borderWidth: 1.5, borderColor: colors.gold, backgroundColor: '#FFFDF6' },
-  listingPostBtn: { marginTop: 10, backgroundColor: colors.maroon, borderRadius: 11, paddingVertical: 10, alignItems: 'center' },
-  listingPostBtnText: { color: 'white', fontSize: 14, fontWeight: '800' },
-  listingCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 16, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
-  listingCardImage: { width: '100%', height: 170, backgroundColor: '#f0e7ed' },
-  listingCardImagePh: { width: '100%', height: 120, backgroundColor: '#f6eef2', alignItems: 'center', justifyContent: 'center' },
-  listingCardBody: { padding: 14 },
-  projRegionTag: { position: 'absolute', bottom: 10, left: 10, backgroundColor: 'rgba(33,21,29,0.72)', borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5, maxWidth: '75%' },
-  projRegionTagText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  buySearch: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 12, marginBottom: 2, height: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', paddingHorizontal: 12 },
-  buySearchIcon: { fontSize: 15 },
-  buySearchInput: { flex: 1, fontSize: 15, color: colors.ink, padding: 0 },
-  buySearchClear: { fontSize: 22, color: colors.muted, paddingHorizontal: 4 },
-  buyEmpty: { textAlign: 'center', color: colors.muted, fontSize: 14, marginTop: 28 },
-  buyCard: { marginHorizontal: 16, marginTop: 10, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, flexDirection: 'row', overflow: 'hidden' },
-  buyCardImage: { width: 96, height: 96, backgroundColor: '#f0e7ed' },
-  buyCardImagePh: { width: 96, height: 96, backgroundColor: '#f6eef2', alignItems: 'center', justifyContent: 'center' },
-  buyCardImagePhText: { fontSize: 34 },
-  buyCardBody: { flex: 1, padding: 12, justifyContent: 'center' },
-  buyCardPack: { color: colors.muted, fontSize: 12, marginTop: 3 },
-  buyCardFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
-  productIcon: { width: 58, height: 58, borderRadius: 10, backgroundColor: colors.rose, textAlign: 'center', textAlignVertical: 'center', fontSize: 31, lineHeight: 58, overflow: 'hidden' },
-  productTitle: { color: colors.ink, fontSize: 16, lineHeight: 20, fontWeight: '700', flexShrink: 1 },
-  productSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
-  productPrice: { color: colors.maroon, fontSize: 20, fontWeight: '700', marginTop: 6 },
-  mutedPrice: { color: colors.muted },
-  unit: { color: colors.muted, fontSize: 12, fontWeight: '400' },
-  orderHeroCard: { flexDirection: 'row', gap: 14, alignItems: 'center', backgroundColor: '#FFF8ED', borderColor: '#F4D385' },
-  orderProductVisual: { width: 118, minHeight: 142, borderRadius: 18, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center', padding: 12, overflow: 'hidden' },
-  orderProductEmoji: { fontSize: 38, marginBottom: 8 },
-  orderSackText: { color: 'white', fontSize: 15, lineHeight: 18, fontWeight: '700', textAlign: 'center' },
-  orderSackWeight: { color: colors.goldPale, fontSize: 12, fontWeight: '700', marginTop: 5 },
-  orderHeroCopy: { flex: 1 },
-  orderHeroTitle: { color: colors.ink, fontSize: 21, lineHeight: 27, fontWeight: '700', marginTop: 8 },
-  orderHeroSub: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 5 },
-  orderInfoCard: { padding: 14 },
-  orderSectionTitle: { color: colors.ink, fontSize: 17, fontWeight: '700', marginBottom: 8 },
-  orderDescription: { color: colors.muted, fontSize: 13, lineHeight: 21 },
-  orderFeatureRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
-  orderFeature: { flex: 1, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 10, alignItems: 'center' },
-  orderFeatureIcon: { fontSize: 20 },
-  orderFeatureTitle: { color: colors.ink, fontSize: 12, lineHeight: 16, fontWeight: '700', textAlign: 'center', marginTop: 4 },
-  orderFeatureSub: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 2 },
-  orderSummaryCard: { marginHorizontal: 16, marginTop: 12, borderRadius: 14, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, padding: 14 },
-  orderSummaryRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 7, borderBottomWidth: 1, borderColor: '#F0E6EC' },
-  orderSummaryLabel: { color: colors.muted, fontSize: 13 },
-  orderSummaryValue: { color: colors.ink, fontSize: 13, fontWeight: '700' },
-  orderSummaryTotal: { borderBottomWidth: 0, marginTop: 2 },
-  orderSummaryTotalText: { color: colors.maroon, fontSize: 16, fontWeight: '700' },
-  orderProduct: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
-  qtyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8, flexWrap: 'wrap' },
-  qtyBtn: { width: 38, height: 38, borderRadius: 8, backgroundColor: '#F6F1F4', borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  qtyText: { color: colors.maroon, fontSize: 20 },
-  qtyNumber: { color: colors.ink, fontSize: 22, fontWeight: '700' },
-  qtyTotal: { color: colors.maroon, fontSize: 15, fontWeight: '700' },
-  chips: { paddingHorizontal: 12, marginTop: 10, maxHeight: 48 },
-  chip: { borderWidth: 1, borderColor: colors.line, borderRadius: 18, paddingHorizontal: 18, paddingVertical: 8, marginRight: 8, color: colors.maroon, fontWeight: '700', backgroundColor: 'white' },
-  chipActive: { backgroundColor: colors.maroon, color: 'white', borderColor: colors.maroon },
-  moduleGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, paddingHorizontal: 14, paddingTop: 10 },
-  moduleCard: { width: '48%', backgroundColor: 'white', borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: colors.line },
-  moduleThumb: { height: 92, alignItems: 'center', justifyContent: 'center' },
-  moduleIcon: { fontSize: 37, lineHeight: 44, textAlign: 'center' },
-  // Training module (gamified) styles
-  trainPointsCard: { flexDirection: 'row', alignItems: 'center', margin: 16, marginBottom: 8, backgroundColor: colors.maroon, borderRadius: 16, paddingVertical: 16 },
-  trainPointsCol: { flex: 1, alignItems: 'center' },
-  trainPointsValue: { color: 'white', fontSize: 22, fontWeight: '800' },
-  trainPointsLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 3 },
-  trainPointsDivider: { width: 1, height: 34, backgroundColor: 'rgba(255,255,255,0.22)' },
-  trainContinue: { flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginBottom: 6, backgroundColor: colors.green, borderRadius: 14, padding: 14 },
-  trainContinueLabel: { color: 'rgba(255,255,255,0.85)', fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
-  trainContinueTitle: { color: 'white', fontSize: 15, fontWeight: '800', marginTop: 2 },
-  trainContinueSub: { color: 'rgba(255,255,255,0.85)', fontSize: 12, marginTop: 1 },
-  trainCatGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 12, paddingHorizontal: 16, paddingTop: 4 },
-  trainCatCard: { width: '48%', backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  trainCatCardHi: { borderColor: colors.maroon, borderWidth: 2, backgroundColor: colors.rose },
-  trainCatEmoji: { fontSize: 32, lineHeight: 38, marginBottom: 6 },
-  trainCatTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
-  trainCatMeta: { color: colors.muted, fontSize: 11.5, marginTop: 4 },
-  trainProgressTrack: { height: 6, borderRadius: 6, backgroundColor: '#EFE6EC', overflow: 'hidden', marginTop: 8, marginBottom: 4 },
-  trainProgressFill: { height: '100%', backgroundColor: colors.green, borderRadius: 6 },
-  subList: { paddingHorizontal: 16, paddingTop: 4, gap: 10 },
-  subCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 13 },
-  subEmojiWrap: { width: 46, height: 46, borderRadius: 13, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  subEmoji: { fontSize: 24, lineHeight: 30 },
-  subTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  subTitle: { color: colors.ink, fontSize: 15.5, fontWeight: '800', flexShrink: 1 },
-  subSub: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
-  subMeta: { color: colors.maroon, fontSize: 11.5, fontWeight: '700', marginTop: 4 },
-  levelChip: { backgroundColor: colors.goldPale, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2 },
-  levelChipText: { color: '#92610C', fontSize: 10.5, fontWeight: '800' },
-  contentList: { paddingHorizontal: 16, gap: 10 },
-  contentCard: { flexDirection: 'row', gap: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 10 },
-  contentThumb: { width: 70, height: 70, borderRadius: 11 },
-  contentThumbFallback: { backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  contentTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
-  contentExcerpt: { color: colors.muted, fontSize: 12.5, lineHeight: 17, marginTop: 3 },
-  contentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 },
-  pointPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.goldPale, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3 },
-  pointPillText: { color: '#92610C', fontSize: 11, fontWeight: '800' },
-  pointPillRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8, marginBottom: 4 },
-  quizPill: { backgroundColor: colors.bluePale, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3 },
-  quizPillText: { color: '#1D4ED8', fontSize: 11, fontWeight: '800' },
-  donePill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: colors.green, borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3 },
-  donePillText: { color: 'white', fontSize: 11, fontWeight: '800' },
-  readerImage: { width: '100%', height: 200 },
-  readerBody: { paddingHorizontal: 18, paddingTop: 14 },
-  readerKicker: { color: colors.maroon, fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
-  readerTitle: { color: colors.ink, fontSize: 22, fontWeight: '800', marginTop: 4, lineHeight: 28 },
-  readerText: { color: colors.ink, fontSize: 15.5, lineHeight: 25, marginTop: 6 },
-  readerStrong: { fontWeight: '800', color: colors.maroon },
-  videoFrame: { backgroundColor: '#000', marginTop: 8 },
-  videoFallback: { height: 210, alignItems: 'center', justifyContent: 'center' },
-  videoHint: { color: colors.muted, fontSize: 12 },
-  aiSummaryBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-start', backgroundColor: colors.rose, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, marginTop: 14 },
-  aiSummaryBtnText: { color: colors.maroon, fontWeight: '800', fontSize: 13.5 },
-  aiSummaryBlock: { backgroundColor: '#FBF6F9', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14, marginTop: 12 },
-  aiSummaryHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
-  aiSummaryTitle: { color: colors.maroon, fontSize: 15, fontWeight: '800' },
-  aiReadBtn: { width: 36, height: 36, borderRadius: 12, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  quizCard: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  quizQuestion: { color: colors.ink, fontSize: 15.5, fontWeight: '800', marginBottom: 10, lineHeight: 21 },
-  quizOption: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 11, padding: 12, marginBottom: 8 },
-  quizOptionSel: { borderColor: colors.maroon, backgroundColor: colors.rose },
-  quizRadio: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  quizRadioSel: { borderColor: colors.maroon, backgroundColor: colors.maroon },
-  quizOptionText: { color: colors.ink, fontSize: 14.5, flexShrink: 1 },
-  quizOptionTextSel: { fontWeight: '700', color: colors.maroon },
-  quizResult: { alignItems: 'center', paddingHorizontal: 24, paddingTop: 30 },
-  quizResultIcon: { width: 90, height: 90, borderRadius: 45, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
-  quizResultScore: { color: colors.ink, fontSize: 40, fontWeight: '900' },
-  quizResultText: { color: colors.ink, fontSize: 17, fontWeight: '700', textAlign: 'center', marginTop: 6 },
-  quizResultSub: { color: colors.muted, fontSize: 14, textAlign: 'center', marginTop: 6, marginBottom: 20 },
-  moduleTitle: { color: colors.ink, fontSize: 13, lineHeight: 17, fontWeight: '700', paddingHorizontal: 10, paddingTop: 10 },
-  moduleSub: { color: colors.muted, fontSize: 11, paddingHorizontal: 10, marginTop: 2 },
-  moduleCount: { color: colors.maroon, fontSize: 12, fontWeight: '700', padding: 10 },
-  learningList: { paddingHorizontal: 16, paddingTop: 10, gap: 12 },
-  learningCard: { backgroundColor: 'white', borderRadius: 16, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
-  learningThumb: { minHeight: 92, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  learningBody: { padding: 14, paddingTop: 10 },
-  learningMaterial: { flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: '#FBF8FA', borderRadius: 12, padding: 10, marginTop: 10 },
-  learningMaterialIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'white', textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', color: colors.maroon, fontSize: 18, lineHeight: 36 },
-  learningMaterialLabel: { color: colors.muted, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
-  learningMaterialTitle: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: '700', marginTop: 1 },
-  quizBox: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 10, padding: 12, borderRadius: 14, backgroundColor: colors.maroon },
-  quizIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
-  quizIconText: { color: 'white', fontSize: 20, fontWeight: '700' },
-  quizTitle: { color: 'white', fontSize: 14, lineHeight: 18, fontWeight: '700' },
-  quizSub: { color: 'rgba(255,255,255,0.72)', fontSize: 11, marginTop: 2 },
-  quizStatus: { color: colors.goldPale, fontSize: 12, fontWeight: '700' },
-  trainingContentHero: { alignItems: 'center', paddingVertical: 24 },
-  trainingContentIcon: { width: 86, height: 86, borderRadius: 24, alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
-  trainingContentKicker: { color: colors.muted, fontSize: 12, fontWeight: '700', textAlign: 'center' },
-  trainingContentTitle: { color: colors.ink, fontSize: 22, lineHeight: 29, fontWeight: '700', textAlign: 'center', marginTop: 8 },
-  trainingContentMeta: { color: colors.maroon, fontSize: 13, fontWeight: '700', marginTop: 10 },
-  trainingContentBody: { padding: 18 },
-  trainingParagraph: { color: colors.ink, fontSize: 15, lineHeight: 24 },
-  trainingBullet: { color: colors.muted, fontSize: 14, lineHeight: 23, marginTop: 8 },
-  videoLessonCard: { marginHorizontal: 16, marginTop: 12, borderRadius: 18, backgroundColor: colors.maroon, minHeight: 260, alignItems: 'center', justifyContent: 'center', padding: 22 },
-  videoPlayCircle: { width: 78, height: 78, borderRadius: 39, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
-  videoPlayIcon: { color: 'white', fontSize: 34, marginLeft: 4 },
-  videoLessonTitle: { color: 'white', fontSize: 20, lineHeight: 26, fontWeight: '700', textAlign: 'center', marginTop: 18 },
-  videoLessonSub: { color: 'rgba(255,255,255,0.74)', fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 8 },
-  notice: { backgroundColor: '#FFF8E1', padding: 14, borderBottomWidth: 1, borderColor: colors.line },
-  noticeText: { color: '#92400E', fontSize: 14, fontWeight: '700' },
-  apiNotice: { marginHorizontal: 16, marginTop: 10, marginBottom: 4, padding: 13, borderRadius: 12, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', color: '#B91C1C', fontSize: 14, lineHeight: 20, fontWeight: '600' },
-  projectApply: { padding: 14 },
-  projectApplyHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  projectProgress: { color: colors.muted, fontWeight: '700' },
-  projectName: { color: colors.ink, fontSize: 17, fontWeight: '700', marginTop: 10 },
-  progressBar: { height: 6, borderRadius: 6, backgroundColor: colors.rose, marginTop: 14, marginBottom: 12, overflow: 'hidden' },
-  progressFill: { height: 6, width: '76%', backgroundColor: colors.maroon },
-  coolProject: { backgroundColor: '#EFF6FF' },
-  stepRow: { marginHorizontal: 16, padding: 14, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', flexDirection: 'row', alignItems: 'center', gap: 14 },
-  stepNum: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.maroon, color: 'white', textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontWeight: '700' },
-  stepTitle: { color: colors.ink, fontSize: 16, fontWeight: '700' },
-  stepSub: { color: colors.muted, fontSize: 12 },
-  progressLine: { height: 4, backgroundColor: colors.maroon, width: '40%' },
-  pageTitle: { color: colors.ink, fontSize: 24, fontWeight: '700', marginHorizontal: 20, marginTop: 16 },
-  filterRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, paddingTop: 14 },
-  filter: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: '#F0EAEE' },
-  filterActive: { backgroundColor: colors.maroon },
-  filterText: { color: colors.muted, fontWeight: '700', fontSize: 13 },
-  filterTextActive: { color: 'white' },
-  communityHero: { margin: 16, marginBottom: 4, backgroundColor: colors.maroon, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 13 },
-  communityHeroIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
-  communityHeroTitle: { color: 'white', fontSize: 20, fontWeight: '800' },
-  communityHeroSub: { color: 'rgba(255,255,255,0.82)', fontSize: 12.5, marginTop: 2 },
-  officerCallBtn: { width: 38, height: 38, borderRadius: 13, backgroundColor: colors.green, alignItems: 'center', justifyContent: 'center' },
-  postAvatarText: { color: colors.maroon, fontWeight: '800', fontSize: 15 },
-  postIconBtn: { width: 38, height: 38, borderRadius: 11, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  postSubmitBtn: { backgroundColor: colors.maroon, paddingHorizontal: 16, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  postSubmitText: { color: 'white', fontWeight: '800', fontSize: 13 },
-  postActionItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  postActionText: { color: colors.muted, fontWeight: '700', fontSize: 13 },
-  search: { margin: 16, backgroundColor: 'white', borderRadius: 10, borderWidth: 1, borderColor: colors.line, flexDirection: 'row', alignItems: 'center', padding: 8 },
-  searchIcon: { color: colors.muted, marginHorizontal: 8 },
-  searchInput: { flex: 1, height: 36, backgroundColor: '#F7F3F5', borderRadius: 10, paddingHorizontal: 12, color: colors.ink },
-  searchButton: { backgroundColor: colors.maroon, color: 'white', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, marginLeft: 8, overflow: 'hidden', fontWeight: '700' },
-  officerRow: { flexDirection: 'row', gap: 12, alignItems: 'center', paddingVertical: 9 },
-  avatar: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: colors.maroon, fontWeight: '700' },
-  officerAction: { width: 38, height: 38, borderRadius: 14, backgroundColor: colors.rose, color: colors.maroon, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 19 },
-  postBox: { margin: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 10, flexDirection: 'row', gap: 8, alignItems: 'center' },
-  postAvatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
-  postInput: { flex: 1, height: 36, backgroundColor: '#F7F3F5', borderRadius: 10, paddingHorizontal: 12 },
-  postButton: { backgroundColor: colors.maroon, color: 'white', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, overflow: 'hidden', fontWeight: '700' },
-  postCard: { padding: 14 },
-  postHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  postName: { color: colors.ink, fontSize: 16, fontWeight: '700' },
-  postText: { color: colors.ink, fontSize: 15, lineHeight: 24, marginTop: 12 },
-  postActions: { flexDirection: 'row', justifyContent: 'space-around', borderTopWidth: 1, borderColor: colors.line, marginTop: 12, paddingTop: 10 },
-  postAction: { color: colors.muted, fontWeight: '700' },
-  projectHero: { margin: 16, marginBottom: 8, backgroundColor: colors.maroon, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  projectHeroIcon: { width: 52, height: 52, borderRadius: 15, backgroundColor: 'rgba(255,255,255,0.16)', alignItems: 'center', justifyContent: 'center' },
-  projectHeroEmoji: { color: 'white', fontSize: 25 },
-  projectHeroTitle: { color: 'white', fontSize: 22, fontWeight: '700' },
-  projectHeroSub: { color: 'rgba(255,255,255,0.76)', fontSize: 12, lineHeight: 18, marginTop: 4 },
-  projectStatGrid: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, marginTop: 4 },
-  projectStatCard: { width: '31.5%', minHeight: 78, backgroundColor: 'white', borderRadius: 12, borderWidth: 1, borderColor: colors.line, padding: 8, alignItems: 'center', justifyContent: 'center' },
-  projectStatValue: { color: colors.maroon, fontSize: 18, fontWeight: '700' },
-  projectStatLabel: { color: colors.muted, fontSize: 9, lineHeight: 12, textAlign: 'center', textTransform: 'uppercase', marginTop: 4 },
-  projectDetailCard: { marginHorizontal: 16, marginTop: 8, backgroundColor: 'white', borderRadius: 16, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' },
-  projectDetailTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: 16, backgroundColor: '#FFF7FA', borderBottomWidth: 1, borderBottomColor: colors.line },
-  projectDetailName: { color: colors.ink, fontSize: 18, lineHeight: 23, fontWeight: '700' },
-  projectDetailMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
-  projectBalance: { alignItems: 'flex-end', minWidth: 76 },
-  projectBalanceLabel: { color: colors.muted, fontSize: 11 },
-  projectBalanceValue: { color: colors.maroon, fontSize: 17, fontWeight: '700', marginTop: 3 },
-  projectHealthBar: { marginHorizontal: 16, marginTop: 16, height: 10, borderRadius: 10, backgroundColor: '#F3E8EE', overflow: 'hidden' },
-  projectHealthFill: { height: 10, backgroundColor: colors.green },
-  projectHealthText: { color: colors.ink, fontSize: 13, lineHeight: 18, marginHorizontal: 16, marginTop: 8, marginBottom: 10, fontWeight: '700' },
-  projectProgressHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 12 },
-  projectProgressBadge: { color: colors.maroon, fontSize: 12, fontWeight: '700', backgroundColor: colors.rose, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
-  projectStats: { backgroundColor: colors.maroon, flexDirection: 'row', justifyContent: 'space-around', paddingVertical: 18, marginTop: 14 },
-  ledgerCard: { padding: 0, overflow: 'hidden' },
-  ledgerHead: { backgroundColor: colors.rose, padding: 16 },
-  timeline: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', paddingVertical: 16, paddingHorizontal: 8 },
-  timelineItem: { alignItems: 'center', width: 72 },
-  timelineDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: '#E7E0E4', marginBottom: 8 },
-  timelineDone: { backgroundColor: colors.maroon },
-  timelineCurrent: { backgroundColor: colors.gold },
-  connectedTimeline: { flexDirection: 'row', paddingHorizontal: 8, paddingTop: 16, paddingBottom: 20 },
-  connectedStep: { flex: 1, alignItems: 'center', minHeight: 86 },
-  timelineNodeRow: { flexDirection: 'row', alignItems: 'center', width: '100%', minHeight: 32 },
-  timelineConnector: { flex: 1, height: 3, borderRadius: 3 },
-  timelineConnectorGhost: { flex: 1, height: 3 },
-  timelineConnectorDone: { backgroundColor: colors.green },
-  timelineConnectorPending: { backgroundColor: '#E7E0E4' },
-  timelineNode: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F7F3F5', borderWidth: 2, borderColor: '#E7E0E4', alignItems: 'center', justifyContent: 'center' },
-  timelineNodeDone: { backgroundColor: colors.green, borderColor: colors.green },
-  timelineNodeCurrent: { backgroundColor: colors.gold, borderColor: '#D97706' },
-  timelineNodeText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  timelineNodeTextPending: { color: colors.muted },
-  timelineText: { color: colors.muted, fontSize: 10, textAlign: 'center', lineHeight: 14, marginTop: 7, paddingHorizontal: 2, minHeight: 28 },
-  timelineTextCurrent: { color: colors.ink, fontWeight: '700' },
-  timelineStateText: { marginTop: 4, color: colors.muted, fontSize: 9, fontWeight: '700', textAlign: 'center' },
-  timelineStateDone: { color: colors.green },
-  timelineStateCurrent: { color: '#B45309' },
-  ledgerRow: { flexDirection: 'row', justifyContent: 'space-between', borderTopWidth: 1, borderColor: colors.line, paddingVertical: 10, paddingHorizontal: 16 },
-  ledgerLabel: { color: colors.muted, fontSize: 14 },
-  ledgerStrong: { color: colors.ink, fontWeight: '700' },
-  ledgerValue: { color: colors.ink, fontSize: 15, fontWeight: '700' },
-  greenText: { color: colors.green },
-  profileHead: { backgroundColor: colors.maroon, alignItems: 'center', paddingVertical: 30 },
-  profileAvatar: { width: 74, height: 74, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.22)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center' },
-  profileAvatarText: { color: 'white', fontSize: 24, fontWeight: '700' },
-  profileName: { color: 'white', fontSize: 20, fontWeight: '700', marginTop: 10 },
-  profileMeta: { color: 'rgba(255,255,255,0.75)', marginTop: 6 },
-  profileBadge: { backgroundColor: 'rgba(255,255,255,0.25)', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 16, marginTop: 8 },
-  profileBadgeText: { color: 'white', fontWeight: '700' },
-  menuCard: { padding: 0, overflow: 'hidden' },
-  menuItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderBottomWidth: 1, borderColor: colors.line },
-  menuIcon: { width: 42, height: 42, borderRadius: 11, backgroundColor: '#F0EAEE', color: colors.maroon, textAlign: 'center', textAlignVertical: 'center', overflow: 'hidden', fontSize: 21, lineHeight: 42 },
-  menuTitle: { color: colors.ink, fontSize: 15, fontWeight: '700' },
-  menuSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
-  languagePill: { minWidth: 48, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.maroon, alignItems: 'center' },
-  languagePillText: { color: 'white', fontSize: 12, fontWeight: '700' },
-  logout: { flexDirection: 'row', gap: 12, alignItems: 'center' },
-  logoutIcon: { color: colors.danger, fontSize: 24 },
-  logoutTitle: { color: colors.danger, fontWeight: '700', fontSize: 16 },
-  version: { color: colors.muted, fontSize: 11, textAlign: 'center', marginVertical: 16 },
-});
 

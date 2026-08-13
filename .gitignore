@@ -25,7 +25,10 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
-expo.*.log
+*.log
+
+# local dev artefacts (build/crash output, ad-hoc screenshots)
+home.png
 
 # macOS
 .DS_Store
