@@ -76,7 +76,8 @@ export type Screen =
   // Feature 2 — assessment outcome
   | 'loanResult'
   | 'developmentPlan'
-  | 'assessmentHistory';
+  | 'assessmentHistory'
+  | 'loanAccount';
 
 // ---------------------------------------------------------------------------
 // Finance
@@ -204,6 +205,44 @@ export type AssessmentHistory = {
     deteriorated: NarrativeChange[];
     actions_completed: number;
   } | null;
+};
+
+// Post-disbursement (MOB-LON-31). Read-only in v1 — there is no in-app payment.
+export type LoanAccountView = {
+  has_account: boolean;
+  account: {
+    application_code: string;
+    principal: number;
+    interest_rate_annual: number;
+    repayment_mode: string;
+    tenure_months: number;
+    total_payable: number;
+    installment_count: number;
+    emi_amount: number;
+    amount_paid: number;
+    outstanding_total: number;
+    /** Plain calendar days (YYYY-MM-DD) — never a serialised Date. */
+    next_due_date: string | null;
+    next_due_amount: number;
+    overdue_amount: number;
+    days_past_due: number;
+    first_due_date: string | null;
+    maturity_date: string | null;
+    status: string;
+    installments_paid: number;
+    installments_total: number;
+    progress_pct: number;
+    is_overdue: boolean;
+  } | null;
+  schedule: {
+    installment_no: number;
+    due_date: string;
+    amount_due: number;
+    amount_paid: number;
+    status: 'pending' | 'due' | 'paid' | 'partial' | 'overdue' | 'waived';
+    days_overdue: number;
+  }[];
+  payments: { amount: number; paid_at: string; method: string | null; reference: string | null }[];
 };
 
 export type NarrativeChange = {

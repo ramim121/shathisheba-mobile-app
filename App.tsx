@@ -36,7 +36,7 @@ import type {
   FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
   LoanProduct, LoanQuote, LoanDraft, RepaymentMode,
   CreditAssessment, AssessmentEnvelope, DevelopmentPlan, DevelopmentTask, AssessmentHistory,
-  NarrativeChange,
+  NarrativeChange, LoanAccountView,
 } from './src/types';
 import {
   analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
@@ -1497,6 +1497,7 @@ async function sendApaMessage(text: string) {
         />
       ),
       assessmentHistory: <AssessmentHistoryScreen setScreen={go} />,
+      loanAccount: <LoanAccountScreen setScreen={go} />,
       saleCategories: <SaleCategories setScreen={go} patchDraft={patchDraft} />,
       livestock: <Livestock setScreen={go} />,
       cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
@@ -6582,6 +6583,15 @@ function FinancePassportCard({ setScreen }: { setScreen: (screen: Screen) => voi
     target = 'loanResult';
   }
 
+  // A live repayment outranks everything above it. Once money is owed, the card
+  // is about the next instalment, not the grade that got them the loan.
+  if (next) {
+    kicker = tx('চলমান ঋণ', 'Active loan');
+    title = tx('পরবর্তী কিস্তি', 'Next instalment');
+    sub = `${amount(next.amount, lang)} · ${next.due_date}`;
+    target = 'loanAccount';
+  }
+
   return (
     <>
       <Pressable onPress={() => setScreen(target)} style={({ pressed }) => [pressed && styles.pressed]}>
@@ -8361,6 +8371,188 @@ function DevelopmentPlanScreen({
               <View style={{ paddingHorizontal: 16, marginTop: 16 }}>
                 <AppButton title={tx('পুনরায় মূল্যায়নের আবেদন', 'Request reassessment')} onPress={requestReassessment} />
               </View>
+            ) : null}
+          </>
+        )}
+
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+/**
+ * `loanAccount` (MOB-LON-31). Read-only in v1 — there is no in-app payment, so
+ * every figure here is something the farmer checks rather than acts on.
+ *
+ * The two questions a borrower actually opens this for are "how much, and when"
+ * and "how far through am I". Both are answered above the fold; the full
+ * schedule is below for the one time in twelve that someone wants it.
+ */
+function LoanAccountScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [data, setData] = useState<LoanAccountView | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiRequest<{ data?: LoanAccountView }>('app/finance/loan-account');
+        if (alive) setData(res.data ?? null);
+      } catch {
+        if (alive) setData(null);
+      } finally {
+        if (alive) setBusy(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const acc = data?.has_account ? data.account : null;
+  const schedule = data?.schedule ?? [];
+  const shown = showAll ? schedule : schedule.slice(0, 6);
+
+  const rowTone = (status: string) =>
+    status === 'paid' ? colors.green
+    : status === 'overdue' ? '#B4443C'
+    : status === 'partial' ? colors.gold
+    : colors.muted;
+
+  return (
+    <>
+      <Header title={tx('আমার ঋণ', 'My loan')} onBack={() => setScreen('financeHub')} />
+      <RefreshScroll>
+        {busy ? (
+          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+        ) : !acc ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
+            <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '700' }}>
+              {tx('কোনো চলমান ঋণ নেই', 'No active loan')}
+            </Text>
+            <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 8, lineHeight: 20 }}>
+              {tx('ঋণ অনুমোদিত ও বিতরণ হলে এখানে কিস্তির তথ্য দেখতে পাবেন।',
+                  'Once a loan is approved and disbursed, your instalments will appear here.')}
+            </Text>
+          </Card>
+        ) : (
+          <>
+            {/* Overdue leads, because it is the only thing on this screen that
+                needs action today. */}
+            {acc.is_overdue ? (
+              <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16, backgroundColor: '#F8EAE9', borderWidth: 1, borderColor: '#E5B5B1' }}>
+                <Text style={{ color: '#8A2F28', fontWeight: '800', fontSize: 15.5 }}>
+                  {tx('বকেয়া আছে', 'You have an overdue amount')}
+                </Text>
+                <Text style={{ color: '#8A2F28', fontSize: 20, fontWeight: '800', marginTop: 6 }}>
+                  {amount(acc.overdue_amount, lang)}
+                </Text>
+                <Text style={{ color: '#8A2F28', fontSize: 13, marginTop: 6, lineHeight: 19 }}>
+                  {num(acc.days_past_due, lang)} {tx('দিন পার হয়েছে। আপনার এলাকার কর্মকর্তার সঙ্গে যোগাযোগ করুন।',
+                                                     'days past due. Please contact your local officer.')}
+                </Text>
+              </Card>
+            ) : null}
+
+            {/* How much, and when. */}
+            <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>
+              <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '700', letterSpacing: 0.3 }}>
+                {tx('পরবর্তী কিস্তি', 'Next instalment')}
+              </Text>
+              <Text style={{ color: colors.ink, fontSize: 28, fontWeight: '800', marginTop: 4 }}>
+                {amount(acc.next_due_amount, lang)}
+              </Text>
+              <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 4 }}>
+                {acc.next_due_date
+                  ? `${tx('তারিখ', 'Due')} ${acc.next_due_date}`
+                  : tx('সব কিস্তি পরিশোধ হয়েছে', 'All instalments paid')}
+              </Text>
+
+              {/* How far through. */}
+              <View style={{ height: 8, backgroundColor: colors.line, borderRadius: 999, marginTop: 16, overflow: 'hidden' }}>
+                <View style={{ height: 8, borderRadius: 999, backgroundColor: colors.green, width: `${acc.progress_pct}%` }} />
+              </View>
+              <Text style={{ color: colors.muted, fontSize: 13, marginTop: 8 }}>
+                {num(acc.installments_paid, lang)} / {num(acc.installments_total, lang)} {tx('কিস্তি পরিশোধ', 'instalments paid')}
+                {'  ·  '}
+                {tx('বাকি', 'Outstanding')} {amount(acc.outstanding_total, lang)}
+              </Text>
+            </Card>
+
+            <SectionTitle title={tx('ঋণের বিবরণ', 'Loan details')} />
+            <Card style={{ marginHorizontal: 16, padding: 14 }}>
+              {([
+                [tx('ঋণের পরিমাণ', 'Loan amount'), amount(acc.principal, lang)],
+                [tx('সুদের হার', 'Interest rate'), `${num(acc.interest_rate_annual, lang)}% ${tx('বার্ষিক', 'per year')}`],
+                [tx('মোট পরিশোধযোগ্য', 'Total payable'), amount(acc.total_payable, lang)],
+                [tx('পরিশোধ হয়েছে', 'Paid so far'), amount(acc.amount_paid, lang)],
+                [tx('মেয়াদ শেষ', 'Final instalment'), String(acc.maturity_date ?? '—')],
+                [tx('আবেদন নম্বর', 'Application'), acc.application_code],
+              ] as [string, string][]).map(([label, value], i) => (
+                <View key={label} style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginTop: i ? 10 : 0 }}>
+                  <Text style={{ color: colors.muted, fontSize: 13.5 }}>{label}</Text>
+                  <Text style={{ color: colors.ink, fontSize: 13.5, fontWeight: '700', flexShrink: 1, textAlign: 'right' }}>{value}</Text>
+                </View>
+              ))}
+            </Card>
+
+            <SectionTitle title={tx('কিস্তির তালিকা', 'Repayment schedule')} />
+            <Card style={{ marginHorizontal: 16, padding: 14 }}>
+              {shown.map((s, i) => (
+                <View key={s.installment_no} style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 12,
+                  paddingTop: i ? 10 : 0, marginTop: i ? 10 : 0,
+                  borderTopWidth: i ? 1 : 0, borderTopColor: colors.line,
+                }}>
+                  <Text style={{ color: colors.muted, fontSize: 12.5, width: 26 }}>{num(s.installment_no, lang)}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '600' }}>{s.due_date}</Text>
+                    {s.status === 'partial' || s.status === 'overdue' ? (
+                      <Text style={{ color: rowTone(s.status), fontSize: 12, marginTop: 2 }}>
+                        {s.amount_paid > 0
+                          ? `${amount(s.amount_paid, lang)} ${tx('জমা', 'paid')}`
+                          : tx('বকেয়া', 'overdue')}
+                        {s.days_overdue > 0 ? ` · ${num(s.days_overdue, lang)} ${tx('দিন', 'days')}` : ''}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '700' }}>{amount(s.amount_due, lang)}</Text>
+                  <Text style={{ color: rowTone(s.status), fontSize: 16, width: 18, textAlign: 'center' }}>
+                    {s.status === 'paid' ? '✓' : s.status === 'overdue' ? '!' : '·'}
+                  </Text>
+                </View>
+              ))}
+              {schedule.length > 6 ? (
+                <Pressable onPress={() => setShowAll((v) => !v)} style={({ pressed }) => [{ marginTop: 12 }, pressed && styles.pressed]}>
+                  <Text style={{ color: colors.maroon, fontSize: 13.5, fontWeight: '700' }}>
+                    {showAll
+                      ? tx('কম দেখুন', 'Show less')
+                      : `${tx('সব দেখুন', 'Show all')} (${num(schedule.length, lang)})`}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </Card>
+
+            {data && data.payments.length > 0 ? (
+              <>
+                <SectionTitle title={tx('জমার ইতিহাস', 'Payment history')} />
+                <Card style={{ marginHorizontal: 16, padding: 14 }}>
+                  {data.payments.map((p, i) => (
+                    <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginTop: i ? 10 : 0 }}>
+                      <View>
+                        <Text style={{ color: colors.ink, fontSize: 13.5, fontWeight: '600' }}>
+                          {String(p.paid_at).slice(0, 10)}
+                        </Text>
+                        {p.method ? <Text style={{ color: colors.muted, fontSize: 12 }}>{p.method}{p.reference ? ` · ${p.reference}` : ''}</Text> : null}
+                      </View>
+                      <Text style={{ color: colors.green, fontSize: 13.5, fontWeight: '700' }}>{amount(p.amount, lang)}</Text>
+                    </View>
+                  ))}
+                </Card>
+              </>
             ) : null}
           </>
         )}
