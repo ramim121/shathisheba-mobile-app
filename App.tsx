@@ -35,6 +35,8 @@ import type {
   Screen, TrainingContentKind, TrainingModule, WeatherApiState,
   FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
   LoanProduct, LoanQuote, LoanDraft, RepaymentMode,
+  CreditAssessment, AssessmentEnvelope, DevelopmentPlan, DevelopmentTask, AssessmentHistory,
+  NarrativeChange,
 } from './src/types';
 import {
   analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
@@ -1482,6 +1484,19 @@ async function sendApaMessage(text: string) {
       ),
       loanApplyDone: <LoanApplyDone setScreen={go} result={loanSubmission} />,
       loanStatus: <LoanStatus setScreen={go} />,
+      loanResult: (
+        <LoanResult
+          setScreen={go}
+          onOpenSheet={(topic) => { setGuidanceTopic(topic); go('financeGuidanceSheet'); }}
+        />
+      ),
+      developmentPlan: (
+        <DevelopmentPlanScreen
+          setScreen={go}
+          onOpenSheet={(topic) => { setGuidanceTopic(topic); go('financeGuidanceSheet'); }}
+        />
+      ),
+      assessmentHistory: <AssessmentHistoryScreen setScreen={go} />,
       saleCategories: <SaleCategories setScreen={go} patchDraft={patchDraft} />,
       livestock: <Livestock setScreen={go} />,
       cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
@@ -6562,7 +6577,9 @@ function FinancePassportCard({ setScreen }: { setScreen: (screen: Screen) => voi
     kicker = tx('যাচাইকৃত', 'Verified');
     title = tx('আপনার ঋণ ঝুঁকি গ্রেড', 'Your credit risk grade');
     sub = financeLabel(summary.readiness_status, lang);
-    target = 'loanStatus';
+    // Once an assessment exists, the passport opens the result rather than the
+    // timeline — the grade on the card is the thing the tap is asking about.
+    target = 'loanResult';
   }
 
   return (
@@ -7950,6 +7967,539 @@ function LoanStatus({ setScreen }: { setScreen: (screen: Screen) => void }) {
             </Card>
           </>
         ) : null}
+
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Assessment outcome — SRS §15.4–15.5
+// ---------------------------------------------------------------------------
+
+/**
+ * `loanResult` (MOB-LON-24). The section order is prescribed, and prescribed for
+ * a reason: the outcome, then what to do about it, then what is strong, then what
+ * is weak. A screen that opens with the weaknesses reads as a verdict; this one
+ * reads as a next step.
+ *
+ * Nothing here exposes a weight, a per-criterion rating or an internal reason
+ * code (MOB-LON-26) — the server does not send them.
+ */
+function LoanResult({
+  setScreen, onOpenSheet,
+}: {
+  setScreen: (screen: Screen) => void;
+  onOpenSheet: (topic: string) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [envelope, setEnvelope] = useState<AssessmentEnvelope | null>(null);
+  const [busy, setBusy] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiRequest<{ data?: AssessmentEnvelope }>('app/finance/assessment');
+        if (alive) setEnvelope(res.data ?? { state: 'not_assessed', assessment: null });
+      } catch {
+        if (alive) setEnvelope({ state: 'not_assessed', assessment: null });
+      } finally {
+        if (alive) setBusy(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const a = envelope?.assessment ?? null;
+
+  function runPathway() {
+    const wantsPlan = a?.pathway?.code === 'complete_development' || a?.pathway?.code === 'reduced_loan_limit';
+    setScreen(wantsPlan ? 'developmentPlan' : 'loanStatus');
+  }
+
+  if (busy) {
+    return (
+      <>
+        <Header title={tx('আপনার ফাইন্যান্স প্রোফাইল', 'Your finance profile')} onBack={() => setScreen('financeHub')} />
+        <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+      </>
+    );
+  }
+
+  if (!a) {
+    return (
+      <>
+        <Header title={tx('আপনার ফাইন্যান্স প্রোফাইল', 'Your finance profile')} onBack={() => setScreen('financeHub')} />
+        <RefreshScroll>
+          <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
+            <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '700' }}>
+              {tx('মূল্যায়ন এখনো হয়নি', 'No assessment yet')}
+            </Text>
+            <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 8, lineHeight: 20 }}>
+              {tx('আপনার আবেদন যাচাই হওয়ার পর এখানে ফলাফল দেখতে পাবেন।',
+                  'Your result will appear here once your application has been reviewed.')}
+            </Text>
+            <View style={{ marginTop: 14 }}>
+              <AppButton title={tx('অগ্রগতি দেখুন', 'View progress')} onPress={() => setScreen('loanStatus')} />
+            </View>
+          </Card>
+          <OfficerHelpStrip district={user?.district} />
+          <View style={{ height: 28 }} />
+        </RefreshScroll>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Header
+        title={tx('আপনার ফাইন্যান্স প্রোফাইল', 'Your finance profile')}
+        onBack={() => setScreen('financeHub')}
+        right={tx('ইতিহাস', 'History')}
+        onRightPress={() => setScreen('assessmentHistory')}
+      />
+      <RefreshScroll>
+        {/* MOB-LON-27. A blocked result leads with what would change it, and never
+            with the word "rejected". */}
+        {a.blocked ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16, backgroundColor: '#F8EAE9', borderWidth: 1, borderColor: '#E5B5B1' }}>
+            <Text style={{ color: '#8A2F28', fontWeight: '800', fontSize: 16 }}>
+              {tx('এই মুহূর্তে আমরা এগোতে পারছি না', 'We cannot proceed at this time')}
+            </Text>
+            {a.blocked_reasons.map((r, i) => (
+              <View key={i} style={{ marginTop: 10 }}>
+                <Text style={{ color: '#8A2F28', fontSize: 14, fontWeight: '700' }}>{lang === 'bn' ? r.bn : r.en}</Text>
+                {(lang === 'bn' ? r.action_bn : r.action_en) ? (
+                  <Text style={{ color: '#8A2F28', fontSize: 13.5, marginTop: 4, lineHeight: 20 }}>
+                    {lang === 'bn' ? r.action_bn : r.action_en}
+                  </Text>
+                ) : null}
+              </View>
+            ))}
+            <Text style={{ color: '#8A2F28', fontSize: 13, marginTop: 12, lineHeight: 19 }}>
+              {tx('এগুলো ঠিক হলে আবার মূল্যায়নের আবেদন করা যাবে। আপনার এলাকার কর্মকর্তা সাহায্য করবেন।',
+                  'Once these are resolved you can ask for a fresh assessment. Your local officer can help.')}
+            </Text>
+          </Card>
+        ) : null}
+
+        {/* Three separate labelled outputs (P2) — never merged into one verdict. */}
+        <Card style={{ marginHorizontal: 16, marginTop: 14, paddingVertical: 8 }}>
+          <View style={fin.scoreWrap}>
+            <View style={[fin.scoreCircle, { borderColor: GRADE_COLORS[a.grade], backgroundColor: GRADE_TINTS[a.grade] }]}>
+              <Text style={[fin.scoreLetter, { color: GRADE_COLORS[a.grade] }]}>{a.grade}</Text>
+            </View>
+            <Text style={fin.scoreValue}>
+              {num(a.score, lang)}<Text style={fin.scoreOutOf}> / {num(100, lang)}</Text>
+            </Text>
+            <Text style={{ color: GRADE_COLORS[a.grade], fontWeight: '700', fontSize: 15, marginTop: 4 }}>
+              {lang === 'bn' ? a.grade_label.bn : a.grade_label.en}
+            </Text>
+            <Text style={fin.selfDeclared}>
+              {tx('যাচাইকৃত মূল্যায়ন', 'Verified assessment')} · {a.application_code}
+            </Text>
+
+            <View style={[fin.chipRow, { justifyContent: 'center', marginTop: 12 }]}>
+              <OutputChip label={`${tx('ঝুঁকি গ্রেড', 'Risk grade')} ${a.grade}`} tone={GRADE_COLORS[a.grade]} />
+              <OutputChip label={lang === 'bn' ? a.readiness_label.bn : a.readiness_label.en} tone={colors.maroon} />
+              <OutputChip
+                label={`${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${lang === 'bn' ? a.confidence_label.bn : a.confidence_label.en}`}
+                tone={colors.blue}
+              />
+            </View>
+          </View>
+        </Card>
+
+        {/* MOB-LON-25. Where safeguards changed the outcome, both results are shown.
+            Collapsing them would credit the farmer for a guarantee they did not
+            earn, and hide that the standing is the structure's, not theirs. */}
+        {a.structured_readiness_label ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14 }}>
+            <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '700', letterSpacing: 0.3 }}>
+              {tx('প্রকল্প কাঠামোর সঙ্গে', 'With project structure')}
+            </Text>
+            <Text style={{ color: colors.ink, fontSize: 14.5, marginTop: 6, lineHeight: 21 }}>
+              {tx('নিজস্ব গ্রেড', 'Inherent grade')}: <Text style={{ fontWeight: '800' }}>{a.inherent_grade ?? a.grade}</Text>
+              {'  ·  '}
+              {tx('কাঠামোসহ', 'With structure')}: <Text style={{ fontWeight: '800' }}>
+                {lang === 'bn' ? a.structured_readiness_label.bn : a.structured_readiness_label.en}
+              </Text>
+            </Text>
+          </Card>
+        ) : null}
+
+        {/* One recommended next step, one primary button. */}
+        {!a.blocked && a.pathway ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 16 }}>
+            <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '700', letterSpacing: 0.3 }}>
+              {tx('পরবর্তী ধাপ', 'Recommended next step')}
+            </Text>
+            <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '700', marginTop: 6, lineHeight: 23 }}>
+              {lang === 'bn' ? a.pathway.label_bn : a.pathway.label_en}
+            </Text>
+            {a.recommended_amount != null && a.recommended_amount < a.requested_amount ? (
+              <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 8, lineHeight: 20 }}>
+                {tx('আপনি চেয়েছেন', 'You asked for')} {amount(a.requested_amount, lang)}
+                {'  ·  '}
+                {tx('এখন সুপারিশ', 'Recommended now')}{' '}
+                <Text style={{ color: colors.ink, fontWeight: '700' }}>{amount(a.recommended_amount, lang)}</Text>
+              </Text>
+            ) : null}
+            <View style={{ marginTop: 14 }}>
+              <AppButton
+                title={a.pathway.code === 'complete_development' || a.pathway.code === 'reduced_loan_limit'
+                  ? tx('উন্নয়ন পরিকল্পনা দেখুন', 'View development plan')
+                  : tx('অগ্রগতি দেখুন', 'View progress')}
+                onPress={runPathway}
+              />
+            </View>
+          </Card>
+        ) : null}
+
+        {a.strengths.length ? (
+          <>
+            <SectionTitle title={tx('যা শক্তিশালী', 'What is strong')} />
+            <Card style={{ marginHorizontal: 16, padding: 14 }}>
+              {a.strengths.map((s, i) => (
+                <View key={i} style={{ flexDirection: 'row', gap: 10, marginTop: i ? 10 : 0 }}>
+                  <Text style={{ color: colors.green, fontSize: 15, fontWeight: '800' }}>✓</Text>
+                  <Text style={{ color: colors.ink, fontSize: 14, flex: 1, lineHeight: 21 }}>
+                    {lang === 'bn' ? s.bn : s.en}
+                  </Text>
+                </View>
+              ))}
+            </Card>
+          </>
+        ) : null}
+
+        {a.improvements.length ? (
+          <>
+            <SectionTitle title={tx('যা উন্নত করা দরকার', 'What needs improvement')} />
+            <Card style={{ marginHorizontal: 16, padding: 14 }}>
+              {a.improvements.map((s, i) => (
+                <View key={i} style={{ flexDirection: 'row', gap: 10, marginTop: i ? 10 : 0 }}>
+                  <Text style={{ color: colors.gold, fontSize: 15, fontWeight: '800' }}>•</Text>
+                  <Text style={{ color: colors.ink, fontSize: 14, flex: 1, lineHeight: 21 }}>
+                    {lang === 'bn' ? s.bn : s.en}
+                  </Text>
+                </View>
+              ))}
+            </Card>
+          </>
+        ) : null}
+
+        <SectionTitle title={tx('আপনার যোগ্যতা বাড়ান', 'Improve your eligibility')} />
+        <View style={{ paddingHorizontal: 16 }}>
+          <AppButton
+            variant="outline"
+            title={tx('উন্নয়ন পরিকল্পনা খুলুন', 'Open development plan')}
+            onPress={() => setScreen('developmentPlan')}
+          />
+        </View>
+
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+/**
+ * `developmentPlan` (MOB-LON-28/29). The tasks are the product: a farmer who is
+ * not ready needs a list of things to do, not a score to stare at.
+ *
+ * The reassessment CTA appears only when nothing is outstanding. Offering it
+ * early wastes the farmer's trip and the analyst's review, and teaches both that
+ * the button means nothing.
+ */
+function DevelopmentPlanScreen({
+  setScreen, onOpenSheet,
+}: {
+  setScreen: (screen: Screen) => void;
+  onOpenSheet: (topic: string) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [plan, setPlan] = useState<DevelopmentPlan | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [requested, setRequested] = useState(false);
+  const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiRequest<{ data?: DevelopmentPlan }>('app/finance/development-plan');
+        if (alive) setPlan(res.data ?? null);
+      } catch {
+        if (alive) setPlan(null);
+      } finally {
+        if (alive) setBusy(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  function openTask(task: DevelopmentTask) {
+    const target = resolveActionLink(task.action_link);
+    if (!target) return;
+    if (target.kind === 'sheet') { onOpenSheet(target.topic); return; }
+    setScreen(target.screen);
+  }
+
+  async function requestReassessment() {
+    try {
+      await apiCreate('app/finance/reassessment-request', {});
+      setRequested(true);
+      setNotice(tx('আবেদন পাঠানো হয়েছে। কর্মকর্তা যোগাযোগ করবেন।',
+                   'Request sent. An officer will be in touch.'));
+    } catch (error) {
+      setNotice(naturalApiError(error, lang));
+    }
+  }
+
+  const doneCount = plan ? plan.total - plan.outstanding : 0;
+
+  return (
+    <>
+      <Header title={tx('উন্নয়ন পরিকল্পনা', 'Development plan')} onBack={() => setScreen('loanResult')} />
+      <RefreshScroll>
+        {busy ? (
+          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+        ) : !plan || plan.total === 0 ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
+            <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '700' }}>
+              {tx('এখনো কোনো কাজ দেওয়া হয়নি', 'No tasks assigned yet')}
+            </Text>
+            <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 8, lineHeight: 20 }}>
+              {tx('মূল্যায়নের পর আপনার জন্য নির্দিষ্ট কাজ এখানে আসবে।',
+                  'Once you have been assessed, the specific steps for you will appear here.')}
+            </Text>
+          </Card>
+        ) : (
+          <>
+            <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
+              <Text style={{ color: colors.ink, fontSize: 15.5, fontWeight: '700' }}>
+                {num(doneCount, lang)} / {num(plan.total, lang)} {tx('সম্পন্ন', 'done')}
+              </Text>
+              <View style={{ height: 8, backgroundColor: colors.line, borderRadius: 999, marginTop: 10, overflow: 'hidden' }}>
+                <View style={{
+                  height: 8,
+                  borderRadius: 999,
+                  backgroundColor: colors.green,
+                  width: `${plan.total ? Math.round((doneCount / plan.total) * 100) : 0}%`,
+                }} />
+              </View>
+              <Text style={{ color: colors.muted, fontSize: 13, marginTop: 10, lineHeight: 19 }}>
+                {plan.outstanding === 0
+                  ? tx('সব কাজ শেষ। এখন আবার মূল্যায়নের আবেদন করতে পারেন।',
+                       'Everything is done. You can ask for a fresh assessment now.')
+                  : tx('প্রতিটি কাজ শেষ হলে আপনার অবস্থান ভালো হবে।',
+                       'Each completed step improves your position.')}
+              </Text>
+            </Card>
+
+            {plan.tasks.map((task) => (
+              <Pressable
+                key={task.id}
+                onPress={() => openTask(task)}
+                disabled={task.done || !task.action_link}
+                accessibilityLabel={lang === 'bn' ? task.title.bn : task.title.en}
+                style={({ pressed }) => [pressed && !task.done && styles.pressed]}
+              >
+                <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14, opacity: task.done ? 0.62 : 1 }}>
+                  <View style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start' }}>
+                    <View style={{
+                      width: 24, height: 24, borderRadius: 12, borderWidth: 2, marginTop: 2,
+                      alignItems: 'center', justifyContent: 'center',
+                      borderColor: task.done ? colors.green : colors.line,
+                      backgroundColor: task.done ? colors.green : 'transparent',
+                    }}>
+                      {task.done ? <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>✓</Text> : null}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{
+                        color: colors.ink, fontSize: 15, fontWeight: '700', lineHeight: 22,
+                        textDecorationLine: task.done ? 'line-through' : 'none',
+                      }}>
+                        {lang === 'bn' ? task.title.bn : task.title.en}
+                      </Text>
+                      {(lang === 'bn' ? task.detail.bn : task.detail.en) ? (
+                        <Text style={{ color: colors.muted, fontSize: 13, marginTop: 4, lineHeight: 19 }}>
+                          {lang === 'bn' ? task.detail.bn : task.detail.en}
+                        </Text>
+                      ) : null}
+                      <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, alignItems: 'center' }}>
+                        {task.due_on ? (
+                          <Text style={{ color: colors.muted, fontSize: 12.5 }}>
+                            {tx('সময়সীমা', 'Due')}: {String(task.due_on).slice(0, 10)}
+                          </Text>
+                        ) : null}
+                        {!task.done && task.action_link ? (
+                          <Text style={{ color: colors.maroon, fontSize: 12.5, fontWeight: '700' }}>
+                            {tx('শুরু করুন →', 'Start →')}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </View>
+                  </View>
+                </Card>
+              </Pressable>
+            ))}
+
+            {notice ? (
+              <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 14 }}>
+                <Text style={{ color: colors.ink, fontSize: 13.5, lineHeight: 20 }}>{notice}</Text>
+              </Card>
+            ) : null}
+
+            {plan.can_request_reassessment && !requested ? (
+              <View style={{ paddingHorizontal: 16, marginTop: 16 }}>
+                <AppButton title={tx('পুনরায় মূল্যায়নের আবেদন', 'Request reassessment')} onPress={requestReassessment} />
+              </View>
+            ) : null}
+          </>
+        )}
+
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+/**
+ * A reason code's label describes the finding, not the change. "Low behavioural
+ * assessment result" printed under "What improved" tells the farmer the opposite
+ * of what happened, so the sentence is built from how the item moved.
+ */
+function changePhrase(
+  change: NarrativeChange,
+  lang: Lang,
+  tx: (bn: string, en: string) => string
+): string {
+  const label = lang === 'bn' ? change.bn : change.en;
+  switch (change.kind) {
+    case 'resolved': return `${label} — ${tx('সমাধান হয়েছে', 'resolved')}`;
+    case 'lost': return `${label} — ${tx('আর প্রযোজ্য নয়', 'no longer applies')}`;
+    default: return label;   // 'gained' and 'appeared' read correctly as they are
+  }
+}
+
+/**
+ * `assessmentHistory` (MOB-LON-30). An improvement narrative, not a table of
+ * scores — "you went from C to B, and here is what did it" is the only version of
+ * this screen that changes anyone's behaviour.
+ */
+function AssessmentHistoryScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [history, setHistory] = useState<AssessmentHistory | null>(null);
+  const [busy, setBusy] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiRequest<{ data?: AssessmentHistory }>('app/finance/assessment/history');
+        if (alive) setHistory(res.data ?? null);
+      } catch {
+        if (alive) setHistory(null);
+      } finally {
+        if (alive) setBusy(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const narrative = history?.narrative ?? null;
+  const change = narrative?.score_change ?? 0;
+
+  return (
+    <>
+      <Header title={tx('মূল্যায়নের ইতিহাস', 'Assessment history')} onBack={() => setScreen('loanResult')} />
+      <RefreshScroll>
+        {busy ? (
+          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+        ) : !history || history.entries.length === 0 ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
+            <Text style={{ color: colors.muted, fontSize: 13.5, lineHeight: 20 }}>
+              {tx('এখনো কোনো মূল্যায়ন হয়নি।', 'No assessments yet.')}
+            </Text>
+          </Card>
+        ) : (
+          <>
+            {narrative ? (
+              <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
+                <Text style={{ color: colors.ink, fontSize: 15.5, fontWeight: '700', lineHeight: 23 }}>
+                  {tx('আগে', 'Previous')}: {tx('গ্রেড', 'Grade')} {narrative.previous.grade} — {num(narrative.previous.score, lang)}
+                  {'  ·  '}
+                  {tx('এখন', 'Current')}: {tx('গ্রেড', 'Grade')} {narrative.current.grade} — {num(narrative.current.score, lang)}
+                </Text>
+                <Text style={{
+                  color: change > 0 ? colors.green : change < 0 ? colors.gold : colors.muted,
+                  fontSize: 14, fontWeight: '700', marginTop: 8,
+                }}>
+                  {change === 0
+                    ? tx('স্কোর অপরিবর্তিত', 'Score unchanged')
+                    : `${change > 0 ? '▲' : '▼'} ${num(Math.abs(change), lang)} ${tx('পয়েন্ট', 'points')}`}
+                </Text>
+                {narrative.actions_completed > 0 ? (
+                  <Text style={{ color: colors.muted, fontSize: 13, marginTop: 6, lineHeight: 19 }}>
+                    {num(narrative.actions_completed, lang)} {tx('টি কাজ সম্পন্ন হয়েছে', 'actions completed since then')}
+                  </Text>
+                ) : null}
+
+                {narrative.improved.length ? (
+                  <View style={{ marginTop: 14 }}>
+                    <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '700', letterSpacing: 0.3 }}>
+                      {tx('যা উন্নত হয়েছে', 'What improved')}
+                    </Text>
+                    {narrative.improved.map((x, i) => (
+                      <Text key={i} style={{ color: colors.ink, fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
+                        ✓ {changePhrase(x, lang, tx)}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+
+                {narrative.deteriorated.length ? (
+                  <View style={{ marginTop: 14 }}>
+                    <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '700', letterSpacing: 0.3 }}>
+                      {tx('যা দুর্বল হয়েছে', 'What weakened')}
+                    </Text>
+                    {narrative.deteriorated.map((x, i) => (
+                      <Text key={i} style={{ color: colors.ink, fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
+                        • {changePhrase(x, lang, tx)}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+              </Card>
+            ) : null}
+
+            <SectionTitle title={tx('সব মূল্যায়ন', 'All assessments')} />
+            {history.entries.map((e) => (
+              <Card key={`${e.application_code}-${e.sequence_no}`} style={{ marginHorizontal: 16, marginTop: 10, padding: 14 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                  <GradeBadge grade={e.grade} size={40} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.ink, fontSize: 15, fontWeight: '700' }}>
+                      {num(e.score, lang)} / {num(100, lang)} · {lang === 'bn' ? e.grade_label.bn : e.grade_label.en}
+                    </Text>
+                    <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 3 }}>
+                      {e.application_code} · {financeLabel(e.readiness_status, lang)}
+                    </Text>
+                  </View>
+                </View>
+              </Card>
+            ))}
+          </>
+        )}
 
         <OfficerHelpStrip district={user?.district} />
         <View style={{ height: 28 }} />

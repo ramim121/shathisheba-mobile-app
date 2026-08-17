@@ -72,7 +72,11 @@ export type Screen =
   | 'loanApplyProfile'
   | 'loanApplyConsent'
   | 'loanApplyDone'
-  | 'loanStatus';
+  | 'loanStatus'
+  // Feature 2 — assessment outcome
+  | 'loanResult'
+  | 'developmentPlan'
+  | 'assessmentHistory';
 
 // ---------------------------------------------------------------------------
 // Finance
@@ -115,6 +119,97 @@ export type ReadinessResult = {
     deeplink: string | null;
   }[];
   created_at?: string;
+};
+
+// The farmer's view of a credit assessment (SRS §15.4).
+//
+// Deliberately narrower than what the console holds. MOB-LON-26 forbids numeric
+// weights, per-criterion ratings, the scorecard formula, internal reason codes
+// and raw mPowerU output from reaching the app — so none of them have a field
+// here. The server does the filtering; this type is the second lock.
+export type CreditAssessment = {
+  application_code: string;
+  sequence_no: number;
+  assessed_at: string;
+  score: number;
+  grade: FinanceGrade;
+  grade_label: { bn: string; en: string };
+  readiness_status: string;
+  readiness_label: { bn: string; en: string };
+  data_confidence: 'low' | 'medium' | 'high';
+  confidence_label: { bn: string; en: string };
+  /** P7 — the borrower's own standing, before any project safeguards. */
+  inherent_grade: FinanceGrade | null;
+  /** P7 — what the project structure makes possible. Null when nothing changed. */
+  structured_readiness: string | null;
+  structured_readiness_label: { bn: string; en: string } | null;
+  requested_amount: number;
+  recommended_amount: number | null;
+  pathway: { code: string; label_bn: string; label_en: string } | null;
+  strengths: { bn: string; en: string }[];
+  improvements: { bn: string; en: string }[];
+  blocked: boolean;
+  blocked_reasons: {
+    bn: string; en: string;
+    action_bn: string | null; action_en: string | null;
+  }[];
+};
+
+export type AssessmentEnvelope = {
+  state: 'not_assessed' | 'assessed' | 'blocked';
+  assessment: CreditAssessment | null;
+};
+
+export type DevelopmentTask = {
+  id: string;
+  title: { bn: string; en: string };
+  detail: { bn: string | null; en: string | null };
+  action_link: string | null;
+  due_on: string | null;
+  status: 'assigned' | 'in_progress' | 'submitted' | 'verified' | 'waived';
+  done: boolean;
+};
+
+export type DevelopmentPlan = {
+  tasks: DevelopmentTask[];
+  total: number;
+  outstanding: number;
+  can_request_reassessment: boolean;
+};
+
+export type AssessmentHistory = {
+  entries: {
+    sequence_no: number;
+    application_code: string;
+    score: number;
+    grade: FinanceGrade;
+    grade_label: { bn: string; en: string };
+    readiness_status: string;
+    data_confidence: string;
+    assessed_at: string;
+  }[];
+  /** Null until there are two assessments to compare. */
+  narrative: {
+    previous: { score: number; grade: FinanceGrade; grade_label: { bn: string; en: string }; assessed_at: string };
+    current: { score: number; grade: FinanceGrade; grade_label: { bn: string; en: string }; assessed_at: string };
+    score_change: number;
+    grade_changed: boolean;
+    /**
+     * `kind` says how the item moved, because the label alone reads wrong out of
+     * context: a negative code that disappeared is good news, but its text still
+     * describes the problem. The screen phrases each kind rather than printing
+     * the raw label under a heading that contradicts it.
+     */
+    improved: NarrativeChange[];
+    deteriorated: NarrativeChange[];
+    actions_completed: number;
+  } | null;
+};
+
+export type NarrativeChange = {
+  bn: string;
+  en: string;
+  kind: 'resolved' | 'gained' | 'appeared' | 'lost';
 };
 
 export type ConfidenceSignal = {
