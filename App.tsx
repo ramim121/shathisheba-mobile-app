@@ -33,6 +33,8 @@ import type {
   ApiRow, ApiState, AppRole, AuthUser, CattleAiResult, ChatMessage, Lang, LearnCat, LearnMod,
   ListingDraft, LocationState, MainTab, PreferenceKey, PreferenceOption, PreferenceSection,
   Screen, TrainingContentKind, TrainingModule, WeatherApiState,
+  FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
+  LoanProduct, LoanQuote, LoanDraft, RepaymentMode,
 } from './src/types';
 import {
   analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
@@ -45,10 +47,28 @@ import {
   apiCreate, apiList, apiRequest, apiUrl, authHeaders, loadingStore, naturalApiError, refreshStore,
   setApiAuthToken, setAuthExpiredHandler, staleStore, uploadImage, weatherApiUrl,
 } from './src/api/client';
+import {
+  GRADE_COLORS, GRADE_TINTS, financeLabel, resolveActionLink, GUIDANCE_TOPICS,
+  REPAYMENT_MODES, PENDING_ACTION_LABEL, parseDigits,
+} from './src/finance/helpers';
 
 
 
 // Draft for the livestock "List for Sale" flow (form -> measure -> price).
+function makeLoanDraft(): LoanDraft {
+  return {
+    product: null,
+    amount: 0,
+    tenureMonths: 12,
+    repaymentMode: 'monthly',
+    purposeCode: 'livestock_purchase',
+    purposeText: '',
+    quote: null,
+    consented: false,
+    needsCorrection: false,
+  };
+}
+
 function makeListingDraft(): ListingDraft {
   return {
     categorySlug: 'livestock',
@@ -980,6 +1000,18 @@ export default function App() {
   const [lang, setLang] = useState<Lang>('bn');
   const [cattleImage, setCattleImage] = useState<string | null>(null);
   const [listingDraft, setListingDraft] = useState<ListingDraft>(makeListingDraft);
+  // Finance state is hoisted here for the same reason ListingDraft is: there is
+  // no navigation stack, so anything that must survive a screen change lives in
+  // the root and is passed down.
+  const [loanDraft, setLoanDraft] = useState<LoanDraft>(makeLoanDraft);
+  const [readinessPart, setReadinessPart] = useState<'core' | 'deep'>('core');
+  const [readinessResult, setReadinessResult] = useState<ReadinessResult | null>(null);
+  const [guidanceTopic, setGuidanceTopic] = useState<string>('clear_arrears');
+  const [loanSubmission, setLoanSubmission] = useState<ApiRow | null>(null);
+  const patchLoanDraft = useCallback(
+    (patch: Partial<LoanDraft>) => setLoanDraft((current) => ({ ...current, ...patch })),
+    [],
+  );
   const patchDraft = (p: Partial<ListingDraft>) => setListingDraft((d) => ({ ...d, ...p }));
   const prefsSeeded = useRef(false);
   const [selectedPreferenceCategories, setSelectedPreferenceCategories] = useState<PreferenceKey[]>(['cattle']);
@@ -1405,6 +1437,51 @@ async function sendApaMessage(text: string) {
       marketUpdates: <MarketUpdates setScreen={go} onSelect={(id) => { setSelectedMarketId(id); go('marketDetail'); }} />,
       marketDetail: <MarketDetail setScreen={go} id={selectedMarketId} />,
       officers: <OfficersScreen setScreen={go} />,
+      financeReadinessIntro: <FinanceReadinessIntro setScreen={go} />,
+      financeReadinessQuiz: (
+        <FinanceReadinessQuiz
+          setScreen={go}
+          part={readinessPart}
+          onFinished={(result) => { setReadinessResult(result); go('financeReadinessResult'); }}
+        />
+      ),
+      financeReadinessResult: (
+        <FinanceReadinessResult
+          setScreen={go}
+          result={readinessResult}
+          onContinuePart2={() => { setReadinessPart('deep'); go('financeReadinessQuiz'); }}
+          onOpenSheet={(topic) => { setGuidanceTopic(topic); go('financeGuidanceSheet'); }}
+        />
+      ),
+      financeGuidanceSheet: <FinanceGuidanceSheet setScreen={go} topic={guidanceTopic} />,
+      financeHub: <FinanceHub setScreen={go} onPickProduct={() => go('loanApplyType')} />,
+      loanApplyType: (
+        <LoanApplyType
+          setScreen={go}
+          onSelect={(product) => {
+            patchLoanDraft({
+              product,
+              amount: Number(product.min_amount) || 0,
+              tenureMonths: product.allowed_tenures[0] ?? 12,
+              repaymentMode: (product.allowed_repayment_modes[0] as RepaymentMode) ?? 'monthly',
+              quote: null,
+            });
+            go('loanApplyDetails');
+          }}
+        />
+      ),
+      loanApplyDetails: <LoanApplyDetails setScreen={go} draft={loanDraft} patchDraft={patchLoanDraft} />,
+      loanSchedulePreview: <LoanSchedulePreview setScreen={go} draft={loanDraft} />,
+      loanApplyProfile: <LoanApplyProfile setScreen={go} draft={loanDraft} patchDraft={patchLoanDraft} />,
+      loanApplyConsent: (
+        <LoanApplyConsent
+          setScreen={go}
+          draft={loanDraft}
+          onSubmitted={(result) => { setLoanSubmission(result); setLoanDraft(makeLoanDraft()); }}
+        />
+      ),
+      loanApplyDone: <LoanApplyDone setScreen={go} result={loanSubmission} />,
+      loanStatus: <LoanStatus setScreen={go} />,
       saleCategories: <SaleCategories setScreen={go} patchDraft={patchDraft} />,
       livestock: <Livestock setScreen={go} />,
       cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
@@ -2410,12 +2487,13 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
         <View style={styles.metricDivider} />
         <MetricCard value={amount(Number(homeStats?.earnings ?? 0), lang)} label={tx('আয়', 'Earnings')} icon="৳" tone="green" />
       </View>
+      <FinancePassportCard setScreen={setScreen} />
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
         <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" highlight onPress={() => setScreen('saleCategories')} />
         <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" highlight onPress={() => openBuy('shop')} />
         <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} />
-        <ServiceCard icon="🤝" title={tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')} sub={tx('চুক্তি চাষ ও সকল প্রকল্প', 'Contract farming & all projects')} tone="green" onPress={() => openProjects('all')} />
+        <ServiceCard icon="🤝" title={tx('ঋণ ও প্রকল্প', 'Finance & Projects')} sub={tx('ঋণের আবেদন ও চুক্তি চাষ', 'Loan application & contract farming')} tone="green" onPress={() => setScreen('financeHub')} />
       </View>
       <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
         <View style={styles.homeApaIcon}>
@@ -5634,6 +5712,9 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
     { icon: '🏦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
     { icon: '🌾', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
     { icon: '🪪', title: tx('KYC ডকুমেন্ট', 'KYC Documents'), sub: tx('NID, কাগজপত্র', 'NID, papers'), target: 'menuKyc' },
+    // Secondary entry point to the finance feature, directly above My Listings
+    // (MOB-RDY-05).
+    { icon: '🧭', title: tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness'), sub: tx('আপনার ঋণ প্রস্তুতি দেখুন', 'See your finance readiness'), target: 'financeReadinessResult' },
     { icon: '🏷️', title: tx('আমার বিক্রির তালিকা', 'My Listings'), sub: tx('তালিকা ও অনুমোদনের অবস্থা', 'Listings & approval status'), target: 'myListings' },
     { icon: '🗂️', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
     { icon: '🌐', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
@@ -6226,4 +6307,1653 @@ function SuccessScreen({
   );
 }
 
+// ===========================================================================
+// FINANCE — Feature 1 (Readiness) and Feature 2 (Loan application)
+//
+// Screens use the existing shared primitives (Header, Card, AppButton, Shell,
+// RefreshScroll, ApiStatus) so caching, the global loader, pull-to-refresh and
+// humanised errors behave exactly as they do everywhere else.
+//
+// Finance-specific styling lives in the local `fin` StyleSheet below rather than
+// in the shared sheet, so this feature adds no edits to existing style rules.
+//
+// Two rules hold throughout:
+//   * No screen ever displays a weight, a per-question point value or the
+//     formula. The server does not send them (P6).
+//   * Nothing here says "approved" or promises finance. Copy is প্রস্তুতি /
+//     সম্ভাব্য / সুপারিশ — the lender owns the decision (P1).
+// ===========================================================================
 
+const fin = StyleSheet.create({
+  // Home Finance Passport card
+  passport: { marginHorizontal: 16, marginTop: 12, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 },
+  passportBadge: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', borderWidth: 2 },
+  passportBadgeText: { fontSize: 24, fontWeight: '800' },
+  passportKicker: { fontSize: 11, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase' },
+  passportTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', marginTop: 2 },
+  passportSub: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  chip: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1 },
+  chipText: { fontSize: 11.5, fontWeight: '700' },
+  chevron: { color: colors.muted, fontSize: 22, marginLeft: 4 },
+
+  // Ticker
+  ticker: { marginHorizontal: 16, marginTop: 10, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  tickerAmount: { fontSize: 20, fontWeight: '800', color: colors.ink },
+
+  // Quiz
+  quizWrap: { flex: 1, paddingHorizontal: 20, paddingTop: 8 },
+  progressTrack: { height: 6, backgroundColor: colors.rose, borderRadius: 3, marginBottom: 18, overflow: 'hidden' },
+  progressFill: { height: 6, backgroundColor: colors.maroon, borderRadius: 3 },
+  partChip: { alignSelf: 'flex-start', backgroundColor: colors.rose, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5, marginBottom: 14 },
+  partChipText: { color: colors.maroon, fontSize: 12, fontWeight: '700' },
+  question: { color: colors.ink, fontSize: 23, fontWeight: '800', lineHeight: 33 },
+  helperToggle: { color: colors.maroon, fontSize: 13.5, fontWeight: '600', marginTop: 12 },
+  helperBody: { color: colors.muted, fontSize: 13.5, lineHeight: 20, marginTop: 8 },
+  answerStack: { gap: 12, paddingBottom: 8 },
+  answerBtn: { minHeight: 56, borderRadius: 14, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.card,
+               alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 },
+  answerText: { fontSize: 17, fontWeight: '700', color: colors.ink },
+  privacyNote: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 14 },
+
+  // Result
+  scoreWrap: { alignItems: 'center', paddingVertical: 18 },
+  scoreCircle: { width: 104, height: 104, borderRadius: 52, borderWidth: 4, alignItems: 'center', justifyContent: 'center' },
+  scoreLetter: { fontSize: 42, fontWeight: '800' },
+  scoreValue: { fontSize: 34, fontWeight: '800', color: colors.ink, marginTop: 12 },
+  scoreOutOf: { fontSize: 15, color: colors.muted, fontWeight: '600' },
+  selfDeclared: { color: colors.muted, fontSize: 12, marginTop: 6, fontWeight: '600' },
+  barRow: { marginBottom: 12 },
+  barLabelRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
+  barLabel: { color: colors.ink, fontSize: 14, fontWeight: '600' },
+  barValue: { color: colors.maroon, fontSize: 14, fontWeight: '800' },
+  barTrack: { height: 8, backgroundColor: colors.rose, borderRadius: 4, overflow: 'hidden' },
+  barFill: { height: 8, borderRadius: 4, backgroundColor: colors.maroon },
+  listItem: { flexDirection: 'row', gap: 10, marginBottom: 9, alignItems: 'flex-start' },
+  listGlyph: { fontSize: 15, marginTop: 1 },
+  listText: { flex: 1, color: colors.ink, fontSize: 14.5, lineHeight: 21 },
+  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: colors.line },
+  actionTitle: { color: colors.ink, fontSize: 15, fontWeight: '700' },
+  actionSub: { color: colors.muted, fontSize: 12.5, marginTop: 2, lineHeight: 18 },
+  signalRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10 },
+  signalDot: { width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+
+  // Officer strip
+  officerStrip: { marginHorizontal: 16, marginTop: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  officerAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  officerAvatarText: { color: colors.maroon, fontWeight: '800', fontSize: 16 },
+  callBtn: { backgroundColor: colors.maroon, borderRadius: 999, paddingHorizontal: 16, paddingVertical: 9 },
+  callBtnText: { color: '#fff', fontWeight: '700', fontSize: 13.5 },
+
+  // Products
+  productCard: { marginHorizontal: 16, marginTop: 12, padding: 16 },
+  productDim: { opacity: 0.55 },
+  productHead: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  productIcon: { fontSize: 30 },
+  productName: { color: colors.ink, fontSize: 16.5, fontWeight: '800' },
+  productDesc: { color: colors.muted, fontSize: 13, marginTop: 3, lineHeight: 19 },
+  rateBadge: { backgroundColor: colors.goldPale, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },
+  rateBadgeText: { color: '#8A5A00', fontWeight: '800', fontSize: 13 },
+  productMeta: { color: colors.muted, fontSize: 12.5, marginTop: 10 },
+
+  // Amount + quote
+  amountRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6 },
+  amountInput: { flex: 1, borderWidth: 1.5, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14,
+                 paddingVertical: 12, fontSize: 22, fontWeight: '800', color: colors.ink, textAlign: 'right', backgroundColor: colors.card },
+  sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
+  stepBtn: { width: 44, height: 44, borderRadius: 22, borderWidth: 1.5, borderColor: colors.line,
+             alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
+  stepBtnText: { fontSize: 22, fontWeight: '800', color: colors.maroon },
+  sliderTrack: { flex: 1, height: 8, backgroundColor: colors.rose, borderRadius: 4, overflow: 'hidden' },
+  sliderFill: { height: 8, backgroundColor: colors.maroon, borderRadius: 4 },
+  boundsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
+  boundText: { color: colors.muted, fontSize: 11.5 },
+  segmentRow: { flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' },
+  segment: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.card },
+  segmentOn: { borderColor: colors.maroon, backgroundColor: colors.rose },
+  segmentText: { fontSize: 14.5, fontWeight: '700', color: colors.ink },
+  modeCard: { padding: 14, borderRadius: 12, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.card, marginBottom: 8 },
+  modeCardOn: { borderColor: colors.maroon, backgroundColor: colors.rose },
+  quoteCard: { marginHorizontal: 16, marginTop: 14, padding: 16, borderWidth: 1.5, borderColor: colors.maroon },
+  quoteLine: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 },
+  quoteLabel: { color: colors.muted, fontSize: 13.5 },
+  quoteValue: { color: colors.ink, fontSize: 14, fontWeight: '700' },
+  quoteDivider: { height: 1, backgroundColor: colors.line, marginVertical: 8 },
+  emiBlock: { alignItems: 'center', paddingVertical: 10 },
+  emiLabel: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  emiValue: { color: colors.maroon, fontSize: 32, fontWeight: '800', marginTop: 2 },
+  caveat: { color: colors.muted, fontSize: 11.5, textAlign: 'center', marginTop: 10, lineHeight: 17 },
+
+  // Consent
+  consentAllBtn: { padding: 16, borderRadius: 14, borderWidth: 2, borderColor: colors.maroon, backgroundColor: colors.rose,
+                   flexDirection: 'row', alignItems: 'center', gap: 12 },
+  consentCheck: { width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: colors.maroon,
+                  alignItems: 'center', justifyContent: 'center' },
+  consentItem: { flexDirection: 'row', gap: 10, paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: colors.line, alignItems: 'flex-start' },
+
+  // Timeline
+  stageRow: { flexDirection: 'row', gap: 14 },
+  stageRail: { alignItems: 'center', width: 30 },
+  stageDot: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', borderWidth: 2 },
+  stageLine: { width: 2, flex: 1, backgroundColor: colors.line, marginVertical: 2 },
+  stageBody: { flex: 1, paddingBottom: 20 },
+  stageTitle: { fontSize: 15.5, fontWeight: '700', color: colors.ink },
+  stageOwner: { fontSize: 12.5, color: colors.muted, marginTop: 3 },
+  actionBanner: { marginHorizontal: 16, marginTop: 12, padding: 14, borderRadius: 14, backgroundColor: colors.goldPale,
+                  borderWidth: 1, borderColor: '#EBC66A', flexDirection: 'row', alignItems: 'center', gap: 12 },
+});
+
+/** Grade badge used on the home card and the result screens. */
+function GradeBadge({ grade, size = 56, verified }: { grade: FinanceGrade | '?'; size?: number; verified?: boolean }) {
+  const color = GRADE_COLORS[grade];
+  return (
+    <View
+      style={[
+        fin.passportBadge,
+        {
+          width: size, height: size, borderRadius: size / 2,
+          borderColor: color,
+          backgroundColor: verified ? color : GRADE_TINTS[grade],
+        },
+      ]}
+    >
+      <Text style={[fin.passportBadgeText, { color: verified ? '#fff' : color, fontSize: size * 0.42 }]}>{grade}</Text>
+    </View>
+  );
+}
+
+function OutputChip({ label, tone }: { label: string; tone: string }) {
+  return (
+    <View style={[fin.chip, { borderColor: tone + '55', backgroundColor: tone + '14' }]}>
+      <Text style={[fin.chipText, { color: tone }]}>{label}</Text>
+    </View>
+  );
+}
+
+/**
+ * Field officer contact. Required at ten placements (MOB-LON-39); falls back to
+ * central support rather than rendering empty, and reads from cache offline —
+ * a phone number is exactly what a farmer needs when connectivity has failed.
+ */
+function OfficerHelpStrip({ district }: { district?: string | null }) {
+  const { tx, lang } = useLanguage();
+  const officers = useApiList<ApiRow>(`community/officers${district ? `?district=${encodeURIComponent(district)}` : ''}`);
+  const officer = officers.rows[0];
+  const name = officer ? String(officer.name ?? officer.full_name ?? '') : tx('শাথী সেবা সহায়তা', 'Shathi Sheba support');
+  const role = officer
+    ? rowTitle({ title_bn: officer.role_bn, title_en: officer.role }, lang, tx('মাঠ কর্মকর্তা', 'Field officer'))
+    : tx('কেন্দ্রীয় সহায়তা', 'Central support');
+  const phone = officer ? String(officer.phone ?? officer.mobile ?? '') : '16234';
+
+  return (
+    <Card style={fin.officerStrip}>
+      <View style={fin.officerAvatar}>
+        <Text style={fin.officerAvatarText}>{(name || 'S').slice(0, 1)}</Text>
+      </View>
+      <View style={styles.flex}>
+        <Text style={{ color: colors.ink, fontSize: 15, fontWeight: '700' }}>{name}</Text>
+        <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>{role}</Text>
+      </View>
+      <Pressable
+        onPress={() => Linking.openURL(`tel:${phone}`)}
+        accessibilityLabel={tx('কল করুন', 'Call')}
+        style={({ pressed }) => [fin.callBtn, pressed && styles.pressed]}
+      >
+        <Text style={fin.callBtnText}>{tx('কল করুন', 'Call')}</Text>
+      </Pressable>
+    </Card>
+  );
+}
+
+/** Shared fetch for the finance summary that backs the home card and ticker. */
+function useFinanceSummary() {
+  const { user } = useAuth();
+  const tick = useRefreshTick();
+  const [data, setData] = useState<FinanceSummary | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (!user?.id) { setData(null); return; }
+    (async () => {
+      try {
+        const res = await apiRequest<{ data?: FinanceSummary }>('app/finance/summary');
+        if (alive) setData(res.data ?? null);
+      } catch {
+        if (alive) setData(null);
+      }
+    })();
+    return () => { alive = false; };
+  }, [user?.id, tick]);
+  return data;
+}
+
+/**
+ * The home-screen Finance Passport card. Full width, directly below the metrics
+ * band — a ⅓-width tile structurally cannot show Grade, Readiness Status and
+ * Confidence as separate outputs, which P2 requires (decision D1). All three
+ * existing metric tiles are preserved.
+ */
+function FinancePassportCard({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const summary = useFinanceSummary();
+  if (!summary) return null;
+
+  const grade = (summary.grade ?? '?') as FinanceGrade | '?';
+  const verified = summary.state === 'loan_graded';
+  const next = summary.next_payment;
+
+  let kicker = tx('ফাইন্যান্স প্রস্তুতি', 'Finance readiness');
+  let title = tx('আপনি কি ঋণের জন্য প্রস্তুত?', 'Are you finance ready?');
+  let sub = tx('২ মিনিটের চেক নিন', 'Take the 2-minute check');
+  let target: Screen = 'financeReadinessIntro';
+
+  if (summary.state === 'readiness' || summary.state === 'readiness_partial') {
+    kicker = tx('স্ব-ঘোষিত', 'Self-declared');
+    title = tx('সম্ভাব্য প্রস্তুতি স্কোর', 'Indicative readiness score');
+    sub = summary.state === 'readiness_partial'
+      ? tx('১০/২০ প্রশ্ন — ফলাফল আরও নির্ভুল করুন', '10 of 20 answered — make your result more accurate')
+      : `${num(summary.score ?? 0, lang)} / ${num(100, lang)}`;
+    target = 'financeReadinessResult';
+  } else if (summary.state === 'loan_in_progress') {
+    kicker = tx('ঋণ আবেদন', 'Loan application');
+    title = tx('ঋণ আবেদন চলমান', 'Loan application in progress');
+    sub = `${tx('ধাপ', 'Stage')} ${num(summary.stage_index ?? 1, lang)} / ${num(summary.stage_total, lang)}`;
+    target = 'loanStatus';
+  } else if (summary.state === 'loan_graded') {
+    kicker = tx('যাচাইকৃত', 'Verified');
+    title = tx('আপনার ঋণ ঝুঁকি গ্রেড', 'Your credit risk grade');
+    sub = financeLabel(summary.readiness_status, lang);
+    target = 'loanStatus';
+  }
+
+  return (
+    <>
+      <Pressable onPress={() => setScreen(target)} style={({ pressed }) => [pressed && styles.pressed]}>
+        <Card style={fin.passport}>
+          <GradeBadge grade={grade} verified={verified} />
+          <View style={styles.flex}>
+            <Text style={[fin.passportKicker, { color: verified ? GRADE_COLORS[grade] : colors.muted }]}>{kicker}</Text>
+            <Text style={fin.passportTitle}>{title}</Text>
+            <Text style={fin.passportSub}>{sub}</Text>
+            {(summary.readiness_status || summary.data_confidence) && summary.state !== 'not_assessed' ? (
+              <View style={fin.chipRow}>
+                {summary.grade ? <OutputChip label={`${tx('গ্রেড', 'Grade')} ${summary.grade}`} tone={GRADE_COLORS[grade]} /> : null}
+                {summary.readiness_status ? <OutputChip label={financeLabel(summary.readiness_status, lang)} tone={colors.maroon} /> : null}
+                {summary.data_confidence ? (
+                  <OutputChip label={`${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${financeLabel(summary.data_confidence, lang)}`} tone={colors.blue} />
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+          <Text style={fin.chevron}>›</Text>
+        </Card>
+      </Pressable>
+
+      {next ? (
+        <Pressable onPress={() => setScreen('loanStatus')} style={({ pressed }) => [pressed && styles.pressed]}>
+          <Card style={[fin.ticker, next.state === 'overdue' && { borderColor: colors.danger, borderWidth: 1.5 }]}>
+            <View style={styles.flex}>
+              <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '600' }}>{tx('পরবর্তী কিস্তি', 'Next payment')}</Text>
+              <Text style={fin.tickerAmount}>{amount(next.amount, lang)}</Text>
+            </View>
+            <View style={{ alignItems: 'flex-end' }}>
+              <Text style={{
+                fontSize: 13, fontWeight: '800',
+                color: next.state === 'overdue' ? colors.danger : next.state === 'normal' ? colors.muted : colors.gold,
+              }}>
+                {next.state === 'overdue'
+                  ? `${num(Math.abs(next.days_remaining), lang)} ${tx('দিন পার', 'days late')}`
+                  : next.state === 'due_today'
+                    ? tx('আজ পরিশোধ', 'Due today')
+                    : `${num(next.days_remaining, lang)} ${tx('দিন বাকি', 'days left')}`}
+              </Text>
+              <Text style={{ color: colors.muted, fontSize: 11.5, marginTop: 2 }}>{formatDate(next.due_date, lang)}</Text>
+            </View>
+          </Card>
+        </Pressable>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Feature 1 — Readiness
+// ---------------------------------------------------------------------------
+
+function FinanceReadinessIntro({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx } = useLanguage();
+  return (
+    <>
+      <Header title={tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness')} onBack={() => setScreen('home')} />
+      <RefreshScroll>
+        <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 20 }}>
+          <Text style={{ fontSize: 40, textAlign: 'center' }}>🧭</Text>
+          <Text style={{ color: colors.ink, fontSize: 21, fontWeight: '800', textAlign: 'center', marginTop: 10, lineHeight: 30 }}>
+            {tx('আপনি কি ঋণের জন্য প্রস্তুত?', 'Are you ready for finance?')}
+          </Text>
+          <Text style={{ color: colors.muted, fontSize: 14.5, textAlign: 'center', marginTop: 10, lineHeight: 22 }}>
+            {tx(
+              'কয়েকটি সহজ হ্যাঁ/না প্রশ্নের উত্তর দিন। আমরা আপনাকে দেখাব কোথায় আপনি শক্তিশালী এবং কী করলে আপনার সম্ভাবনা বাড়বে।',
+              'Answer a few simple yes/no questions. We will show you where you are strong and what would improve your chances.'
+            )}
+          </Text>
+        </Card>
+
+        <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 16 }}>
+          {[
+            ['১', '1', tx('অংশ ১ — ১০টি প্রশ্ন', 'Part 1 — 10 questions'), tx('প্রায় ৯০ সেকেন্ড। সাথে সাথে ফলাফল।', 'About 90 seconds. Instant result.')],
+            ['২', '2', tx('অংশ ২ — আরও ১০টি', 'Part 2 — 10 more'), tx('ঐচ্ছিক। ফলাফল আরও নির্ভুল হয়।', 'Optional. Makes your result more accurate.')],
+          ].map(([bnNum, enNum, title, sub]) => (
+            <View key={String(enNum)} style={{ flexDirection: 'row', gap: 12, marginBottom: 12, alignItems: 'flex-start' }}>
+              <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: colors.maroon, fontWeight: '800' }}>{tx(String(bnNum), String(enNum))}</Text>
+              </View>
+              <View style={styles.flex}>
+                <Text style={{ color: colors.ink, fontSize: 15, fontWeight: '700' }}>{title}</Text>
+                <Text style={{ color: colors.muted, fontSize: 13, marginTop: 2, lineHeight: 19 }}>{sub}</Text>
+              </View>
+            </View>
+          ))}
+        </Card>
+
+        <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A' }}>
+          <Text style={{ color: '#7A5200', fontSize: 13.5, lineHeight: 20, fontWeight: '600' }}>
+            {tx(
+              'এটি একটি প্রাথমিক ধারণা। এটি ঋণ অনুমোদন নয়।',
+              'This is an initial indication only. It is not a loan approval.'
+            )}
+          </Text>
+        </Card>
+
+        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+          <AppButton title={tx('শুরু করুন', 'Start')} onPress={() => setScreen('financeReadinessQuiz')} />
+        </View>
+      </RefreshScroll>
+    </>
+  );
+}
+
+function FinanceReadinessQuiz({
+  setScreen, part, onFinished,
+}: {
+  setScreen: (screen: Screen) => void;
+  part: 'core' | 'deep';
+  onFinished: (result: ReadinessResult) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const [questions, setQuestions] = useState<ReadinessQuestion[]>([]);
+  const [answers, setAnswers] = useState<Record<string, boolean>>({});
+  const [index, setIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [showHelper, setShowHelper] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiRequest<{ data?: { questions: ReadinessQuestion[] } }>('app/finance/readiness/questions');
+        if (!alive) return;
+        setQuestions(res.data?.questions ?? []);
+      } catch (e) {
+        if (alive) setError(naturalApiError(e, lang));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [lang]);
+
+  // Branching is evaluated from the server-declared rule only (MOB-RDY-11A).
+  const visible = useMemo(() => {
+    return questions
+      .filter((q) => q.part === part)
+      .filter((q) => {
+        if (!q.branch_parent_id || !q.branch_show_when) return true;
+        const parent = answers[q.branch_parent_id];
+        if (parent === undefined) return false;
+        return parent === (q.branch_show_when === 'yes');
+      })
+      .sort((a, b) => a.sort_order - b.sort_order);
+  }, [questions, part, answers]);
+
+  const current = visible[index];
+  const total = visible.length;
+
+  async function answer(value: boolean) {
+    if (!current) return;
+    const next = { ...answers, [current.id]: value };
+    setAnswers(next);
+    setShowHelper(false);
+
+    if (index + 1 < total) { setIndex(index + 1); return; }
+
+    // Last question of the part — submit everything presented in this part.
+    setSubmitting(true);
+    setError('');
+    try {
+      const payload = visible.map((q) => ({ question_id: q.id, answer: !!next[q.id] }));
+      const res = await apiRequest<{ result?: ReadinessResult }>('app/finance/readiness/submit', {
+        method: 'POST',
+        body: JSON.stringify({ part, answers: payload }),
+      });
+      if (res.result) onFinished(res.result);
+    } catch (e) {
+      // Answers are never lost on failure (MOB-RDY-14).
+      setError(naturalApiError(e, lang));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <>
+        <Header title={tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness')} onBack={() => setScreen('financeReadinessIntro')} />
+        <View style={{ padding: 24 }}>
+          <ActivityIndicator color={colors.maroon} />
+        </View>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Header
+        title={tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness')}
+        onBack={() => (index > 0 ? setIndex(index - 1) : setScreen('financeReadinessIntro'))}
+        right={total ? `${tx('প্রশ্ন', 'Question')} ${num(index + 1, lang)} / ${num(total, lang)}` : undefined}
+      />
+      <View style={fin.quizWrap}>
+        <View style={fin.progressTrack}>
+          <View style={[fin.progressFill, { width: `${total ? ((index + 1) / total) * 100 : 0}%` }]} />
+        </View>
+
+        <View style={fin.partChip}>
+          <Text style={fin.partChipText}>{part === 'core' ? tx('অংশ ১', 'Part 1') : tx('অংশ ২', 'Part 2')}</Text>
+        </View>
+
+        {current ? (
+          <>
+            <Text style={fin.question}>{lang === 'bn' ? current.question_bn : current.question_en}</Text>
+            {(current.helper_bn || current.helper_en) ? (
+              <>
+                <Pressable onPress={() => setShowHelper((v) => !v)} hitSlop={8}>
+                  <Text style={fin.helperToggle}>▸ {tx('কেন জিজ্ঞাসা করছি', 'Why we ask')}</Text>
+                </Pressable>
+                {showHelper ? (
+                  <Text style={fin.helperBody}>{lang === 'bn' ? current.helper_bn : current.helper_en}</Text>
+                ) : null}
+              </>
+            ) : null}
+          </>
+        ) : (
+          <Text style={fin.question}>{tx('কোনো প্রশ্ন পাওয়া যায়নি।', 'No questions available.')}</Text>
+        )}
+
+        <View style={styles.flex} />
+
+        {error ? (
+          <Text style={{ color: colors.danger, fontSize: 13.5, marginBottom: 10, lineHeight: 20 }}>{error}</Text>
+        ) : null}
+
+        <View style={fin.answerStack}>
+          <Pressable
+            disabled={submitting || !current}
+            onPress={() => answer(true)}
+            style={({ pressed }) => [fin.answerBtn, pressed && styles.pressed]}
+            accessibilityLabel={tx('হ্যাঁ', 'Yes')}
+          >
+            <Text style={[fin.answerText, { color: colors.green }]}>✓</Text>
+            <Text style={fin.answerText}>{tx('হ্যাঁ', 'Yes')}</Text>
+          </Pressable>
+          <Pressable
+            disabled={submitting || !current}
+            onPress={() => answer(false)}
+            style={({ pressed }) => [fin.answerBtn, pressed && styles.pressed]}
+            accessibilityLabel={tx('না', 'No')}
+          >
+            <Text style={[fin.answerText, { color: colors.danger }]}>✕</Text>
+            <Text style={fin.answerText}>{tx('না', 'No')}</Text>
+          </Pressable>
+        </View>
+
+        <Text style={fin.privacyNote}>
+          {tx('আপনার উত্তর গোপন থাকবে। "হ্যাঁ" সবসময় ভালো উত্তর।', 'Your answers stay private. "Yes" is always the favourable answer.')}
+        </Text>
+        {submitting ? <ActivityIndicator color={colors.maroon} style={{ marginTop: 10 }} /> : null}
+      </View>
+    </>
+  );
+}
+
+function FinanceReadinessResult({
+  setScreen, result, onContinuePart2, onOpenSheet,
+}: {
+  setScreen: (screen: Screen) => void;
+  result: ReadinessResult | null;
+  onContinuePart2: () => void;
+  onOpenSheet: (topic: string) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [signals, setSignals] = useState<ConfidenceSignal[]>([]);
+  const [loaded, setLoaded] = useState<ReadinessResult | null>(result);
+  const [showAllActions, setShowAllActions] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (!result) {
+          const res = await apiRequest<{ data?: ReadinessResult }>('app/finance/readiness/latest');
+          if (alive && res.data) setLoaded(res.data);
+        }
+        const sig = await apiRequest<{ data?: ConfidenceSignal[] }>('app/finance/readiness/signals');
+        if (alive) setSignals(sig.data ?? []);
+      } catch {
+        /* the result screen still renders from whatever it already has */
+      }
+    })();
+    return () => { alive = false; };
+  }, [result]);
+
+  const r = loaded;
+  if (!r) {
+    return (
+      <>
+        <Header title={tx('আপনার ফলাফল', 'Your result')} onBack={() => setScreen('home')} />
+        <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+      </>
+    );
+  }
+
+  const provisional = r.depth === 'core';
+  const actions = showAllActions ? r.actions : r.actions.slice(0, 5);
+
+  function runAction(link: string | null) {
+    const target = resolveActionLink(link);
+    if (!target) return;
+    if (target.kind === 'sheet') { onOpenSheet(target.topic); return; }
+    setScreen(target.screen);
+  }
+
+  return (
+    <>
+      <Header
+        title={tx('আপনার ফলাফল', 'Your result')}
+        onBack={() => setScreen('home')}
+        right={tx('আবার', 'Retake')}
+        onRightPress={() => setScreen('financeReadinessIntro')}
+      />
+      <RefreshScroll>
+        {/* ① Score header — grade, readiness and confidence as three separate outputs (P2) */}
+        <Card style={{ marginHorizontal: 16, marginTop: 14, paddingVertical: 8 }}>
+          <View style={fin.scoreWrap}>
+            <View style={[fin.scoreCircle, { borderColor: GRADE_COLORS[r.grade], backgroundColor: GRADE_TINTS[r.grade] }]}>
+              <Text style={[fin.scoreLetter, { color: GRADE_COLORS[r.grade] }]}>{r.grade}</Text>
+            </View>
+            <Text style={fin.scoreValue}>
+              {num(r.score, lang)}<Text style={fin.scoreOutOf}> / {num(100, lang)}</Text>
+            </Text>
+            <Text style={{ color: GRADE_COLORS[r.grade], fontWeight: '700', fontSize: 15, marginTop: 4 }}>
+              {lang === 'bn' ? r.grade_label.bn : r.grade_label.en}
+            </Text>
+            <Text style={fin.selfDeclared}>{tx('স্ব-ঘোষিত মূল্যায়ন', 'Self-declared assessment')}</Text>
+
+            <View style={[fin.chipRow, { justifyContent: 'center', marginTop: 12 }]}>
+              <OutputChip label={`${tx('গ্রেড', 'Grade')} ${r.grade}`} tone={GRADE_COLORS[r.grade]} />
+              <OutputChip label={financeLabel(r.readiness_status, lang)} tone={colors.maroon} />
+              <OutputChip label={`${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${financeLabel(r.data_confidence, lang)}`} tone={colors.blue} />
+            </View>
+          </View>
+        </Card>
+
+        {/* Gate / risk flag lead with the single corrective action (ENG-06) */}
+        {r.gate_triggered ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14, backgroundColor: '#F8EAE9', borderWidth: 1, borderColor: '#E5B5B1' }}>
+            <Text style={{ color: '#8A2F28', fontWeight: '800', fontSize: 15 }}>{tx('এখনই সম্ভব নয়', 'Not possible yet')}</Text>
+            <Text style={{ color: '#8A2F28', fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
+              {tx('বৈধ এনআইডি ছাড়া কোনো ঋণ সম্ভব নয়। এটিই আপনার প্রথম কাজ।',
+                  'No finance is possible without a valid National ID. This is your first step.')}
+            </Text>
+            <View style={{ marginTop: 12 }}>
+              <AppButton title={tx('এনআইডি যোগ করুন', 'Add your NID')} onPress={() => setScreen('menuKyc')} />
+            </View>
+          </Card>
+        ) : null}
+
+        {r.risk_flag === 'ARREARS' ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A' }}>
+            <Text style={{ color: '#7A5200', fontWeight: '800', fontSize: 15 }}>{tx('বকেয়া কিস্তি আছে', 'You have overdue instalments')}</Text>
+            <Text style={{ color: '#7A5200', fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
+              {tx('এটি সবচেয়ে জরুরি বিষয়। এটি ঠিক হলে আপনার অবস্থান অনেক ভালো হবে।',
+                  'This matters most. Clearing it will improve your position substantially.')}
+            </Text>
+            <View style={{ marginTop: 12 }}>
+              <AppButton variant="outline" title={tx('কীভাবে করব', 'How to fix this')} onPress={() => onOpenSheet('clear_arrears')} />
+            </View>
+          </Card>
+        ) : null}
+
+        {/* ② Part 2 continuation — honest that the score can move either way */}
+        {provisional ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 16, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A' }}>
+            <Text style={{ color: '#7A5200', fontWeight: '800', fontSize: 15.5 }}>
+              {tx('এটি প্রাথমিক ফলাফল', 'This is a provisional result')}
+            </Text>
+            <Text style={{ color: '#7A5200', fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
+              {tx('বাকি ১০টি প্রশ্নের উত্তর দিলে স্কোর বাড়তে বা কমতে পারে।',
+                  'Your score may go up or down once you answer the remaining 10 questions.')}
+            </Text>
+            <View style={{ marginTop: 12 }}>
+              <AppButton title={tx('আরও ১০টি প্রশ্নের উত্তর দিন', 'Answer 10 more questions')} onPress={onContinuePart2} />
+            </View>
+          </Card>
+        ) : null}
+
+        {/* ③ Category breakdown — percentages only, never weights (P6) */}
+        <SectionTitle title={tx('বিস্তারিত', 'Breakdown')} />
+        <Card style={{ marginHorizontal: 16, padding: 16 }}>
+          {[
+            [tx('পরিচয় ও কাগজপত্র', 'Identity & documents'), r.categories.kyc],
+            [tx('উদ্যোগ ও সম্পদ', 'Enterprise & assets'), r.categories.enterprise],
+            [tx('আর্থিক অবস্থা', 'Financial position'), r.categories.financial],
+          ].map(([label, value]) => (
+            <View key={String(label)} style={fin.barRow}>
+              <View style={fin.barLabelRow}>
+                <Text style={fin.barLabel}>{label}</Text>
+                <Text style={fin.barValue}>{num(Number(value), lang)}%</Text>
+              </View>
+              <View style={fin.barTrack}>
+                <View style={[fin.barFill, { width: `${Math.max(0, Math.min(100, Number(value)))}%` }]} />
+              </View>
+            </View>
+          ))}
+        </Card>
+
+        {/* ④ Profile strength — what we can already verify (ENG-08 / MOB-RDY-15) */}
+        <SectionTitle title={tx('প্রোফাইলের শক্তি', 'Profile strength')} />
+        <Card style={{ marginHorizontal: 16, padding: 16 }}>
+          <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 19, marginBottom: 6 }}>
+            {tx('আপনার দেওয়া তথ্যের কতটুকু আমরা যাচাই করতে পেরেছি',
+                'How much of what you told us we can already verify')}
+          </Text>
+          {signals.map((s) => (
+            <Pressable
+              key={s.code}
+              disabled={s.present}
+              onPress={() => runAction(s.fix_deeplink)}
+              style={({ pressed }) => [fin.signalRow, pressed && !s.present && styles.pressed]}
+            >
+              <View style={[fin.signalDot, { backgroundColor: s.present ? '#E6F5ED' : colors.rose }]}>
+                <Text style={{ color: s.present ? colors.green : colors.muted, fontWeight: '800', fontSize: 12 }}>
+                  {s.present ? '✓' : '+'}
+                </Text>
+              </View>
+              <Text style={[styles.flex, { color: s.present ? colors.ink : colors.muted, fontSize: 14 }]}>
+                {lang === 'bn' ? s.label_bn : s.label_en}
+              </Text>
+              {!s.present ? <Text style={{ color: colors.maroon, fontSize: 18 }}>›</Text> : null}
+            </Pressable>
+          ))}
+        </Card>
+
+        {/* ⑤ Remarks */}
+        {r.strengths.length ? (
+          <>
+            <SectionTitle title={tx('যা শক্তিশালী', 'What is strong')} />
+            <Card style={{ marginHorizontal: 16, padding: 16 }}>
+              {r.strengths.map((s, i) => (
+                <View key={`s${i}`} style={fin.listItem}>
+                  <Text style={[fin.listGlyph, { color: colors.green }]}>✓</Text>
+                  <Text style={fin.listText}>{lang === 'bn' ? s.bn : s.en}</Text>
+                </View>
+              ))}
+            </Card>
+          </>
+        ) : null}
+
+        {r.gaps.length ? (
+          <>
+            <SectionTitle title={tx('যা উন্নত করা দরকার', 'What needs improvement')} />
+            <Card style={{ marginHorizontal: 16, padding: 16 }}>
+              {r.gaps.map((g, i) => (
+                <View key={`g${i}`} style={fin.listItem}>
+                  <Text style={[fin.listGlyph, { color: colors.gold }]}>•</Text>
+                  <Text style={fin.listText}>{lang === 'bn' ? g.bn : g.en}</Text>
+                </View>
+              ))}
+            </Card>
+          </>
+        ) : null}
+
+        {/* ⑥ Recommended actions — ranked, deep-linked */}
+        {r.actions.length ? (
+          <>
+            <SectionTitle title={tx('এখন কী করবেন', 'What to do next')} />
+            <Card style={{ marginHorizontal: 16, padding: 16, paddingBottom: 4 }}>
+              {actions.map((a, i) => (
+                <Pressable key={`a${i}`} onPress={() => runAction(a.deeplink)} style={({ pressed }) => [fin.actionRow, pressed && styles.pressed]}>
+                  <Text style={{ fontSize: 18 }}>{i + 1 === 1 ? '⭐' : '→'}</Text>
+                  <View style={styles.flex}>
+                    <Text style={fin.actionTitle}>{lang === 'bn' ? a.title_bn : a.title_en}</Text>
+                    {(a.rationale_bn || a.rationale_en) ? (
+                      <Text style={fin.actionSub}>{lang === 'bn' ? a.rationale_bn : a.rationale_en}</Text>
+                    ) : null}
+                  </View>
+                  <Text style={{ color: colors.muted, fontSize: 20 }}>›</Text>
+                </Pressable>
+              ))}
+              {r.actions.length > 5 ? (
+                <Pressable onPress={() => setShowAllActions((v) => !v)} style={{ paddingVertical: 12 }}>
+                  <Text style={{ color: colors.maroon, fontWeight: '700', textAlign: 'center' }}>
+                    {showAllActions ? tx('কম দেখুন', 'Show less') : tx('আরও দেখুন', 'See more')}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </Card>
+          </>
+        ) : null}
+
+        {/* Apply CTA only where the status permits it (MOB-RDY-21) */}
+        {['bank_ready_indicative', 'conditionally_ready', 'project_ready'].includes(r.readiness_status) ? (
+          <View style={{ paddingHorizontal: 16, marginTop: 18 }}>
+            <AppButton title={tx('ঋণের জন্য আবেদন করুন', 'Apply for finance')} onPress={() => setScreen('financeHub')} />
+          </View>
+        ) : null}
+
+        {/* ⑦ Local officer */}
+        <SectionTitle title={tx('আপনার এলাকার শাথী কর্মকর্তা', 'Your local Shathi officer')} />
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+function FinanceGuidanceSheet({ setScreen, topic }: { setScreen: (screen: Screen) => void; topic: string }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const t = GUIDANCE_TOPICS[topic];
+
+  return (
+    <>
+      <Header
+        title={t ? (lang === 'bn' ? t.title_bn : t.title_en) : tx('সহায়তা', 'Guidance')}
+        onBack={() => setScreen('financeReadinessResult')}
+      />
+      <RefreshScroll>
+        {t ? (
+          <>
+            <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>
+              <Text style={{ color: colors.ink, fontSize: 15, lineHeight: 23 }}>
+                {lang === 'bn' ? t.intro_bn : t.intro_en}
+              </Text>
+            </Card>
+            <SectionTitle title={tx('ধাপে ধাপে', 'Step by step')} />
+            <Card style={{ marginHorizontal: 16, padding: 16 }}>
+              {(lang === 'bn' ? t.steps_bn : t.steps_en).map((step, i) => (
+                <View key={`step${i}`} style={{ flexDirection: 'row', gap: 12, marginBottom: 14, alignItems: 'flex-start' }}>
+                  <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ color: colors.maroon, fontWeight: '800', fontSize: 13 }}>{num(i + 1, lang)}</Text>
+                  </View>
+                  <Text style={[styles.flex, { color: colors.ink, fontSize: 14.5, lineHeight: 21 }]}>{step}</Text>
+                </View>
+              ))}
+            </Card>
+          </>
+        ) : (
+          <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>
+            <Text style={{ color: colors.muted }}>{tx('এই বিষয়ে তথ্য পাওয়া যায়নি।', 'No guidance found for this topic.')}</Text>
+          </Card>
+        )}
+
+        <SectionTitle title={tx('সাহায্য দরকার?', 'Need help?')} />
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Feature 2 — Loan application
+//
+// The farmer uploads nothing (P9). Four short steps: product, request, confirm,
+// consent. All evidence is collected by a field officer in the admin console.
+// ---------------------------------------------------------------------------
+
+function FinanceHub({
+  setScreen, onPickProduct,
+}: {
+  setScreen: (screen: Screen) => void;
+  onPickProduct: () => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const summary = useFinanceSummary();
+  const apps = useApiList<ApiRow>('app/finance/applications');
+
+  const active = apps.rows[0];
+  const hasActive = active && !['closed', 'withdrawn', 'cancelled'].includes(String(active.status));
+
+  return (
+    <>
+      <Header title={tx('ঋণ ও প্রকল্প', 'Finance & Projects')} onBack={() => setScreen('home')} />
+      <RefreshScroll>
+        {hasActive ? (
+          <>
+            <SectionTitle title={tx('আপনার আবেদন', 'Your application')} />
+            <Pressable onPress={() => setScreen('loanStatus')} style={({ pressed }) => [pressed && styles.pressed]}>
+              <Card style={{ marginHorizontal: 16, padding: 16 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                  <Text style={{ fontSize: 28 }}>{String(active.product_icon ?? '💼')}</Text>
+                  <View style={styles.flex}>
+                    <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '800' }}>
+                      {rowTitle({ title_bn: active.product_bn, title_en: active.product_en }, lang, '')}
+                    </Text>
+                    <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>{String(active.application_code)}</Text>
+                  </View>
+                  <Text style={{ color: colors.muted, fontSize: 20 }}>›</Text>
+                </View>
+                <View style={fin.quoteDivider} />
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                  <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('চাহিদা', 'Requested')}</Text>
+                  <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '700' }}>
+                    {amount(Number(active.requested_amount ?? 0), lang)}
+                  </Text>
+                </View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
+                  <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('অবস্থা', 'Status')}</Text>
+                  <Text style={{ color: colors.maroon, fontSize: 14, fontWeight: '700' }}>
+                    {financeLabel(String(active.status), lang)}
+                  </Text>
+                </View>
+              </Card>
+            </Pressable>
+
+            {summary?.pending_user_action ? (
+              <Card style={fin.actionBanner}>
+                <Text style={{ fontSize: 20 }}>!</Text>
+                <View style={styles.flex}>
+                  <Text style={{ color: '#7A5200', fontWeight: '800', fontSize: 14.5 }}>
+                    {tx('আপনার পদক্ষেপ প্রয়োজন', 'Action needed from you')}
+                  </Text>
+                  <Text style={{ color: '#7A5200', fontSize: 13, marginTop: 2 }}>
+                    {(() => {
+                      const l = PENDING_ACTION_LABEL[summary.pending_user_action];
+                      return l ? (lang === 'bn' ? l[0] : l[1]) : summary.pending_user_action;
+                    })()}
+                  </Text>
+                </View>
+              </Card>
+            ) : null}
+
+            <View style={{ paddingHorizontal: 16, marginTop: 16 }}>
+              <AppButton title={tx('অগ্রগতি দেখুন', 'View progress')} onPress={() => setScreen('loanStatus')} />
+            </View>
+          </>
+        ) : (
+          <>
+            <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>
+              <Text style={{ color: colors.ink, fontSize: 17, fontWeight: '800' }}>
+                {tx('ঋণের জন্য আবেদন করুন', 'Apply for finance')}
+              </Text>
+              <Text style={{ color: colors.muted, fontSize: 14, marginTop: 8, lineHeight: 21 }}>
+                {tx(
+                  'আপনাকে কোনো কাগজপত্র আপলোড করতে হবে না। আবেদনের পর মাঠ কর্মকর্তা আপনার সাথে যোগাযোগ করে সব তথ্য সংগ্রহ করবেন।',
+                  'You do not upload any documents. After you apply, a field officer contacts you and collects everything.'
+                )}
+              </Text>
+              {summary && !summary.can_apply && summary.state === 'not_assessed' ? (
+                <View style={{ marginTop: 14 }}>
+                  <AppButton
+                    variant="outline"
+                    title={tx('প্রথমে প্রস্তুতি চেক নিন', 'Take the readiness check first')}
+                    onPress={() => setScreen('financeReadinessIntro')}
+                  />
+                </View>
+              ) : (
+                <View style={{ marginTop: 14 }}>
+                  <AppButton title={tx('শুরু করুন', 'Get started')} onPress={onPickProduct} />
+                </View>
+              )}
+            </Card>
+          </>
+        )}
+
+        <SectionTitle title={tx('প্রকল্প', 'Projects')} />
+        <Pressable onPress={() => setScreen('projects')} style={({ pressed }) => [pressed && styles.pressed]}>
+          <Card style={{ marginHorizontal: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Text style={{ fontSize: 26 }}>🤝</Text>
+            <View style={styles.flex}>
+              <Text style={{ color: colors.ink, fontSize: 15.5, fontWeight: '700' }}>
+                {tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')}
+              </Text>
+              <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>
+                {tx('চুক্তি চাষ ও জামানতবিহীন অর্থায়ন', 'Contract farming & collateral-free finance')}
+              </Text>
+            </View>
+            <Text style={{ color: colors.muted, fontSize: 20 }}>›</Text>
+          </Card>
+        </Pressable>
+
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanApplyType({
+  setScreen, onSelect,
+}: {
+  setScreen: (screen: Screen) => void;
+  onSelect: (product: LoanProduct) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const products = useApiList<LoanProduct>('app/finance/loan-products');
+
+  return (
+    <>
+      <Header title={tx('ঋণের ধরন', 'Choose loan type')} onBack={() => setScreen('financeHub')} right={tx('ধাপ ১/৪', 'Step 1/4')} />
+      <RefreshScroll>
+        <ApiStatus state={products as any} empty={tx('কোনো ঋণ পাওয়া যায়নি।', 'No finance products available.')} />
+        {products.rows.map((p) => {
+          const dim = !p.is_active;
+          return (
+            <Pressable
+              key={p.id}
+              disabled={dim}
+              onPress={() => onSelect(p)}
+              style={({ pressed }) => [pressed && !dim && styles.pressed]}
+            >
+              <Card style={[fin.productCard, dim && fin.productDim]}>
+                <View style={fin.productHead}>
+                  <Text style={fin.productIcon}>{p.icon ?? '💼'}</Text>
+                  <View style={styles.flex}>
+                    <Text style={fin.productName}>{lang === 'bn' ? p.name_bn : p.name_en}</Text>
+                    {(p.description_bn || p.description_en) ? (
+                      <Text style={fin.productDesc}>{lang === 'bn' ? p.description_bn : p.description_en}</Text>
+                    ) : null}
+                  </View>
+                  {p.is_active ? (
+                    <View style={fin.rateBadge}>
+                      <Text style={fin.rateBadgeText}>{num(Number(p.interest_rate_annual), lang)}% {tx('বার্ষিক', 'p.a.')}</Text>
+                    </View>
+                  ) : (
+                    <Badge label={tx('শীঘ্রই আসছে', 'Coming soon')} tone="gold" />
+                  )}
+                </View>
+                {p.is_active ? (
+                  <Text style={fin.productMeta}>
+                    {amount(Number(p.min_amount), lang)} – {amount(Number(p.max_amount), lang)}
+                    {'  ·  '}
+                    {p.allowed_tenures.map((t) => num(t, lang)).join(', ')} {tx('মাস', 'months')}
+                  </Text>
+                ) : null}
+              </Card>
+            </Pressable>
+          );
+        })}
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanApplyDetails({
+  setScreen, draft, patchDraft,
+}: {
+  setScreen: (screen: Screen) => void;
+  draft: LoanDraft;
+  patchDraft: (patch: Partial<LoanDraft>) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const product = draft.product;
+  const [amountText, setAmountText] = useState(String(draft.amount || ''));
+  const [quote, setQuote] = useState<LoanQuote | null>(draft.quote);
+  const [quoting, setQuoting] = useState(false);
+  const [error, setError] = useState('');
+  const purposes = useApiList<ApiRow>('app/finance/purposes');
+
+  const min = Number(product?.min_amount ?? 0);
+  const max = Number(product?.max_amount ?? 0);
+  const step = Number(product?.amount_step ?? 1000);
+
+  // Live quote — recomputes whenever amount, tenure or mode changes.
+  useEffect(() => {
+    if (!product || !draft.amount || draft.amount < min || draft.amount > max) { setQuote(null); return; }
+    let alive = true;
+    const timer = setTimeout(async () => {
+      setQuoting(true);
+      setError('');
+      try {
+        const res = await apiRequest<{ result?: LoanQuote }>('app/finance/quote', {
+          method: 'POST',
+          body: JSON.stringify({
+            product_id: product.id,
+            amount: draft.amount,
+            tenure_months: draft.tenureMonths,
+            repayment_mode: draft.repaymentMode,
+          }),
+        });
+        if (!alive) return;
+        setQuote(res.result ?? null);
+        patchDraft({ quote: res.result ?? null });
+      } catch (e) {
+        if (alive) { setQuote(null); setError(naturalApiError(e, lang)); }
+      } finally {
+        if (alive) setQuoting(false);
+      }
+    }, 350);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [product?.id, draft.amount, draft.tenureMonths, draft.repaymentMode, lang]);
+
+  function setAmount(value: number) {
+    const clamped = Math.max(min, Math.min(max, Math.round(value / step) * step));
+    patchDraft({ amount: clamped });
+    setAmountText(String(clamped));
+  }
+
+  if (!product) {
+    return (
+      <>
+        <Header title={tx('চাহিদা', 'Your request')} onBack={() => setScreen('loanApplyType')} />
+        <View style={{ padding: 24 }}>
+          <Text style={{ color: colors.muted }}>{tx('আগে ঋণের ধরন নির্বাচন করুন।', 'Please choose a loan type first.')}</Text>
+        </View>
+      </>
+    );
+  }
+
+  const pct = max > min ? ((draft.amount - min) / (max - min)) * 100 : 0;
+
+  return (
+    <>
+      <Header title={tx('চাহিদা', 'Your request')} onBack={() => setScreen('loanApplyType')} right={tx('ধাপ ২/৪', 'Step 2/4')} />
+      <RefreshScroll>
+        {/* Amount — slider AND numeric box, two-way synced (MOB-LON-08B) */}
+        <SectionTitle title={tx('কত টাকা প্রয়োজন?', 'How much do you need?')} />
+        <Card style={{ marginHorizontal: 16, padding: 16 }}>
+          <View style={fin.amountRow}>
+            <Text style={{ fontSize: 24, fontWeight: '800', color: colors.maroon }}>৳</Text>
+            <TextInput
+              style={fin.amountInput}
+              value={amountText}
+              keyboardType="number-pad"
+              onChangeText={(t) => { setAmountText(t); patchDraft({ amount: parseDigits(t) }); }}
+              onBlur={() => setAmount(parseDigits(amountText))}
+              accessibilityLabel={tx('ঋণের পরিমাণ', 'Loan amount')}
+            />
+          </View>
+
+          <View style={fin.sliderRow}>
+            <Pressable
+              onPress={() => setAmount(draft.amount - step)}
+              accessibilityLabel={tx('কমান', 'Decrease')}
+              style={({ pressed }) => [fin.stepBtn, pressed && styles.pressed]}
+            >
+              <Text style={fin.stepBtnText}>−</Text>
+            </Pressable>
+            <View style={fin.sliderTrack}>
+              <View style={[fin.sliderFill, { width: `${Math.max(0, Math.min(100, pct))}%` }]} />
+            </View>
+            <Pressable
+              onPress={() => setAmount(draft.amount + step)}
+              accessibilityLabel={tx('বাড়ান', 'Increase')}
+              style={({ pressed }) => [fin.stepBtn, pressed && styles.pressed]}
+            >
+              <Text style={fin.stepBtnText}>+</Text>
+            </Pressable>
+          </View>
+          <View style={fin.boundsRow}>
+            <Text style={fin.boundText}>{amount(min, lang)}</Text>
+            <Text style={fin.boundText}>{amount(max, lang)}</Text>
+          </View>
+        </Card>
+
+        {/* Tenure — restricted to what the product permits (MOB-LON-08F) */}
+        <SectionTitle title={tx('কত সময়ে পরিশোধ করবেন?', 'Over what period will you repay?')} />
+        <View style={{ paddingHorizontal: 16 }}>
+          <View style={fin.segmentRow}>
+            {product.allowed_tenures.map((t) => (
+              <Pressable
+                key={t}
+                onPress={() => patchDraft({ tenureMonths: t })}
+                style={({ pressed }) => [fin.segment, draft.tenureMonths === t && fin.segmentOn, pressed && styles.pressed]}
+              >
+                <Text style={[fin.segmentText, draft.tenureMonths === t && { color: colors.maroon }]}>
+                  {num(t, lang)} {tx('মাস', 'mo')}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
+        {/* Repayment mode */}
+        <SectionTitle title={tx('কীভাবে পরিশোধ করবেন?', 'How will you repay?')} />
+        <View style={{ paddingHorizontal: 16 }}>
+          {REPAYMENT_MODES.filter((m) => product.allowed_repayment_modes.includes(m.key)).map((m) => (
+            <Pressable
+              key={m.key}
+              onPress={() => patchDraft({ repaymentMode: m.key })}
+              style={({ pressed }) => [fin.modeCard, draft.repaymentMode === m.key && fin.modeCardOn, pressed && styles.pressed]}
+            >
+              <Text style={{ color: colors.ink, fontSize: 15.5, fontWeight: '700' }}>{lang === 'bn' ? m.bn : m.en}</Text>
+              <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>{lang === 'bn' ? m.hint_bn : m.hint_en}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        {/* Purpose */}
+        <SectionTitle title={tx('কী কাজে ব্যবহার করবেন?', 'What will you use it for?')} />
+        <View style={{ paddingHorizontal: 16 }}>
+          <View style={fin.segmentRow}>
+            {purposes.rows.map((p) => (
+              <Pressable
+                key={String(p.code)}
+                onPress={() => patchDraft({ purposeCode: String(p.code) })}
+                style={({ pressed }) => [fin.segment, draft.purposeCode === p.code && fin.segmentOn, pressed && styles.pressed]}
+              >
+                <Text style={[fin.segmentText, draft.purposeCode === p.code && { color: colors.maroon }]}>
+                  {String(p.icon ?? '')} {rowTitle({ title_bn: p.label_bn, title_en: p.label_en }, lang, '')}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
+        {/* Live quote (MOB-LON-08C). Per-instalment is the dominant figure. */}
+        <SectionTitle title={tx('আপনার কিস্তি', 'Your instalment')} />
+        {error ? (
+          <Card style={{ marginHorizontal: 16, padding: 14 }}>
+            <Text style={{ color: colors.danger, fontSize: 13.5, lineHeight: 20 }}>{error}</Text>
+          </Card>
+        ) : quote ? (
+          <Card style={fin.quoteCard}>
+            <View style={fin.emiBlock}>
+              <Text style={fin.emiLabel}>{tx('প্রতি কিস্তি', 'Per instalment')}</Text>
+              <Text style={fin.emiValue}>{amount(quote.emi_amount, lang)}</Text>
+              <Text style={{ color: colors.muted, fontSize: 13, marginTop: 4 }}>
+                {num(quote.installment_count, lang)}{tx('টি', '')} {financeLabel(quote.repayment_mode, lang)}
+              </Text>
+            </View>
+            <View style={fin.quoteDivider} />
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('সুদের হার', 'Interest rate')}</Text>
+              <Text style={fin.quoteValue}>{num(quote.interest_rate_annual, lang)}% {tx('বার্ষিক', 'per year')}</Text>
+            </View>
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('ঋণের পরিমাণ', 'Loan amount')}</Text>
+              <Text style={fin.quoteValue}>{amount(quote.principal, lang)}</Text>
+            </View>
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('মেয়াদ', 'Tenure')}</Text>
+              <Text style={fin.quoteValue}>{num(quote.tenure_months, lang)} {tx('মাস', 'months')}</Text>
+            </View>
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('সুদ', 'Interest')}</Text>
+              <Text style={fin.quoteValue}>{amount(quote.total_interest, lang)}</Text>
+            </View>
+            {/* A zero fee is omitted entirely, never rendered as ৳0 (AC-E-17) */}
+            {quote.processing_fee > 0 ? (
+              <View style={fin.quoteLine}>
+                <Text style={fin.quoteLabel}>{tx('প্রসেসিং ফি', 'Processing fee')}</Text>
+                <Text style={fin.quoteValue}>{amount(quote.processing_fee, lang)}</Text>
+              </View>
+            ) : null}
+            <View style={fin.quoteDivider} />
+            <View style={fin.quoteLine}>
+              <Text style={[fin.quoteLabel, { fontWeight: '700', color: colors.ink }]}>{tx('মোট পরিশোধযোগ্য', 'Total payable')}</Text>
+              <Text style={[fin.quoteValue, { fontSize: 16 }]}>{amount(quote.total_payable, lang)}</Text>
+            </View>
+            <Text style={fin.caveat}>
+              {tx('চূড়ান্ত পরিমাণ ও তারিখ অনুমোদনের পর নির্ধারিত হবে।', 'Final amounts and dates are set after approval.')}
+            </Text>
+            <View style={{ marginTop: 6 }}>
+              <AppButton variant="outline" title={tx('সব কিস্তি দেখুন', 'See full schedule')} onPress={() => setScreen('loanSchedulePreview')} />
+            </View>
+          </Card>
+        ) : (
+          <Card style={{ marginHorizontal: 16, padding: 16 }}>
+            {quoting ? <ActivityIndicator color={colors.maroon} /> : (
+              <Text style={{ color: colors.muted, fontSize: 13.5 }}>
+                {tx('পরিমাণ দিন — কিস্তি এখানে দেখানো হবে।', 'Enter an amount and your instalment appears here.')}
+              </Text>
+            )}
+          </Card>
+        )}
+
+        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+          <AppButton
+            title={tx('পরবর্তী', 'Continue')}
+            disabled={!quote}
+            onPress={() => setScreen('loanApplyProfile')}
+          />
+        </View>
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanSchedulePreview({ setScreen, draft }: { setScreen: (screen: Screen) => void; draft: LoanDraft }) {
+  const { tx, lang } = useLanguage();
+  const [rows, setRows] = useState<{ installment_no: number; due_date: string; amount_due: number; balance_after: number }[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!draft.product) return;
+      try {
+        const res = await apiRequest<{ result?: { rows: typeof rows } }>('app/finance/quote/schedule', {
+          method: 'POST',
+          body: JSON.stringify({
+            product_id: draft.product.id,
+            amount: draft.amount,
+            tenure_months: draft.tenureMonths,
+            repayment_mode: draft.repaymentMode,
+          }),
+        });
+        if (alive) setRows(res.result?.rows ?? []);
+      } catch {
+        if (alive) setRows([]);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [draft.product?.id, draft.amount, draft.tenureMonths, draft.repaymentMode]);
+
+  const shown = expanded ? rows : rows.slice(0, 6);
+
+  return (
+    <>
+      <Header title={tx('কিস্তির তালিকা', 'Repayment schedule')} onBack={() => setScreen('loanApplyDetails')} />
+      <RefreshScroll>
+        <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
+          {loading ? <ActivityIndicator color={colors.maroon} /> : shown.map((r) => (
+            <View key={r.installment_no} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10,
+              borderBottomWidth: 1, borderBottomColor: colors.line }}>
+              <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: colors.maroon, fontWeight: '800', fontSize: 12.5 }}>{num(r.installment_no, lang)}</Text>
+              </View>
+              <View style={[styles.flex, { marginLeft: 12 }]}>
+                <Text style={{ color: colors.ink, fontSize: 14.5, fontWeight: '700' }}>{amount(r.amount_due, lang)}</Text>
+                <Text style={{ color: colors.muted, fontSize: 12 }}>{formatDate(r.due_date, lang)}</Text>
+              </View>
+              <Text style={{ color: colors.muted, fontSize: 12 }}>
+                {tx('বাকি', 'left')} {amount(r.balance_after, lang)}
+              </Text>
+            </View>
+          ))}
+          {rows.length > 6 ? (
+            <Pressable onPress={() => setExpanded((v) => !v)} style={{ paddingVertical: 12 }}>
+              <Text style={{ color: colors.maroon, fontWeight: '700', textAlign: 'center' }}>
+                {expanded ? tx('কম দেখুন', 'Show less') : `${tx('সব দেখুন', 'See all')} (${num(rows.length, lang)})`}
+              </Text>
+            </Pressable>
+          ) : null}
+        </Card>
+        <Text style={[fin.caveat, { marginHorizontal: 24 }]}>
+          {tx('তারিখগুলো আনুমানিক। বিতরণের পর চূড়ান্ত হবে।', 'Dates are approximate and are fixed after disbursement.')}
+        </Text>
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanApplyProfile({
+  setScreen, draft, patchDraft,
+}: {
+  setScreen: (screen: Screen) => void;
+  draft: LoanDraft;
+  patchDraft: (patch: Partial<LoanDraft>) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+
+  const rows: [string, string][] = [
+    [tx('নাম', 'Name'), String(user?.full_name ?? user?.display_name ?? '—')],
+    [tx('মোবাইল', 'Mobile'), String(user?.phone ?? '—')],
+    [tx('এনআইডি', 'National ID'), user?.is_kyc_verified ? tx('যাচাই হয়েছে', 'Verified') : tx('যাচাই বাকি', 'Not yet verified')],
+    [tx('জেলা', 'District'), String(user?.district ?? '—')],
+    [tx('উপজেলা', 'Upazila'), String(user?.upazila ?? '—')],
+  ];
+
+  return (
+    <>
+      <Header title={tx('তথ্য নিশ্চিত করুন', 'Confirm your details')} onBack={() => setScreen('loanApplyDetails')} right={tx('ধাপ ৩/৪', 'Step 3/4')} />
+      <RefreshScroll>
+        <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
+          <Text style={{ color: colors.muted, fontSize: 13.5, lineHeight: 20, marginBottom: 10 }}>
+            {tx('শাথী সেবার কাছে আপনার যে তথ্য আছে তা দেখে নিন। এখানে কিছু লিখতে বা আপলোড করতে হবে না।',
+                'Here is what Shathi Sheba already holds. Nothing to type and nothing to upload.')}
+          </Text>
+          {rows.map(([k, v]) => (
+            <View key={k} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 9,
+              borderBottomWidth: 1, borderBottomColor: colors.line }}>
+              <Text style={{ color: colors.muted, fontSize: 14 }}>{k}</Text>
+              <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '700' }}>{v}</Text>
+            </View>
+          ))}
+        </Card>
+
+        <Pressable
+          onPress={() => patchDraft({ needsCorrection: !draft.needsCorrection })}
+          style={({ pressed }) => [pressed && styles.pressed]}
+        >
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <View style={[fin.consentCheck, draft.needsCorrection && { backgroundColor: colors.maroon }]}>
+              {draft.needsCorrection ? <Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text> : null}
+            </View>
+            <Text style={[styles.flex, { color: colors.ink, fontSize: 14, lineHeight: 20 }]}>
+              {tx('কিছু তথ্য ভুল আছে — কর্মকর্তাকে জানান',
+                  'Something here is wrong — flag it for the officer')}
+            </Text>
+          </Card>
+        </Pressable>
+
+        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+          <AppButton title={tx('তথ্য ঠিক আছে', 'Information is correct')} onPress={() => setScreen('loanApplyConsent')} />
+        </View>
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanApplyConsent({
+  setScreen, draft, onSubmitted,
+}: {
+  setScreen: (screen: Screen) => void;
+  draft: LoanDraft;
+  onSubmitted: (result: ApiRow) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const consents = useApiList<ApiRow>('app/finance/consents');
+  const [agreed, setAgreed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const required = consents.rows.filter((c) => Number(c.is_required) === 1);
+
+  async function submit() {
+    if (!draft.product) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      const res = await apiCreate('app/finance/applications', {
+        product_id: draft.product.id,
+        amount: draft.amount,
+        tenure_months: draft.tenureMonths,
+        repayment_mode: draft.repaymentMode,
+        purpose_code: draft.purposeCode,
+        purpose_text: draft.purposeText || undefined,
+        // All six are granted together, but the server still writes one row per
+        // consent, each with its own version (MOB-LON-10A).
+        consents: required.map((c) => String(c.consent_key)),
+      });
+      const result = (res as any).result;
+      if (result) { onSubmitted(result); setScreen('loanApplyDone'); }
+    } catch (e) {
+      setError(naturalApiError(e, lang));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <Header title={tx('সম্মতি', 'Consent')} onBack={() => setScreen('loanApplyProfile')} right={tx('ধাপ ৪/৪', 'Step 4/4')} />
+      <RefreshScroll>
+        <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
+          <Text style={{ color: colors.muted, fontSize: 13.5, lineHeight: 20 }}>
+            {tx('আবেদন করতে নিচের সবকটি অনুমতি প্রয়োজন। প্রতিটি আলাদাভাবে সংরক্ষিত থাকে এবং আপনি পরে প্রত্যাহার করতে পারবেন।',
+                'All of the following are needed to apply. Each is recorded separately and you can withdraw them later.')}
+          </Text>
+        </Card>
+
+        <View style={{ paddingHorizontal: 16, marginTop: 12 }}>
+          <Pressable onPress={() => setAgreed((v) => !v)} style={({ pressed }) => [fin.consentAllBtn, pressed && styles.pressed]}>
+            <View style={[fin.consentCheck, agreed && { backgroundColor: colors.maroon }]}>
+              {agreed ? <Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text> : null}
+            </View>
+            <Text style={[styles.flex, { color: colors.ink, fontSize: 15.5, fontWeight: '700' }]}>
+              {tx('আমি সবগুলোতে সম্মত', 'I agree to all')}
+            </Text>
+          </Pressable>
+        </View>
+
+        <Pressable onPress={() => setExpanded((v) => !v)} style={{ paddingHorizontal: 16, paddingVertical: 14 }}>
+          <Text style={{ color: colors.maroon, fontWeight: '700' }}>
+            {expanded ? tx('বিস্তারিত লুকান', 'Hide details') : `${tx('বিস্তারিত দেখুন', 'See what you are agreeing to')} (${num(required.length, lang)})`}
+          </Text>
+        </Pressable>
+
+        {expanded ? (
+          <Card style={{ marginHorizontal: 16, padding: 16 }}>
+            {required.map((c) => (
+              <View key={String(c.consent_key)} style={fin.consentItem}>
+                <Text style={{ color: colors.green, fontSize: 15 }}>✓</Text>
+                <View style={styles.flex}>
+                  <Text style={{ color: colors.ink, fontSize: 14.5, fontWeight: '700' }}>
+                    {rowTitle({ title_bn: c.title_bn, title_en: c.title_en }, lang, '')}
+                  </Text>
+                  <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2, lineHeight: 18 }}>
+                    {rowBody({ body_bn: c.description_bn, body_en: c.description_en }, lang, '')}
+                  </Text>
+                </View>
+              </View>
+            ))}
+          </Card>
+        ) : null}
+
+        {error ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14 }}>
+            <Text style={{ color: colors.danger, fontSize: 13.5, lineHeight: 20 }}>{error}</Text>
+          </Card>
+        ) : null}
+
+        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+          <AppButton
+            title={submitting ? tx('জমা হচ্ছে…', 'Submitting…') : tx('আবেদন জমা দিন', 'Submit application')}
+            disabled={!agreed || submitting || !required.length}
+            onPress={submit}
+          />
+        </View>
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanApplyDone({ setScreen, result }: { setScreen: (screen: Screen) => void; result: ApiRow | null }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const quote = (result?.quote ?? {}) as Record<string, number>;
+
+  return (
+    <>
+      <Header title={tx('জমা সম্পন্ন', 'Application submitted')} onBack={() => setScreen('financeHub')} />
+      <RefreshScroll>
+        <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 20, alignItems: 'center' }}>
+          <View style={{ width: 62, height: 62, borderRadius: 31, backgroundColor: '#E6F5ED', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ fontSize: 30, color: colors.green }}>✓</Text>
+          </View>
+          <Text style={{ color: colors.ink, fontSize: 19, fontWeight: '800', marginTop: 12, textAlign: 'center' }}>
+            {tx('আবেদন জমা হয়েছে!', 'Your application is in!')}
+          </Text>
+          <Text style={{ color: colors.maroon, fontSize: 14, fontWeight: '700', marginTop: 6 }}>
+            {String(result?.application_code ?? '')}
+          </Text>
+        </Card>
+
+        {quote.emi_amount ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 16 }}>
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('ঋণের পরিমাণ', 'Loan amount')}</Text>
+              <Text style={fin.quoteValue}>{amount(Number(quote.principal ?? 0), lang)}</Text>
+            </View>
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('প্রতি কিস্তি', 'Per instalment')}</Text>
+              <Text style={fin.quoteValue}>{amount(Number(quote.emi_amount ?? 0), lang)}</Text>
+            </View>
+            <View style={fin.quoteLine}>
+              <Text style={fin.quoteLabel}>{tx('মোট পরিশোধযোগ্য', 'Total payable')}</Text>
+              <Text style={fin.quoteValue}>{amount(Number(quote.total_payable ?? 0), lang)}</Text>
+            </View>
+          </Card>
+        ) : null}
+
+        <SectionTitle title={tx('এরপর কী হবে', 'What happens next')} />
+        <Card style={{ marginHorizontal: 16, padding: 16 }}>
+          {[
+            tx('মাঠ কর্মকর্তা ৫ কর্মদিবসের মধ্যে আপনার সাথে যোগাযোগ করবেন।', 'A field officer will contact you within 5 working days.'),
+            tx('তিনি আপনার সব কাগজপত্র সংগ্রহ করবেন — আপনাকে কিছু আপলোড করতে হবে না।', 'They will collect every document — you upload nothing.'),
+            tx('এরপর আপনার আবেদন মূল্যায়ন করে ব্যাংক বা এমএফআই-তে পাঠানো হবে।', 'Your application is then assessed and sent to a partner lender.'),
+          ].map((line, i) => (
+            <View key={`n${i}`} style={{ flexDirection: 'row', gap: 12, marginBottom: 12, alignItems: 'flex-start' }}>
+              <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: colors.maroon, fontWeight: '800', fontSize: 13 }}>{num(i + 1, lang)}</Text>
+              </View>
+              <Text style={[styles.flex, { color: colors.ink, fontSize: 14, lineHeight: 21 }]}>{line}</Text>
+            </View>
+          ))}
+        </Card>
+
+        <OfficerHelpStrip district={user?.district} />
+
+        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+          <AppButton title={tx('অগ্রগতি দেখুন', 'View progress')} onPress={() => setScreen('loanStatus')} />
+        </View>
+      </RefreshScroll>
+    </>
+  );
+}
+
+function LoanStatus({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const [detail, setDetail] = useState<ApiRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const tick = useRefreshTick();
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      try {
+        const list = await apiRequest<{ data?: ApiRow[] }>('app/finance/applications');
+        const first = list.data?.[0];
+        if (!first) { if (alive) { setDetail(null); setLoading(false); } return; }
+        const res = await apiRequest<{ data?: ApiRow }>(`app/finance/applications/${first.application_code}`);
+        if (alive) setDetail(res.data ?? null);
+      } catch (e) {
+        if (alive) setError(naturalApiError(e, lang));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [lang, tick]);
+
+  const stages = (detail?.stages ?? []) as ApiRow[];
+  const pending = detail?.pending_user_action ? String(detail.pending_user_action) : null;
+
+  return (
+    <>
+      <Header title={tx('অগ্রগতি', 'Progress')} onBack={() => setScreen('financeHub')} />
+      <RefreshScroll>
+        {loading ? <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View> : null}
+        {error ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 14 }}>
+            <Text style={{ color: colors.danger, fontSize: 13.5, lineHeight: 20 }}>{error}</Text>
+          </Card>
+        ) : null}
+
+        {!loading && !detail && !error ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>
+            <Text style={{ color: colors.muted, fontSize: 14, lineHeight: 21 }}>
+              {tx('আপনার কোনো চলমান আবেদন নেই।', 'You have no active application.')}
+            </Text>
+          </Card>
+        ) : null}
+
+        {detail ? (
+          <>
+            <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
+              <Text style={{ color: colors.muted, fontSize: 12.5 }}>{String(detail.application_code)}</Text>
+              <Text style={{ color: colors.ink, fontSize: 17, fontWeight: '800', marginTop: 3 }}>
+                {rowTitle({ title_bn: detail.product_bn, title_en: detail.product_en }, lang, '')}
+              </Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 }}>
+                <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('চাহিদা', 'Requested')}</Text>
+                <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '700' }}>
+                  {amount(Number(detail.requested_amount ?? 0), lang)}
+                </Text>
+              </View>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
+                <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('অবস্থা', 'Status')}</Text>
+                <Text style={{ color: colors.maroon, fontSize: 14, fontWeight: '700' }}>
+                  {financeLabel(String(detail.status), lang)}
+                </Text>
+              </View>
+            </Card>
+
+            {pending ? (
+              <Card style={fin.actionBanner}>
+                <Text style={{ fontSize: 20 }}>!</Text>
+                <View style={styles.flex}>
+                  <Text style={{ color: '#7A5200', fontWeight: '800', fontSize: 14.5 }}>
+                    {tx('আপনার পদক্ষেপ প্রয়োজন', 'Action needed from you')}
+                  </Text>
+                  <Text style={{ color: '#7A5200', fontSize: 13, marginTop: 2 }}>
+                    {(() => { const l = PENDING_ACTION_LABEL[pending]; return l ? (lang === 'bn' ? l[0] : l[1]) : pending; })()}
+                  </Text>
+                </View>
+              </Card>
+            ) : null}
+
+            <SectionTitle title={tx('ধাপসমূহ', 'Stages')} />
+            <Card style={{ marginHorizontal: 16, padding: 16 }}>
+              {stages.map((s, i) => {
+                const state = String(s.state);
+                const done = state === 'complete';
+                const active = state === 'active';
+                const tone = done ? colors.green : active ? colors.maroon : colors.line;
+                return (
+                  <View key={String(s.index)} style={fin.stageRow}>
+                    <View style={fin.stageRail}>
+                      <View style={[fin.stageDot, { borderColor: tone, backgroundColor: done ? colors.green : active ? colors.maroon : colors.card }]}>
+                        {done ? <Text style={{ color: '#fff', fontWeight: '800', fontSize: 12 }}>✓</Text> : null}
+                      </View>
+                      {i < stages.length - 1 ? <View style={fin.stageLine} /> : null}
+                    </View>
+                    <View style={fin.stageBody}>
+                      <Text style={[fin.stageTitle, active && { color: colors.maroon }]}>
+                        {rowTitle({ title_bn: s.title_bn, title_en: s.title_en }, lang, '')}
+                      </Text>
+                      {/* Who holds the work right now — the single biggest
+                          anxiety-reducer for someone waiting on a loan. */}
+                      <Text style={fin.stageOwner}>
+                        {tx('দায়িত্বে', 'With')}: {rowTitle({ title_bn: s.owner_bn, title_en: s.owner_en }, lang, '')}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </Card>
+          </>
+        ) : null}
+
+        <OfficerHelpStrip district={user?.district} />
+        <View style={{ height: 28 }} />
+      </RefreshScroll>
+    </>
+  );
+}

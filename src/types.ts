@@ -58,7 +58,143 @@ export type Screen =
   | 'marketUpdates'
   | 'marketDetail'
   | 'officers'
-  | 'inactive';
+  | 'inactive'
+  // Feature 1 — Finance Readiness
+  | 'financeReadinessIntro'
+  | 'financeReadinessQuiz'
+  | 'financeReadinessResult'
+  | 'financeGuidanceSheet'
+  // Feature 2 — Loan application
+  | 'financeHub'
+  | 'loanApplyType'
+  | 'loanApplyDetails'
+  | 'loanSchedulePreview'
+  | 'loanApplyProfile'
+  | 'loanApplyConsent'
+  | 'loanApplyDone'
+  | 'loanStatus';
+
+// ---------------------------------------------------------------------------
+// Finance
+// ---------------------------------------------------------------------------
+
+export type FinanceGrade = 'A' | 'B' | 'C' | 'D';
+
+export type ReadinessQuestion = {
+  id: string;
+  part: 'core' | 'deep';
+  sort_order: number;
+  question_bn: string;
+  question_en: string;
+  helper_bn?: string | null;
+  helper_en?: string | null;
+  /** Server-declared branching — the client evaluates only this rule. */
+  branch_parent_id: string | null;
+  branch_show_when: 'yes' | 'no' | null;
+};
+
+export type ReadinessResult = {
+  assessment_id: string;
+  score: number;
+  grade: FinanceGrade;
+  grade_label: { bn: string; en: string };
+  readiness_status: string;
+  data_confidence: 'low' | 'medium';
+  depth: 'core' | 'full';
+  categories: { kyc: number; enterprise: number; financial: number };
+  gate_triggered: boolean;
+  gate_reason: string | null;
+  risk_flag: string | null;
+  signal_count: number;
+  signals_present: string[];
+  strengths: { bn: string; en: string }[];
+  gaps: { bn: string; en: string }[];
+  actions: {
+    title_bn: string; title_en: string;
+    rationale_bn: string | null; rationale_en: string | null;
+    deeplink: string | null;
+  }[];
+  created_at?: string;
+};
+
+export type ConfidenceSignal = {
+  code: string;
+  label_bn: string;
+  label_en: string;
+  fix_deeplink: string | null;
+  present: boolean;
+};
+
+export type LoanProduct = {
+  id: string;
+  code: string;
+  name_bn: string;
+  name_en: string;
+  description_bn?: string | null;
+  description_en?: string | null;
+  icon?: string | null;
+  interest_rate_annual: string | number;
+  allowed_tenures: number[];
+  allowed_repayment_modes: string[];
+  min_amount: string | number;
+  max_amount: string | number;
+  amount_step: string | number;
+  is_active: boolean;
+  coming_soon: boolean;
+};
+
+export type RepaymentMode = 'weekly' | 'monthly' | 'one_time';
+
+export type LoanQuote = {
+  quote_id: string | null;
+  principal: number;
+  tenure_months: number;
+  repayment_mode: RepaymentMode;
+  interest_rate_annual: number;
+  total_interest: number;
+  processing_fee: number;
+  total_payable: number;
+  installment_count: number;
+  emi_amount: number;
+  final_emi_amount: number;
+  first_due_estimate: string;
+  schedule_preview: {
+    installment_no: number; due_date: string; amount_due: number;
+  }[];
+};
+
+export type LoanDraft = {
+  product: LoanProduct | null;
+  amount: number;
+  tenureMonths: number;
+  repaymentMode: RepaymentMode;
+  purposeCode: string;
+  purposeText: string;
+  quote: LoanQuote | null;
+  consented: boolean;
+  needsCorrection: boolean;
+};
+
+export type FinanceSummary = {
+  state: 'not_assessed' | 'readiness_partial' | 'readiness' | 'loan_in_progress' | 'loan_graded';
+  grade: FinanceGrade | null;
+  score: number | null;
+  readiness_status: string | null;
+  data_confidence: 'low' | 'medium' | null;
+  depth: 'core' | 'full' | null;
+  is_verified: boolean;
+  application_code: string | null;
+  stage_index: number | null;
+  stage_total: number;
+  pending_user_action: string | null;
+  can_take_readiness: boolean;
+  can_apply: boolean;
+  next_payment: {
+    amount: number; due_date: string; days_remaining: number;
+    state: 'normal' | 'due_soon' | 'due_today' | 'overdue';
+    installment_no: number; total_installments: number;
+  } | null;
+};
 
 export type PreferenceKey = 'cattle' | 'crops' | 'fishery' | 'vegetables' | 'fruits';
 
