@@ -9,10 +9,37 @@ import type { ApiRow, Lang } from '../types';
 // (retries, auth, caching) touches one small file rather than the same file as
 // every screen.
 
-export const API_BASE_URL =
+// The backend the app talks to.
+//
+// Development reads EXPO_PUBLIC_API_BASE_URL from .env, which points at whatever
+// LAN address this machine currently has. A release build reads .env.production,
+// which points at the EC2 deployment behind shathisheba.digigramventures.com.
+//
+// The two fallbacks differ on purpose. A shipped APK that quietly falls back to
+// localhost resolves to the *phone itself*: every request fails, the app shows
+// its offline copy, and nothing says the build was misconfigured. So in a release
+// build the fallback is production, and only development falls back to localhost.
+export const PRODUCTION_API_BASE_URL = 'https://shathisheba.digigramventures.com/api/v1';
+
+const configuredBaseUrl =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
   process.env.API_BASE_URL ||
-  'http://localhost:3000/api/v1';
+  (__DEV__ ? 'http://localhost:3000/api/v1' : PRODUCTION_API_BASE_URL);
+
+// SEC-10. Plain HTTP is how you develop against a laptop on the same Wi-Fi; it is
+// not how you ship. Session tokens, phone numbers and loan applications travel
+// over this. A release build pointed at http:// is a configuration mistake, and
+// the safe response is to use production rather than transmit in the clear.
+function resolveBaseUrl(url: string): string {
+  if (__DEV__ || url.startsWith('https://')) return url;
+  console.warn(
+    `[api] Refusing the non-HTTPS base URL "${url}" in a release build; ` +
+      `using ${PRODUCTION_API_BASE_URL}. Set EXPO_PUBLIC_API_BASE_URL in .env.production.`
+  );
+  return PRODUCTION_API_BASE_URL;
+}
+
+export const API_BASE_URL = resolveBaseUrl(configuredBaseUrl);
 
 // No hard-coded fallback. App.tsx previously carried a literal WeatherAPI key
 // here as the last resort, which shipped it in source as well as in the bundle;
