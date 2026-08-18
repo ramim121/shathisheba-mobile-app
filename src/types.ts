@@ -37,6 +37,9 @@ export type Screen =
   | 'inputsForm'
   | 'inputsPrice'
   | 'myListings'
+  | 'listingProgress'
+  | 'myProjects'
+  | 'projectProgress'
   | 'buyCategories'
   | 'buyProducts'
   | 'buyOrder'
@@ -93,6 +96,10 @@ export type ReadinessQuestion = {
   question_en: string;
   helper_bn?: string | null;
   helper_en?: string | null;
+  /** Shown as a tag. The weight behind it is never sent (MOB-RDY-11). */
+  category?: 'kyc' | 'enterprise' | 'financial' | null;
+  /** `gate` suppresses the score on "No"; `risk` overrides the status. */
+  flag?: 'gate' | 'risk' | null;
   /** Server-declared branching — the client evaluates only this rule. */
   branch_parent_id: string | null;
   branch_show_when: 'yes' | 'no' | null;
@@ -100,6 +107,8 @@ export type ReadinessQuestion = {
 
 export type ReadinessResult = {
   assessment_id: string;
+  /** Part-2 questions still to be asked, after branching. Seven when Q9 is No. */
+  part2_pending?: number;
   score: number;
   grade: FinanceGrade;
   grade_label: { bn: string; en: string };
@@ -208,8 +217,21 @@ export type AssessmentHistory = {
 };
 
 // Post-disbursement (MOB-LON-31). Read-only in v1 — there is no in-app payment.
+export type LoanArrears = {
+  is_overdue: boolean;
+  days_past_due: number;
+  /** Which arrears bucket the account has fallen into — decides who follows up. */
+  bucket: 'current' | '1_30' | '31_60' | '61_90' | '90_plus';
+  overdue_amount: number;
+  overdue_installments: number;
+  penalty_accrued: number;
+  oldest_due_date: string | null;
+  officer: { name: string; phone: string; area: string } | null;
+};
+
 export type LoanAccountView = {
   has_account: boolean;
+  arrears?: LoanArrears;
   account: {
     application_code: string;
     principal: number;
@@ -241,6 +263,7 @@ export type LoanAccountView = {
     amount_paid: number;
     status: 'pending' | 'due' | 'paid' | 'partial' | 'overdue' | 'waived';
     days_overdue: number;
+    penalty_accrued: number;
   }[];
   payments: { amount: number; paid_at: string; method: string | null; reference: string | null }[];
 };
@@ -307,6 +330,8 @@ export type LoanDraft = {
   quote: LoanQuote | null;
   consented: boolean;
   needsCorrection: boolean;
+  /** What the farmer says is wrong, passed to the officer with the application. */
+  correctionNote?: string;
 };
 
 export type FinanceSummary = {
@@ -381,7 +406,8 @@ export type ListingDraft = {
   variety: string;               // for inputs: brand / variety name
   unit: string;                  // kg / piece / sack
   ageMonths: string;
-  weightKg: string;              // for inputs this is the quantity in `unit`
+  weightKg: string;              // live weight for cattle; for inputs the quantity in `unit`
+  meatWeightKg: string;          // cattle only: live weight at the dressing yield
   quantity: string;
   description: string;
   aiGenerating: boolean;

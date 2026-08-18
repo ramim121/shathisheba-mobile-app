@@ -13,6 +13,8 @@ export const styles = StyleSheet.create({
   safeOnboarding: { backgroundColor: colors.maroon },
   shell: { flex: 1, backgroundColor: colors.cream },
   shellContent: { paddingBottom: 104 + androidNavigationInset },
+  // Clears the absolutely-positioned bottom nav for any screen-level scroller.
+  refreshScrollContent: { paddingBottom: 96 + androidNavigationInset },
   shellContentWithAccessory: { paddingBottom: 218 + androidNavigationInset },
   fixedAccessory: { position: 'absolute', left: 0, right: 0, bottom: 72 + androidNavigationInset, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12, backgroundColor: colors.cream },
   flex: { flex: 1 },
@@ -183,6 +185,10 @@ export const styles = StyleSheet.create({
     minHeight: 52,
     alignItems: 'center',
     justifyContent: 'center',
+    // Without this the button collapses to the width of its label on any screen
+    // whose container centres its children (the success and coming-soon pages),
+    // which is what made "Back to Home" render as a small off-centre box.
+    alignSelf: 'stretch',
   },
   goldButton: { backgroundColor: colors.gold },
   outlineButton: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.maroon },
@@ -449,8 +455,15 @@ export const styles = StyleSheet.create({
     elevation: 12,
   },
   navItem: { flex: 1, alignItems: 'center', justifyContent: 'flex-start', paddingVertical: 2 },
-  navIconWrap: { width: 48, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
-  navIconWrapActive: { backgroundColor: 'rgba(255,255,255,0.18)' },
+  // A soft pill behind the active icon rather than the old hard-edged square.
+  // Fully rounded and a touch wider, so it reads as part of the same rounded
+  // language as the cards and chips instead of a selection artefact.
+  navIconWrap: { minWidth: 56, height: 32, paddingHorizontal: 16, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
+  navIconWrapActive: {
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.30)',
+  },
   navIcon: { color: 'rgba(255,255,255,0.85)', fontSize: 23, lineHeight: 28, textAlign: 'center' },
   navIconActive: { color: 'white' },
   navLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 11.5, fontWeight: '700' },
@@ -648,6 +661,8 @@ export const styles = StyleSheet.create({
   weightRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16 },
   weightRowInput: { marginHorizontal: 0 },
   measureBtn: { height: 48, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.bluePale, borderWidth: 1, borderColor: '#BBD3FB', alignItems: 'center', justifyContent: 'center' },
+  // Full-width now that the two weight boxes take the row above it.
+  measureBtnWide: { marginHorizontal: 16, marginTop: 4 },
   measureBtnText: { color: colors.blue, fontSize: 13, fontWeight: '700' },
   uploadCompact: { marginHorizontal: 16, borderWidth: 2, borderStyle: 'dashed', borderColor: '#D8A4BC', backgroundColor: colors.rose, borderRadius: 12, minHeight: 84, alignItems: 'center', justifyContent: 'center' },
   thumbRow: { marginHorizontal: 16, marginTop: 10 },
@@ -684,7 +699,25 @@ export const styles = StyleSheet.create({
   projStatusSoon: { backgroundColor: colors.blue },
   projStatusText: { color: 'white', fontSize: 11, fontWeight: '700' },
   projBody: { padding: 14 },
+  // Product detail: spec table, vaccination chart, digital ear tag.
+  specRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: colors.line },
+  specRowLast: { borderBottomWidth: 0 },
+  specLabel: { color: colors.muted, fontSize: 12.5, flex: 1 },
+  specValue: { color: colors.ink, fontSize: 13, fontWeight: '700', flex: 1, textAlign: 'right' },
+  vaccRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
+  vaccName: { color: colors.ink, fontSize: 13.5, fontWeight: '700' },
+  vaccMeta: { color: colors.muted, fontSize: 11.5, marginTop: 2 },
+  digitalIdCard: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  digitalIdCode: { color: colors.maroon, fontSize: 18, fontWeight: '800', letterSpacing: 1, marginTop: 3 },
+  digitalIdHint: { color: colors.muted, fontSize: 11.5, lineHeight: 16, marginTop: 3 },
+  digitalIdIcon: { fontSize: 26 },
+  orderProductPhoto: { width: '100%', height: 180, borderRadius: 12 },
+
   projName: { color: colors.ink, fontSize: 16, fontWeight: '700' },
+  // The commercial model, stated directly under the project name.
+  projModel: { color: colors.maroon, fontSize: 12.5, fontWeight: '700', marginTop: 3 },
+  projPartner: { marginTop: 10, backgroundColor: colors.bluePale, borderRadius: 9, paddingHorizontal: 10, paddingVertical: 8 },
+  projPartnerText: { color: colors.ink, fontSize: 12, lineHeight: 17, fontWeight: '600' },
   projMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
   projSummary: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 6 },
   projStatsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, backgroundColor: colors.rose, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14 },
@@ -891,6 +924,26 @@ export const styles = StyleSheet.create({
   comingSoonListItem: { color: colors.maroon, fontSize: 14, lineHeight: 23 },
   deliveryBanner: { margin: 16, backgroundColor: colors.maroon, borderRadius: 9, padding: 12 },
   deliveryText: { color: 'white', fontSize: 14, fontWeight: '700' },
+  // Inline choice chips. Used wherever a picker would hold only a few short
+  // options (input type, animal, repayment mode): the options stay on screen,
+  // and choosing one is a single tap instead of open-scroll-tap.
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chipOption: {
+    minHeight: 42,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: 'white',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipOptionActive: { backgroundColor: colors.maroon, borderColor: colors.maroon },
+  chipOptionDisabled: { backgroundColor: '#F4EFF2', borderColor: colors.line },
+  chipOptionText: { color: colors.ink, fontSize: 14.5, fontWeight: '700' },
+  chipOptionTextActive: { color: 'white' },
+  chipOptionTextDisabled: { color: colors.muted },
   segment: { margin: 16, padding: 4, borderRadius: 24, backgroundColor: '#EEE9EC', flexDirection: 'row' },
   segmentActive: { flex: 1, color: 'white', backgroundColor: colors.maroon, padding: 10, borderRadius: 20, textAlign: 'center', fontWeight: '700' },
   segmentInactive: { flex: 1, color: colors.muted, padding: 10, textAlign: 'center', fontWeight: '700' },
@@ -1180,6 +1233,31 @@ export const styles = StyleSheet.create({
   timelineNodeTextPending: { color: colors.muted },
   timelineText: { color: colors.muted, fontSize: 10, textAlign: 'center', lineHeight: 14, marginTop: 7, paddingHorizontal: 2, minHeight: 28 },
   timelineTextCurrent: { color: colors.ink, fontWeight: '700' },
+
+  // Vertical progress trail. The horizontal `timeline` above fits four short
+  // words; a stage that has to say "Officer visiting on 2026-08-24" needs the
+  // room only a vertical rail gives.
+  trail: { marginHorizontal: 16, marginTop: 12, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, paddingVertical: 6 },
+  trailRow: { flexDirection: 'row', paddingHorizontal: 14 },
+  trailRail: { width: 32, alignItems: 'center' },
+  trailDot: { width: 26, height: 26, borderRadius: 13, backgroundColor: '#F7F3F5', borderWidth: 2, borderColor: '#E7E0E4', alignItems: 'center', justifyContent: 'center' },
+  trailDotDone: { backgroundColor: colors.green, borderColor: colors.green },
+  trailDotCurrent: { backgroundColor: colors.gold, borderColor: '#D97706' },
+  trailDotText: { color: 'white', fontSize: 12, fontWeight: '700' },
+  trailDotTextPending: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  trailLine: { width: 3, flex: 1, minHeight: 22, borderRadius: 3, backgroundColor: '#E7E0E4', marginVertical: 3 },
+  trailLineDone: { backgroundColor: colors.green },
+  trailBody: { flex: 1, paddingLeft: 12, paddingTop: 2, paddingBottom: 16 },
+  trailTitle: { color: colors.ink, fontSize: 14.5, fontWeight: '700' },
+  trailTitleMuted: { color: colors.muted, fontWeight: '600' },
+  trailDesc: { color: colors.muted, fontSize: 12.5, lineHeight: 18, marginTop: 2 },
+  trailDate: { color: colors.green, fontSize: 11.5, fontWeight: '700', marginTop: 4 },
+  trailNote: { color: colors.ink, fontSize: 12, lineHeight: 17, marginTop: 5, backgroundColor: colors.cream, borderRadius: 8, paddingHorizontal: 9, paddingVertical: 6 },
+  trailCurrentPill: { alignSelf: 'flex-start', marginTop: 6, backgroundColor: '#FEF3C7', borderRadius: 20, paddingHorizontal: 9, paddingVertical: 3 },
+  trailCurrentPillText: { color: '#92400E', fontSize: 10.5, fontWeight: '800', letterSpacing: 0.3 },
+
+  // Success screens: the two-button footer under the tick.
+  successActions: { alignSelf: 'stretch', marginTop: 4 },
   timelineStateText: { marginTop: 4, color: colors.muted, fontSize: 9, fontWeight: '700', textAlign: 'center' },
   timelineStateDone: { color: colors.green },
   timelineStateCurrent: { color: '#B45309' },

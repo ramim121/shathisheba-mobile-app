@@ -36,7 +36,7 @@ import type {
   FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
   LoanProduct, LoanQuote, LoanDraft, RepaymentMode,
   CreditAssessment, AssessmentEnvelope, DevelopmentPlan, DevelopmentTask, AssessmentHistory,
-  NarrativeChange, LoanAccountView,
+  NarrativeChange, LoanAccountView, LoanArrears,
 } from './src/types';
 import {
   analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
@@ -68,7 +68,33 @@ function makeLoanDraft(): LoanDraft {
     quote: null,
     consented: false,
     needsCorrection: false,
+    correctionNote: '',
   };
+}
+
+// Cattle is traded in two currencies of weight: buyers and traders quote LIVE
+// weight, farmers and beparis quote MEAT weight. They are the same animal at a
+// dressing yield, so the form takes either and fills the other. 50% is the
+// working yield for local cattle — the server's pricing rule carries the real
+// figure and overrides this once a quote comes back.
+const DEFAULT_DRESSING_PCT = 50;
+
+/** Trims a computed weight to one decimal without a trailing ".0". */
+function weightText(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '';
+  return String(Math.round(value * 10) / 10);
+}
+
+function meatFromLive(live: string, dressingPct = DEFAULT_DRESSING_PCT): string {
+  const n = Number(live);
+  if (!n || n <= 0) return '';
+  return weightText((n * dressingPct) / 100);
+}
+
+function liveFromMeat(meat: string, dressingPct = DEFAULT_DRESSING_PCT): string {
+  const n = Number(meat);
+  if (!n || n <= 0 || dressingPct <= 0) return '';
+  return weightText((n * 100) / dressingPct);
 }
 
 function makeListingDraft(): ListingDraft {
@@ -77,7 +103,7 @@ function makeListingDraft(): ListingDraft {
     animalId: null, animalName: '', species: null,
     breedId: null, breedName: '',
     saleItemId: null, saleItemName: '', variety: '', unit: 'kg',
-    ageMonths: '24', weightKg: '', quantity: '1',
+    ageMonths: '24', weightKg: '', meatWeightKg: '', quantity: '1',
     description: '', aiGenerating: false, images: [],
     divisionId: null, divisionName: '', districtId: null, districtName: '',
     thanaId: null, thanaName: '', thanaOther: false,
@@ -258,7 +284,11 @@ function RefreshScroll({ children, style, contentContainerStyle }: { children: R
   return (
     <ScrollView
       style={style}
-      contentContainerStyle={contentContainerStyle}
+      // The bottom nav is absolutely positioned, so without this the last card
+      // on every screen using RefreshScroll sits underneath it — which is what
+      // cut off the foot of the readiness result. A caller passing its own
+      // contentContainerStyle still wins.
+      contentContainerStyle={[styles.refreshScrollContent, contentContainerStyle]}
       showsVerticalScrollIndicator={false}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
@@ -854,7 +884,10 @@ function MarkdownText({
 }
 
 
-function Card({ children, style }: { children: React.ReactNode; style?: object }) {
+function Card({ children, style, onPress }: { children: React.ReactNode; style?: object; onPress?: () => void }) {
+  if (onPress) {
+    return <Pressable onPress={onPress} style={({ pressed }) => [styles.card, style, pressed && styles.pressed]}>{children}</Pressable>;
+  }
   return <View style={[styles.card, style]}>{children}</View>;
 }
 
@@ -1036,6 +1069,9 @@ export default function App() {
   const [latestListing, setLatestListing] = useState<ApiRow | null>(null);
   const [latestApplication, setLatestApplication] = useState<ApiRow | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  // Which listing / application the progress trail is showing.
+  const [progressListingId, setProgressListingId] = useState<string | null>(null);
+  const [progressApplicationId, setProgressApplicationId] = useState<string | null>(null);
   const [projectsInitialTab, setProjectsInitialTab] = useState<'all' | 'area' | 'mine'>('area');
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
   const [appLocation, setAppLocation] = useState<LocationState>({
@@ -1246,6 +1282,20 @@ async function sendApaMessage(text: string) {
   }
 
   const go = (next: Screen) => setScreen(next);
+
+  // The app has no navigation stack — every screen hardcodes its own back
+  // target. That is fine while there is one way into a screen, and wrong the
+  // moment a readiness action deep-links into, say, KYC documents: back then
+  // dropped the farmer on Profile, miles from the result they were working
+  // through. `returnTo` records the screen that sent them, and only the screens
+  // that can be deep-linked into consult it.
+  const [returnTo, setReturnTo] = useState<Screen | null>(null);
+  const goFrom = (from: Screen, next: Screen) => { setReturnTo(from); setScreen(next); };
+  const goBackTo = (fallback: Screen) => {
+    const target = returnTo ?? fallback;
+    setReturnTo(null);
+    setScreen(target);
+  };
   // Seed preference selections from the DB-saved snapshot once it loads (so the
   // selection lives in the database, not only on the phone).
   useEffect(() => {
@@ -1429,12 +1479,19 @@ async function sendApaMessage(text: string) {
       home: <Home setScreen={go} openProjects={(t) => { setProjectsInitialTab(t); go('projects'); }} openBuy={(t) => { setBuyInitialTab(t); go('buyCategories'); }} />,
       weather: <WeatherPage setScreen={go} />,
       community: <Community setScreen={go} />,
-      projects: <Projects setScreen={go} initialTab={projectsInitialTab} onApply={(id) => { setSelectedProjectId(id); go('kyc'); }} />,
+      projects: (
+        <Projects
+          setScreen={go}
+          initialTab={projectsInitialTab}
+          onApply={(id) => { setSelectedProjectId(id); go('kyc'); }}
+          onOpenApplication={(id) => { setProgressApplicationId(id); go('projectProgress'); }}
+        />
+      ),
       profile: <Profile setScreen={go} />,
-      menuPersonal: <PersonalInfo onDone={() => go('profile')} />,
-      menuBanking: <BankingScreen setScreen={go} />,
-      menuFarm: <FarmScreen setScreen={go} />,
-      menuKyc: <KycScreen setScreen={go} />,
+      menuPersonal: <PersonalInfo onDone={() => goBackTo('profile')} />,
+      menuBanking: <BankingScreen setScreen={(next) => (next === 'profile' ? goBackTo('profile') : go(next))} />,
+      menuFarm: <FarmScreen setScreen={(next) => (next === 'profile' ? goBackTo('profile') : go(next))} />,
+      menuKyc: <KycScreen setScreen={(next) => (next === 'profile' ? goBackTo('profile') : go(next))} />,
       menuFaq: <FaqScreen setScreen={go} />,
       marketUpdates: <MarketUpdates setScreen={go} onSelect={(id) => { setSelectedMarketId(id); go('marketDetail'); }} />,
       marketDetail: <MarketDetail setScreen={go} id={selectedMarketId} />,
@@ -1453,10 +1510,26 @@ async function sendApaMessage(text: string) {
           result={readinessResult}
           onContinuePart2={() => { setReadinessPart('deep'); go('financeReadinessQuiz'); }}
           onOpenSheet={(topic) => { setGuidanceTopic(topic); go('financeGuidanceSheet'); }}
+          onNavigateAway={(next) => goFrom('financeReadinessResult', next)}
         />
       ),
       financeGuidanceSheet: <FinanceGuidanceSheet setScreen={go} topic={guidanceTopic} />,
-      financeHub: <FinanceHub setScreen={go} onPickProduct={() => go('loanApplyType')} />,
+      financeHub: (
+        <FinanceHub
+          setScreen={go}
+          onPickProduct={() => go('loanApplyType')}
+          onSelectProduct={(product) => {
+            patchLoanDraft({
+              product,
+              amount: Number(product.min_amount) || 0,
+              tenureMonths: product.allowed_tenures[0] ?? 12,
+              repaymentMode: (product.allowed_repayment_modes[0] as RepaymentMode) ?? 'monthly',
+              quote: null,
+            });
+            go('loanApplyDetails');
+          }}
+        />
+      ),
       loanApplyType: (
         <LoanApplyType
           setScreen={go}
@@ -1494,6 +1567,7 @@ async function sendApaMessage(text: string) {
         <DevelopmentPlanScreen
           setScreen={go}
           onOpenSheet={(topic) => { setGuidanceTopic(topic); go('financeGuidanceSheet'); }}
+          onNavigateAway={(next) => goFrom('developmentPlan', next)}
         />
       ),
       assessmentHistory: <AssessmentHistoryScreen setScreen={go} />,
@@ -1503,10 +1577,22 @@ async function sendApaMessage(text: string) {
       cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       cattleMeasure: <CattleMeasure setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       cattlePrice: <CattlePrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
-      cattleDone: <CattleDone setScreen={go} listing={latestListing} />,
+      cattleDone: (
+        <CattleDone
+          setScreen={go}
+          listing={latestListing}
+          onSeeProgress={() => {
+            if (latestListing?.id) setProgressListingId(String(latestListing.id));
+            go(latestListing?.id ? 'listingProgress' : 'myListings');
+          }}
+        />
+      ),
       inputsForm: <InputsForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       inputsPrice: <InputsPrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
-      myListings: <MyListings setScreen={go} />,
+      myListings: <MyListings setScreen={go} onOpenProgress={(id) => { setProgressListingId(id); go('listingProgress'); }} />,
+      listingProgress: <ListingProgress setScreen={go} listingId={progressListingId} />,
+      myProjects: <MyProjects setScreen={go} onOpen={(id) => { setProgressApplicationId(id); go('projectProgress'); }} />,
+      projectProgress: <ProjectProgress setScreen={go} applicationId={progressApplicationId} />,
       buyCategories: <BuyCategories setScreen={go} initialTab={buyInitialTab} onSelectCategory={(c) => { setBuyCategory(c); go('buyProducts'); }} />,
       buyProducts: <BuyProducts setScreen={go} category={buyCategory} onSelectProduct={setSelectedProduct} />,
       buyOrder: <BuyOrder setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />,
@@ -1525,12 +1611,27 @@ async function sendApaMessage(text: string) {
       trainingQuiz: <TrainingQuiz contentId={learnContentId} setScreen={go} />,
       partnerRegister: <PartnerRegister setScreen={go} />,
       kyc: <Kyc setScreen={go} projectId={selectedProjectId} onSubmitted={setLatestApplication} />,
-      regDone: <RegDone setScreen={go} application={latestApplication} />,
+      regDone: (
+        <RegDone
+          setScreen={go}
+          application={latestApplication}
+          onSeeProgress={() => {
+            if (latestApplication?.id) setProgressApplicationId(String(latestApplication.id));
+            go(latestApplication?.id ? 'projectProgress' : 'myProjects');
+          }}
+        />
+      ),
       inactive: <Inactive setScreen={go} />,
     };
 
     return routes[screen];
-  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, projectsInitialTab, authUser, selectedMarketId]);
+  // Every piece of state a screen in this map reads must be listed here.
+  // The finance screens were added without their state, so `loanDraft` and the
+  // readiness values were captured once and never refreshed: tapping a tenure or
+  // a repayment mode updated the state and re-rendered nothing, and a consent
+  // checkbox could be ticked but never cleared. A missing dependency here does
+  // not fail loudly — it silently freezes a screen's props.
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo]);
 
   const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
@@ -2461,7 +2562,6 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
   const liveWeather = useWeatherApi();
   const market = useApiList<ApiRow>('market-updates');
   const homeUser = user || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
-  const homeStats = home.data?.stats as ApiRow | undefined;
   const marketRows = shouldUseFallback(market) ? fallbackMarketUpdates : market.rows;
   const marketWarning = fallbackWarning(market);
   const currentWeather = liveWeather.data?.current;
@@ -2496,20 +2596,17 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
           <WeatherSourceBadge fallback={liveWeather.usingFallback} error={liveWeather.error} />
         </Pressable>
       </Card>
-      <View style={styles.metricsBand}>
-        <MetricCard value={num(Number(homeStats?.listings ?? 0), lang)} label={tx('তালিকা', 'Listings')} icon="🏷️" tone="rose" onPress={() => setScreen('myListings')} />
-        <View style={styles.metricDivider} />
-        <MetricCard value={num(Number(homeStats?.orders ?? 0), lang)} label={tx('অর্ডার', 'Orders')} icon="🛒" tone="blue" onPress={() => openBuy('orders')} />
-        <View style={styles.metricDivider} />
-        <MetricCard value={amount(Number(homeStats?.earnings ?? 0), lang)} label={tx('আয়', 'Earnings')} icon="৳" tone="green" />
-      </View>
+      {/* The listings / orders / earnings band is withdrawn until the figures
+          behind it are trustworthy — three tiles reading zero taught the farmer
+          nothing and pushed the one number that does mean something below the
+          fold. The readiness passport takes the slot instead. */}
       <FinancePassportCard setScreen={setScreen} />
       <SectionTitle title={tx('সেবাসমূহ', 'Services')} />
       <View style={styles.serviceGrid}>
         <ServiceCard icon="🏷️" title={tx('বিক্রির তালিকা', 'List for Sale')} sub={tx('পশু ও কৃষি পণ্য বিক্রি', 'Sell livestock & produce')} tone="rose" highlight onPress={() => setScreen('saleCategories')} />
         <ServiceCard icon="🛒" title={tx('শাথী থেকে কিনুন', 'Buy from Shathi')} sub={tx('বীজ, ফিড, সার ও আরও', 'Seeds, feed, fertilizer & more')} tone="gold" highlight onPress={() => openBuy('shop')} />
         <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} />
-        <ServiceCard icon="🤝" title={tx('ঋণ ও প্রকল্প', 'Finance & Projects')} sub={tx('ঋণের আবেদন ও চুক্তি চাষ', 'Loan application & contract farming')} tone="green" onPress={() => setScreen('financeHub')} />
+        <ServiceCard icon="🏦" title={tx('ঋণের আবেদন', 'Apply for Loan')} sub={tx('ঋণের ধরন, কিস্তি ও আবেদন', 'Loan types, instalments & applying')} tone="green" onPress={() => setScreen('financeHub')} />
       </View>
       <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
         <View style={styles.homeApaIcon}>
@@ -2550,6 +2647,8 @@ function HeroStat({ value, label }: { value: string; label: string }) {
   );
 }
 
+// Retained unused: the home metrics band is withdrawn, not deleted, and this
+// is the tile it will come back as.
 function MetricCard({ value, label, icon, tone, onPress }: { value: string; label: string; icon: string; tone: 'rose' | 'blue' | 'green'; onPress?: () => void }) {
   const accent = tone === 'blue' ? colors.blue : tone === 'green' ? colors.green : colors.maroon;
   const chip = tone === 'blue' ? colors.bluePale : tone === 'green' ? colors.greenPale : colors.rose;
@@ -3284,9 +3383,12 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
 
   function startListing(category: ApiRow) {
     const slug = String(category.slug || '').toLowerCase();
-    const isLivestock = slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry');
-    const isInputs = slug === 'inputs';
-    patchDraft({ categorySlug: slug, animalId: null, animalName: '', species: null, breedId: null, breedName: '', saleItemId: null, saleItemName: '', variety: '', weightKg: '', quantity: '1', description: '', images: [], measure: null });
+    // `is_active = 0` in the admin is what takes a category off the market —
+    // the screen must honour it, not just the hard-coded slug list.
+    const live = String(category.status || 'active') === 'active';
+    const isLivestock = live && (slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry'));
+    const isInputs = live && slug === 'inputs';
+    patchDraft({ categorySlug: slug, animalId: null, animalName: '', species: null, breedId: null, breedName: '', saleItemId: null, saleItemName: '', variety: '', weightKg: '', meatWeightKg: '', quantity: '1', description: '', images: [], measure: null });
     setScreen(isLivestock ? 'cattleForm' : isInputs ? 'inputsForm' : 'inactive');
   }
 
@@ -3294,14 +3396,17 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
     const slug = String(category.slug || '').toLowerCase();
     const interestSlug = String(category.interest_slug || '');
     const catKey = interestSlug || slug; // inputs/machinery projects use the slug as interest_slug
+    const live = String(category.status || 'active') === 'active';
     const isLivestock = slug.includes('livestock') || slug.includes('cattle') || slug.includes('poultry');
     const isInputs = slug === 'inputs';
-    const built = isLivestock || isInputs;
+    const built = live && (isLivestock || isInputs);
     const hasProject = available === null ? built : available.includes(catKey);
     const enabled = built && hasProject;
     const emoji = category.emoji
       || (isLivestock ? '🐄' : slug.includes('crop') ? '🌾' : slug.includes('fish') ? '🐟' : slug.includes('veg') ? '🥬' : slug.includes('fruit') ? '🥭' : slug.includes('mach') ? '🚜' : isInputs ? '🌱' : '🌿');
-    const sub = !hasProject
+    const sub = !live
+      ? tx('আপাতত বন্ধ', 'Not available right now')
+      : !hasProject
       ? tx('এই এলাকায় কোনো প্রকল্প নেই', 'No project in your area')
       : isLivestock ? tx('গবাদিপশু ও পোল্ট্রি বিক্রি', 'Sell cattle & poultry')
       : isInputs ? tx('বীজ, ফিড, সার বিক্রি', 'Sell seeds, feed, fertilizer')
@@ -3433,11 +3538,11 @@ function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
       <View style={styles.twoCol}>
         <View style={styles.flex}>
           <FormLabel label={tx('পশুর ধরন', 'Animal type')} required />
-          <PickerSelect compact value={selectedAnimalLabel} placeholder={tx('ধরন', 'Type')} items={animalItems} onSelect={selectAnimal} />
+          <ChoiceSelect compact value={selectedAnimalLabel} placeholder={tx('ধরন', 'Type')} items={animalItems} onSelect={selectAnimal} />
         </View>
         <View style={styles.flex}>
           <FormLabel label={tx('জাত', 'Breed')} required />
-          <PickerSelect compact value={draft.breedName} placeholder={tx('জাত', 'Breed')} items={breedItems} onSelect={selectBreed} disabled={!draft.animalId} />
+          <ChoiceSelect compact value={draft.breedName} placeholder={tx('জাত', 'Breed')} items={breedItems} onSelect={selectBreed} disabled={!draft.animalId} />
         </View>
       </View>
 
@@ -3452,13 +3557,20 @@ function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
         </View>
       </View>
 
-      <FormLabel label={tx('আনুমানিক ওজন (কেজি)', 'Tentative weight (kg)')} required />
-      <View style={styles.weightRow}>
-        <TextInput style={[styles.input, styles.flex, styles.weightRowInput]} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v })} keyboardType="number-pad" placeholder={tx('যেমন ২০০', 'e.g. 200')} placeholderTextColor={colors.muted} />
-        <Pressable onPress={() => setScreen('cattleMeasure')} style={({ pressed }) => [styles.measureBtn, pressed && styles.pressed]}>
-          <Text style={styles.measureBtnText}>📏 {tx('ফিতা দিয়ে মাপুন', 'Measure by tape')}</Text>
-        </Pressable>
+      <View style={styles.twoCol}>
+        <View style={styles.flex}>
+          <FormLabel label={tx('আনুমানিক জীবিত ওজন (কেজি)', 'Tentative live weight (kg)')} required />
+          <TextInput style={[styles.input, styles.inRowInput]} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v, meatWeightKg: meatFromLive(v) })} keyboardType="number-pad" placeholder={tx('যেমন ২০০', 'e.g. 200')} placeholderTextColor={colors.muted} />
+        </View>
+        <View style={styles.flex}>
+          <FormLabel label={tx('আনুমানিক মাংসের ওজন (কেজি)', 'Tentative meat weight (kg)')} />
+          <TextInput style={[styles.input, styles.inRowInput]} value={draft.meatWeightKg} onChangeText={(v) => patchDraft({ meatWeightKg: v, weightKg: liveFromMeat(v) })} keyboardType="number-pad" placeholder={tx('যেমন ১০০', 'e.g. 100')} placeholderTextColor={colors.muted} />
+        </View>
       </View>
+      <Pressable onPress={() => setScreen('cattleMeasure')} style={({ pressed }) => [styles.measureBtn, styles.measureBtnWide, pressed && styles.pressed]}>
+        <Text style={styles.measureBtnText}>📏 {tx('ফিতা দিয়ে মাপুন', 'Measure by tape')}</Text>
+      </Pressable>
+      <Text style={styles.fieldHint}>{tx('যেকোনো একটি ঘরে লিখুন — অন্যটি নিজে থেকেই হিসাব হবে (ড্রেসিং ৫০%, জীবিত ওজন = ২ × মাংসের ওজন)। ব্যাপারী ও ক্রেতারা জীবিত ওজনে, কৃষক ও বেপারীরা মাংসের ওজনে দর করেন।', 'Fill either box — the other is worked out for you (50% dressing, live weight = 2 × meat weight). Traders and buyers deal in live weight; farmers and beparis deal in meat weight.')}</Text>
       <Text style={styles.fieldHint}>{tx('ফিতা পদ্ধতিতে বুকের বেড় ও দৈর্ঘ্য দিয়ে আনুমানিক ওজন বের করুন। চূড়ান্ত ওজন মাঠ কর্মকর্তা স্কেলে নেবেন।', 'Use the tape method (chest girth + body length) to estimate weight. Final weight is taken on the field officer scale.')}</Text>
 
       <MediaDescription draft={draft} patchDraft={patchDraft} kind="livestock" context={[draft.animalName && `type: ${draft.animalName}`, draft.breedName && `breed: ${draft.breedName}`, draft.ageMonths && `age ${draft.ageMonths} months`, Number(draft.weightKg) > 0 && `approx ${draft.weightKg} kg`].filter(Boolean).join(', ')} />
@@ -3488,7 +3600,7 @@ function CattleMeasure({ setScreen, draft, patchDraft }: CattleStepProps) {
   const weightKg = g > 0 && l > 0 ? Math.round(((g * g * l) / 300) * 0.4536) : 0;
 
   function useWeight() {
-    patchDraft({ weightKg: String(weightKg), measure: { girth, length, height, weightKg } });
+    patchDraft({ weightKg: String(weightKg), meatWeightKg: meatFromLive(String(weightKg)), measure: { girth, length, height, weightKg } });
     setScreen('cattleForm');
   }
 
@@ -3557,6 +3669,13 @@ function Stepper({ value, onChange, min = 0, max = 99999, step = 1, compact = fa
 function FakeSelect({ value, options, onChange, disabled = false }: { value: string; options?: string[]; onChange?: (value: string) => void; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const interactive = !disabled && !!options?.length && !!onChange;
+  // Same rule as ChoiceSelect: a handful of short options belong on the screen,
+  // not behind a sheet. Payment method (cash / bkash / nagad / bank) is the case
+  // this exists for.
+  const chipItems = (options ?? []).map((option) => ({ id: option, label: option }));
+  if (onChange && autoChips(chipItems)) {
+    return <ChipSelect value={value} items={chipItems} onSelect={(item) => onChange(item.id)} disabled={disabled} />;
+  }
   return (
     <>
       <Pressable disabled={!interactive} onPress={() => setOpen(true)} style={({ pressed }) => [styles.fakeSelect, disabled && styles.inputDisabled, pressed && interactive && styles.pressed]}>
@@ -3620,6 +3739,82 @@ function PickerSelect({ value, placeholder, items, onSelect, disabled = false, c
       </Modal>
     </>
   );
+}
+
+/**
+ * A row of choice chips.
+ *
+ * `PickerSelect` opens a modal sheet, which is the right shape for a long list
+ * (494 upazilas) but the wrong one for three short words. Seed / Feed /
+ * Fertilizer as chips are visible without any interaction and cost one tap
+ * rather than three, which matters most for the users who find modals hardest.
+ *
+ * `autoChips` below is what decides which of the two a call site gets, so the
+ * rule lives in one place rather than being re-judged at every picker.
+ */
+function ChipSelect({ value, items, onSelect, disabled = false }: {
+  value?: string;
+  items: { id: string; label: string; disabled?: boolean; raw?: any }[];
+  onSelect: (item: any) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <View style={styles.chipRow}>
+      {items.map((item) => {
+        const selected = item.label === value || item.id === value;
+        const off = disabled || item.disabled;
+        return (
+          <Pressable
+            key={item.id}
+            disabled={off}
+            onPress={() => onSelect(item)}
+            accessibilityRole="button"
+            accessibilityState={{ selected, disabled: off }}
+            style={({ pressed }) => [
+              styles.chipOption,
+              selected && styles.chipOptionActive,
+              off && styles.chipOptionDisabled,
+              pressed && !off && styles.pressed,
+            ]}
+          >
+            <Text style={[
+              styles.chipOptionText,
+              selected && styles.chipOptionTextActive,
+              off && styles.chipOptionTextDisabled,
+            ]}>{item.label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/**
+ * Chips only when they will actually fit and read well: at most four options,
+ * each short enough that two or three sit on a line. Anything longer stays a
+ * dropdown, because a chip row that wraps to four lines is worse than a sheet.
+ */
+function autoChips(items: { label: string }[]): boolean {
+  if (items.length === 0 || items.length > 4) return false;
+  return items.every((item) => item.label.length <= 18);
+}
+
+/**
+ * Picks the right control for the option list it is given. Call sites use this
+ * instead of PickerSelect wherever the list may be short.
+ */
+function ChoiceSelect({ value, placeholder, items, onSelect, disabled = false, compact = false }: {
+  value?: string;
+  placeholder: string;
+  items: { id: string; label: string; disabled?: boolean; raw?: any }[];
+  onSelect: (item: any) => void;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
+  if (autoChips(items)) {
+    return <ChipSelect value={value} items={items} onSelect={onSelect} disabled={disabled} />;
+  }
+  return <PickerSelect value={value} placeholder={placeholder} items={items} onSelect={onSelect} disabled={disabled} compact={compact} />;
 }
 
 // Cascading Division -> District -> Thana picker sourced from the geo API.
@@ -3895,24 +4090,33 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
     if (draft.breedId) params.set('breed_id', draft.breedId);
     if (district) params.set('district', district);
     if (w > 0) params.set('weight', String(w));
+    if (Number(draft.meatWeightKg) > 0) params.set('meat_weight', draft.meatWeightKg);
     apiRequest<{ data?: ApiRow }>(`app/sale/price-quote?${params.toString()}`)
       .then((json) => { if (alive) setQuote(json.data?.breakdown ?? null); })
       .catch(() => { if (alive) setQuote(null); })
       .finally(() => { if (alive) setQuoteLoading(false); });
     return () => { alive = false; };
-  }, [draft.animalId, draft.breedId, district, w]);
+  }, [draft.animalId, draft.breedId, district, w, draft.meatWeightKg]);
 
-  const b2bRate = Number(quote?.b2b_market_rate ?? 0);
+  // Every figure below is per kg of LIVE weight — that is the basis the rule is
+  // written on. The meat rate beside it is the same money restated at the
+  // dressing yield, for farmers who only ever think in meat weight.
+  const b2bRate = Number(quote?.b2b_market_rate ?? 0) || 400;
+  const dressingPct = Number(quote?.dressing_pct ?? 0) || DEFAULT_DRESSING_PCT;
+  const b2bMeatRate = Number(quote?.b2b_meat_rate ?? 0) || (b2bRate * 100) / dressingPct;
   const platformFee = Number(quote?.platform_fee ?? 0);
+  const platformPct = quote?.platform_fee_pct === null || quote?.platform_fee_pct === undefined ? null : Number(quote.platform_fee_pct);
   const logisticsFee = Number(quote?.logistics_fee ?? 0);
   const vetFee = Number(quote?.warehouse_vet_fee ?? 0);
-  const farmerRate = Number(quote?.net_farmer_rate ?? (b2bRate - platformFee - logisticsFee - vetFee)) || 670;
+  const farmerRate = Number(quote?.net_farmer_rate ?? 0) || b2bRate - platformFee - logisticsFee - vetFee;
+  const farmerMeatRate = (farmerRate * 100) / dressingPct;
+  const meatW = Number(draft.meatWeightKg) || (w * dressingPct) / 100;
   const rows: Array<[string, string, number, boolean]> = [
-    [tx('B2B বাজার দর', 'B2B market rate'), tx('পাইকারি ক্রয় মূল্য', 'Wholesale buy rate'), b2bRate, false],
-    [tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), '', -platformFee, false],
-    [tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), '', -logisticsFee, false],
-    [tx('গুদাম ও পশু চিকিৎসা', 'Warehouse & vet care'), '', -vetFee, false],
-    [tx('নিট কৃষক মূল্য', 'Net farmer rate'), tx('আপনি পাবেন এই মূল্যে', 'Your selling rate'), farmerRate, true],
+    [tx('B2B বাজার দর', 'B2B market rate'), tx(`মাংসের দরে ৳${num(b2bMeatRate, 'bn')}/কেজি`, `৳${num(b2bMeatRate, 'en')}/kg on meat weight`), b2bRate, false],
+    [tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), platformPct ? tx(`জীবিত ওজনের দামের ${num(platformPct, 'bn')}%`, `${num(platformPct, 'en')}% of the live weight amount`) : '', -platformFee, false],
+    [tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), tx('প্রতি কেজি জীবিত ওজনে', 'Per kg live weight'), -logisticsFee, false],
+    [tx('গুদাম ও পশু চিকিৎসা', 'Warehouse & vet care'), tx('প্রতি কেজি জীবিত ওজনে', 'Per kg live weight'), -vetFee, false],
+    [tx('নিট কৃষক মূল্য', 'Net farmer rate'), tx(`আপনি পাবেন — মাংসের দরে ৳${num(farmerMeatRate, 'bn')}/কেজি`, `Your selling rate — ৳${num(farmerMeatRate, 'en')}/kg on meat weight`), farmerRate, true],
   ];
 
   async function submitListing() {
@@ -3937,6 +4141,8 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         description: draft.description || undefined,
         age_months: Number(draft.ageMonths) || undefined,
         weight_kg: w,
+        meat_weight_kg: Number(draft.meatWeightKg) || undefined,
+        dressing_pct: dressingPct,
         quantity: Number(draft.quantity) || 1,
         unit: 'piece',
         farmer_expected_price: farmerRate,
@@ -3968,9 +4174,16 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
       <Card style={styles.weightCard}>
         <Text style={styles.weightIcon}>⚖</Text>
         <View style={styles.flex}>
-          <Text style={styles.smallUpper}>{tx('আনুমানিক ওজন', 'Tentative weight')}</Text>
+          <Text style={styles.smallUpper}>{tx('জীবিত ওজন', 'Live weight')}</Text>
           <View style={styles.weightInputRow}>
-            <TextInput style={styles.weightInput} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v })} keyboardType="number-pad" />
+            <TextInput style={styles.weightInput} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v, meatWeightKg: meatFromLive(v, dressingPct) })} keyboardType="number-pad" />
+            <Text style={styles.kgText}>{tx('কেজি', 'kg')}</Text>
+          </View>
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.smallUpper}>{tx('মাংসের ওজন', 'Meat weight')}</Text>
+          <View style={styles.weightInputRow}>
+            <TextInput style={styles.weightInput} value={draft.meatWeightKg} onChangeText={(v) => patchDraft({ meatWeightKg: v, weightKg: liveFromMeat(v, dressingPct) })} keyboardType="number-pad" />
             <Text style={styles.kgText}>{tx('কেজি', 'kg')}</Text>
           </View>
         </View>
@@ -3992,12 +4205,12 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
       <View style={styles.priceTable}>
         <View style={styles.priceHead}>
           <Text style={styles.priceHeadTitle}>{tx('মূল্য বিবরণী', 'Price Breakdown')}</Text>
-          <Text style={styles.priceHeadSub}>{tx('সব মূল্য প্রতি কেজি হিসেবে', 'All values per kg')}</Text>
+          <Text style={styles.priceHeadSub}>{tx(`সব দর প্রতি কেজি জীবিত ওজনে · ড্রেসিং ${num(dressingPct, 'bn')}%`, `All rates per kg live weight · ${num(dressingPct, 'en')}% dressing`)}</Text>
         </View>
         <View style={styles.priceColumns}>
           <Text style={[styles.colLabel, styles.flex]}>{tx('বিবরণ', 'Item')}</Text>
-          <Text style={styles.colLabel}>/kg</Text>
-          <Text style={styles.colLabel}>{tx('মোট', 'Total')} ({num(w, lang)})</Text>
+          <Text style={styles.colLabel}>{tx('/কেজি', '/kg')}</Text>
+          <Text style={styles.colLabel}>{tx('মোট', 'Total')} ({num(w, lang)} {tx('কেজি', 'kg')})</Text>
         </View>
         {rows.map(([title, sub, rate, highlight]) => (
           <View key={title} style={[styles.priceRow, highlight && styles.priceRowHighlight]}>
@@ -4012,7 +4225,7 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         <View style={styles.finalRow}>
           <View style={styles.flex}>
             <Text style={styles.finalLabel}>{tx('আপনার আনুমানিক আয়', 'Your estimated earning')}</Text>
-            <Text style={styles.finalSub}>৳{num(farmerRate, lang)} × {num(w, lang)} {tx('কেজি', 'kg')}</Text>
+            <Text style={styles.finalSub}>৳{num(farmerRate, lang)} × {num(w, lang)} {tx('কেজি জীবিত ওজন', 'kg live')} · {tx('বা', 'or')} ৳{num(farmerMeatRate, lang)} × {num(meatW, lang)} {tx('কেজি মাংস', 'kg meat')}</Text>
           </View>
           <Text style={styles.finalValue}>{amount(w * farmerRate, lang)}</Text>
         </View>
@@ -4030,15 +4243,18 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
   );
 }
 
-function CattleDone({ setScreen, listing }: { setScreen: (screen: Screen) => void; listing: ApiRow | null }) {
+function CattleDone({ setScreen, listing, onSeeProgress }: { setScreen: (screen: Screen) => void; listing: ApiRow | null; onSeeProgress: () => void }) {
   const { tx } = useLanguage();
   return (
     <SuccessScreen
       icon="✓"
       title={tx('তালিকা জমা হয়েছে!', 'Listing Submitted!')}
+      headerTitle={tx('তালিকা জমা', 'Listing Submitted')}
+      onBack={() => setScreen('home')}
       refNo={listing?.listing_code || 'SHT-APP'}
       desc={tx('মাঠ কর্মকর্তা ৩ কর্মদিনের মধ্যে যোগাযোগ করবেন।', 'Field officer will contact you within 3 working days.')}
       action={() => setScreen('home')}
+      primary={{ title: tx('অগ্রগতি দেখুন', 'See progress'), onPress: onSeeProgress }}
     >
       <Card style={styles.officerCard}>
         <Text style={styles.smallUpper}>{tx('নির্ধারিত মাঠ কর্মকর্তা', 'Assigned field officer')}</Text>
@@ -4079,7 +4295,7 @@ function InputsForm({ setScreen, draft, patchDraft }: CattleStepProps) {
       <View style={styles.twoCol}>
         <View style={styles.flex}>
           <FormLabel label={tx('উপকরণের ধরন', 'Input type')} required />
-          <PickerSelect compact value={selectedLabel} placeholder={tx('ধরন', 'Type')} items={inputItems} onSelect={(item) => patchDraft({ saleItemId: item.id, saleItemName: item.raw.name_en || '', unit: 'kg' })} />
+          <ChoiceSelect compact value={selectedLabel} placeholder={tx('ধরন', 'Type')} items={inputItems} onSelect={(item) => patchDraft({ saleItemId: item.id, saleItemName: item.raw.name_en || '', unit: 'kg' })} />
         </View>
         <View style={styles.flex}>
           <FormLabel label={tx('নাম / জাত', 'Name / variety')} />
@@ -4439,6 +4655,118 @@ function BuyProducts({ setScreen, category, onSelectProduct }: { setScreen: (scr
   );
 }
 
+type SpecRow = { label_en?: string; label_bn?: string; value_en?: string; value_bn?: string; value?: string };
+type VaccinationRow = { name_en?: string; name_bn?: string; given_on?: string; due_on?: string; status?: string };
+
+function pickLang(lang: Lang, bn?: string, en?: string): string {
+  return String((lang === 'bn' ? bn || en : en || bn) || '');
+}
+
+/** Two-column fact table used for cattle specs and feed nutrition alike. */
+function SpecTable({ title, rows }: { title: string; rows: SpecRow[] }) {
+  const { lang } = useLanguage();
+  if (!rows.length) return null;
+  return (
+    <Card style={styles.orderInfoCard}>
+      <Text style={styles.orderSectionTitle}>{title}</Text>
+      {rows.map((row, i) => (
+        <View key={`${row.label_en || i}`} style={[styles.specRow, i === rows.length - 1 && styles.specRowLast]}>
+          <Text style={styles.specLabel}>{pickLang(lang, row.label_bn, row.label_en)}</Text>
+          <Text style={styles.specValue}>{row.value !== undefined ? String(row.value) : pickLang(lang, row.value_bn, row.value_en)}</Text>
+        </View>
+      ))}
+    </Card>
+  );
+}
+
+function VaccinationChart({ rows }: { rows: VaccinationRow[] }) {
+  const { tx, lang } = useLanguage();
+  if (!rows.length) return null;
+  return (
+    <Card style={styles.orderInfoCard}>
+      <Text style={styles.orderSectionTitle}>{tx('টিকার রেকর্ড', 'Vaccination chart')}</Text>
+      {rows.map((row, i) => {
+        // "done" is the record of a dose given; the due date is the next one.
+        const done = String(row.status || 'done') === 'done';
+        return (
+          <View key={`${row.name_en || i}`} style={[styles.vaccRow, i === rows.length - 1 && styles.specRowLast]}>
+            <View style={styles.flex}>
+              <Text style={styles.vaccName}>{pickLang(lang, row.name_bn, row.name_en)}</Text>
+              <Text style={styles.vaccMeta}>
+                {[row.given_on ? tx(`দেওয়া হয়েছে ${formatDate(row.given_on, lang)}`, `Given ${formatDate(row.given_on, lang)}`) : '',
+                  row.due_on ? tx(`পরবর্তী ${formatDate(row.due_on, lang)}`, `Next due ${formatDate(row.due_on, lang)}`) : ''].filter(Boolean).join(' · ')}
+              </Text>
+            </View>
+            <Badge label={done ? tx('সম্পন্ন', 'Done') : tx('বাকি', 'Due')} tone={done ? 'green' : 'gold'} />
+          </View>
+        );
+      })}
+    </Card>
+  );
+}
+
+/**
+ * Everything the seed carries beyond name and price: the digital ear-tag id, the
+ * spec table, the vaccination chart for cattle, and the nutrition / ingredient
+ * detail for feed. Rendered from `metadata`, so a product without them simply
+ * shows nothing rather than an empty frame.
+ */
+function ProductDetailBlocks({ product }: { product: ApiRow | null }) {
+  const { tx, lang } = useLanguage();
+  if (!product) return null;
+  const metadata = parseMaybeJson(product.metadata);
+  const specs = (Array.isArray(metadata.specs) ? metadata.specs : []) as SpecRow[];
+  const nutrition = (Array.isArray(metadata.nutrition) ? metadata.nutrition : []) as SpecRow[];
+  const vaccinations = (Array.isArray(metadata.vaccinations) ? metadata.vaccinations : []) as VaccinationRow[];
+  const digitalPrefix = metadata.digital_id_prefix ? String(metadata.digital_id_prefix) : '';
+  const purpose = pickLang(lang, metadata.purpose_bn as string, metadata.purpose_en as string);
+  const ingredients = pickLang(lang, metadata.ingredients_bn as string, metadata.ingredients_en as string);
+  const benefits = pickLang(lang, metadata.benefits_bn as string, metadata.benefits_en as string);
+  const mrpPerKg = Number(metadata.mrp_per_kg || 0);
+
+  return (
+    <>
+      {digitalPrefix ? (
+        <Card style={styles.digitalIdCard}>
+          <View style={styles.flex}>
+            <Text style={styles.smallUpper}>{tx('ডিজিটাল পরিচিতি', 'Digital identification')}</Text>
+            {/* The ear tag is issued per animal at dispatch; the listing can only
+                honestly show the series it comes from. */}
+            <Text style={styles.digitalIdCode}>{digitalPrefix}-••••</Text>
+            <Text style={styles.digitalIdHint}>{tx('প্রতিটি পশুর কানের ট্যাগ নম্বর সরবরাহের সময় দেওয়া হয়।', 'Each animal’s ear-tag number is issued on dispatch.')}</Text>
+          </View>
+          <Text style={styles.digitalIdIcon}>🏷️</Text>
+        </Card>
+      ) : null}
+      {purpose ? (
+        <View style={styles.noteBlue}>
+          <Text style={styles.noteText}>{purpose}</Text>
+        </View>
+      ) : null}
+      {mrpPerKg > 0 ? (
+        <View style={styles.noteGold}>
+          <Text style={styles.noteText}>{tx(`এমআরপি ৳${num(mrpPerKg, 'bn')}/কেজি`, `MRP ৳${num(mrpPerKg, 'en')}/kg`)}</Text>
+        </View>
+      ) : null}
+      <SpecTable title={tx('পশুর বিবরণ', 'Animal details')} rows={specs} />
+      <SpecTable title={tx('পুষ্টিমান', 'Nutrition')} rows={nutrition} />
+      <VaccinationChart rows={vaccinations} />
+      {ingredients ? (
+        <Card style={styles.orderInfoCard}>
+          <Text style={styles.orderSectionTitle}>{tx('উপাদান', 'Ingredients')}</Text>
+          <Text style={styles.orderDescription}>{ingredients}</Text>
+        </Card>
+      ) : null}
+      {benefits ? (
+        <Card style={styles.orderInfoCard}>
+          <Text style={styles.orderSectionTitle}>{tx('উপকারিতা', 'Benefits')}</Text>
+          <Text style={styles.orderDescription}>{benefits}</Text>
+        </Card>
+      ) : null}
+    </>
+  );
+}
+
 function BuyOrder({
   setScreen,
   qty,
@@ -4462,6 +4790,7 @@ function BuyOrder({
   const total = qty * unitPrice;
   const metadata = parseMaybeJson(product?.metadata);
   const features = Array.isArray(metadata.features) ? metadata.features : [];
+  const productImage = String(product?.image_url || metadata.image_url || '');
   async function submitOrder() {
     if (!product) {
       setSubmitError(tx('অর্ডারের জন্য আগে একটি পণ্য নির্বাচন করুন।', 'Please select a product before placing an order.'));
@@ -4506,11 +4835,15 @@ function BuyOrder({
     <>
       <Header title={tx('অর্ডার দিন', 'Place Order')} onBack={() => setScreen('buyProducts')} />
       <Card style={styles.orderHeroCard}>
-        <View style={styles.orderProductVisual}>
-          <Text style={styles.orderProductEmoji}>🐄</Text>
-          <Text style={styles.orderSackText}>{rowTitle(product || undefined, lang, tx('পণ্য', 'Product'))}</Text>
-          <Text style={styles.orderSackWeight}>{product?.package_size || product?.unit || ''}</Text>
-        </View>
+        {productImage ? (
+          <Image source={{ uri: productImage }} style={styles.orderProductPhoto} resizeMode="cover" />
+        ) : (
+          <View style={styles.orderProductVisual}>
+            <Text style={styles.orderProductEmoji}>🐄</Text>
+            <Text style={styles.orderSackText}>{rowTitle(product || undefined, lang, tx('পণ্য', 'Product'))}</Text>
+            <Text style={styles.orderSackWeight}>{product?.package_size || product?.unit || ''}</Text>
+          </View>
+        )}
         <View style={styles.orderHeroCopy}>
           <Badge label={tx('মজুদ আছে', 'In stock')} tone="green" />
           <Text style={styles.orderHeroTitle}>{rowTitle(product || undefined, lang, tx('পণ্য নির্বাচন করুন', 'Select a product'))}</Text>
@@ -4532,6 +4865,7 @@ function BuyOrder({
           <OrderFeature icon="🚚" title={product?.delivery_window || tx('ডেলিভারি', 'Delivery')} sub={tx('সময়', 'window')} />
         </View>
       </Card>
+      <ProductDetailBlocks product={product} />
       <Card style={styles.orderInfoCard}>
         <Text style={styles.label}>{tx('পরিমাণ', 'Quantity')}</Text>
         <View style={styles.qtyRow}>
@@ -5219,15 +5553,18 @@ function Kyc({ setScreen, projectId, onSubmitted }: { setScreen: (screen: Screen
   );
 }
 
-function RegDone({ setScreen, application }: { setScreen: (screen: Screen) => void; application: ApiRow | null }) {
+function RegDone({ setScreen, application, onSeeProgress }: { setScreen: (screen: Screen) => void; application: ApiRow | null; onSeeProgress: () => void }) {
   const { tx } = useLanguage();
   return (
     <SuccessScreen
       icon="🤝"
       title={tx('আবেদন জমা হয়েছে!', 'Application Submitted!')}
+      headerTitle={tx('আবেদন জমা', 'Application Submitted')}
+      onBack={() => setScreen('projects')}
       refNo={application?.application_code || 'REG-APP'}
       desc={tx('পর্যালোচনা হচ্ছে। মাঠ কর্মকর্তা ৫ কর্মদিনে যোগাযোগ করবেন।', 'Review is in progress. Field officer will contact within 5 working days.')}
       action={() => setScreen('home')}
+      primary={{ title: tx('প্রকল্পের অগ্রগতি দেখুন', 'See project progress'), onPress: onSeeProgress }}
       gold
     />
   );
@@ -5450,7 +5787,15 @@ function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () =>
   const { tx, lang } = useLanguage();
   const emoji = PROJECT_CAT_EMOJI[String(project.interest_slug)] || '📦';
   const region = [project.upazila, project.district, project.division].filter(Boolean).join(', ');
-  const open = project.status === 'open';
+  // A project can be withdrawn from the market while the farmers already in it
+  // carry on. `is_active = 0` closes new applications; it does not close the
+  // project.
+  const acceptingApplications = Number(project.is_active ?? 1) === 1 && project.status === 'open';
+  const open = acceptingApplications;
+  const modelLine = lang === 'bn' ? String(project.model_bn || project.model_en || '') : String(project.model_en || '');
+  const incomeLabel = lang === 'bn' ? String(project.income_label_bn || '') : String(project.income_label_en || '');
+  const capacityLabel = lang === 'bn' ? String(project.capacity_label_bn || '') : String(project.capacity_label_en || '');
+  const loanPartners = lang === 'bn' ? String(project.loan_partners_bn || project.loan_partners_en || '') : String(project.loan_partners_en || '');
   const matches = Number(project.matches_interest) === 1;
   return (
     <Card style={styles.projCard}>
@@ -5466,23 +5811,44 @@ function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () =>
       </View>
       <View style={styles.projBody}>
         <Text style={styles.projName}>{emoji} {rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
+        {modelLine ? <Text style={styles.projModel}>{modelLine}</Text> : null}
         {Number(project.region_based) === 0 ? <Text style={styles.projMeta}>🌐 {tx('সব অঞ্চলের জন্য উন্মুক্ত', 'Open to all regions')}</Text> : null}
         {project.summary_en || project.summary_bn ? <Text style={styles.projSummary} numberOfLines={2}>{rowBody(project, lang, '')}</Text> : null}
         <View style={styles.projStatsRow}>
           {project.duration_label ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('মেয়াদ', 'Duration')}</Text><Text style={styles.projStatValue}>{String(project.duration_label)}</Text></View> : null}
-          {Number(project.investment_amount) > 0 ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('বিনিয়োগ', 'Investment')}</Text><Text style={styles.projStatValue}>{amount(Number(project.investment_amount), lang)}</Text></View> : null}
-          {Number(project.capacity) > 0 ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('আসন', 'Seats')}</Text><Text style={styles.projStatValue}>{num(Number(project.enrolled || 0), lang)}/{num(Number(project.capacity), lang)}</Text></View> : null}
+          {/* Income where the project pays the farmer, investment where the
+              farmer pays in. A buy-back project has no investment at all, and
+              showing a blank or zero there read as "costs nothing yet". */}
+          {Number(project.income_amount) > 0 ? (
+            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('আয়', 'Income')}</Text><Text style={styles.projStatValue}>{incomeLabel || amount(Number(project.income_amount), lang)}</Text></View>
+          ) : Number(project.investment_amount) > 0 ? (
+            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('বিনিয়োগ', 'Investment')}</Text><Text style={styles.projStatValue}>{amount(Number(project.investment_amount), lang)}</Text></View>
+          ) : null}
+          {capacityLabel ? (
+            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('অংশগ্রহণ', 'Capacity')}</Text><Text style={styles.projStatValue}>{capacityLabel}</Text></View>
+          ) : Number(project.capacity) > 0 ? (
+            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('আসন', 'Seats')}</Text><Text style={styles.projStatValue}>{num(Number(project.enrolled || 0), lang)}/{num(Number(project.capacity), lang)}</Text></View>
+          ) : null}
         </View>
+        {loanPartners ? <View style={styles.projPartner}><Text style={styles.projPartnerText}>🏦 {loanPartners}</Text></View> : null}
         {project.market_overview_en || project.market_overview_bn ? (
           <View style={styles.projOverview}><Text style={styles.projOverviewText}>📈 {lang === 'bn' ? (project.market_overview_bn || project.market_overview_en) : (project.market_overview_en || project.market_overview_bn)}</Text></View>
         ) : null}
-        {open ? <AppButton title={tx('এই প্রকল্পে আবেদন করুন  →', 'Apply for this project  →')} onPress={onApply} /> : null}
+        {acceptingApplications ? (
+          <AppButton title={tx('এই প্রকল্পে আবেদন করুন  →', 'Apply for this project  →')} onPress={onApply} />
+        ) : (
+          <Text style={styles.fieldHint}>
+            {Number(project.is_active ?? 1) === 0
+              ? tx('এই প্রকল্পে নতুন আবেদন নেওয়া হচ্ছে না। ইতিমধ্যে যুক্ত থাকলে "আমার প্রকল্প"-এ অগ্রগতি দেখুন।', 'This project is not taking new applications. If you are already enrolled, see progress under My Projects.')
+              : tx('নিবন্ধন শীঘ্রই শুরু হবে।', 'Registration opens soon.')}
+          </Text>
+        )}
       </View>
     </Card>
   );
 }
 
-function ProjectMineCard({ project }: { project: ApiRow }) {
+function ProjectMineCard({ project, onOpen }: { project: ApiRow; onOpen?: () => void }) {
   const { tx, lang } = useLanguage();
   const emoji = PROJECT_CAT_EMOJI[String(project.interest_slug)] || '📦';
   const approved = Number(project.is_approved) === 1 || project.application_status === 'approved';
@@ -5499,7 +5865,7 @@ function ProjectMineCard({ project }: { project: ApiRow }) {
   const region = [project.upazila, project.district, project.division].filter(Boolean).join(', ');
   const dates = [formatDate(project.start_date, lang), formatDate(project.end_date, lang)].filter(Boolean).join(' — ');
   return (
-    <Card style={styles.projCard}>
+    <Card style={styles.projCard} onPress={onOpen}>
       {project.image_url ? (
         <View style={styles.projImageWrap}>
           <Image source={{ uri: String(project.image_url) }} style={styles.projImage} />
@@ -5543,7 +5909,7 @@ function ProjectMineCard({ project }: { project: ApiRow }) {
   );
 }
 
-function Projects({ setScreen, onApply, initialTab = 'area' }: { setScreen: (screen: Screen) => void; onApply: (projectId: string) => void; initialTab?: 'all' | 'area' | 'mine' }) {
+function Projects({ setScreen, onApply, onOpenApplication, initialTab = 'area' }: { setScreen: (screen: Screen) => void; onApply: (projectId: string) => void; onOpenApplication: (applicationId: string) => void; initialTab?: 'all' | 'area' | 'mine' }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
@@ -5607,7 +5973,7 @@ function Projects({ setScreen, onApply, initialTab = 'area' }: { setScreen: (scr
                 {pending.length > 0 ? (
                   <>
                     <SectionTitle title={tx('চলমান আবেদন', 'Pending applications')} />
-                    {pending.map((p) => <ProjectMineCard key={String(p.application_id || p.id)} project={p} />)}
+                    {pending.map((p) => <ProjectMineCard key={String(p.application_id || p.id)} project={p} onOpen={p.application_id ? () => onOpenApplication(String(p.application_id)) : undefined} />)}
                   </>
                 ) : (!mine.loading ? (
                   <View style={styles.projEmpty}>
@@ -5620,7 +5986,7 @@ function Projects({ setScreen, onApply, initialTab = 'area' }: { setScreen: (scr
                 {approved.length > 0 ? (
                   <>
                     <SectionTitle title={tx('সক্রিয় প্রকল্প', 'Active projects')} />
-                    {approved.map((p) => <ProjectMineCard key={String(p.application_id || p.id)} project={p} />)}
+                    {approved.map((p) => <ProjectMineCard key={String(p.application_id || p.id)} project={p} onOpen={p.application_id ? () => onOpenApplication(String(p.application_id)) : undefined} />)}
                   </>
                 ) : null}
               </>
@@ -5656,7 +6022,7 @@ function listingStatusTone(s: string): 'green' | 'gold' | 'rose' | 'blue' {
   return s === 'active' ? 'green' : s === 'rejected' || s === 'cancelled' ? 'rose' : s === 'sold' ? 'blue' : 'gold';
 }
 
-function MyListingsBody({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function MyListingsBody({ setScreen, onOpenProgress }: { setScreen: (screen: Screen) => void; onOpenProgress?: (listingId: string) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
@@ -5685,8 +6051,12 @@ function MyListingsBody({ setScreen }: { setScreen: (screen: Screen) => void }) 
         const img = media.length ? String(media[0]) : '';
         const status = String(l.status || 'submitted');
         const isPending = status === 'submitted' || status === 'field_verification';
+        const visitDate = l.field_visit_date ? formatDate(l.field_visit_date, lang) : '';
+        // The whole card opens the progress trail — a status badge alone never
+        // answered "and what happens next?".
+        const open = onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined;
         return (
-          <View key={String(l.id)} style={styles.listingCard}>
+          <Pressable key={String(l.id)} onPress={open} disabled={!open} style={({ pressed }) => [styles.listingCard, pressed && open ? styles.pressed : null]}>
             {img
               ? <Image source={{ uri: img }} style={styles.listingCardImage} resizeMode="cover" />
               : <View style={styles.listingCardImagePh}><Text style={styles.buyCardImagePhText}>🏷️</Text></View>}
@@ -5700,20 +6070,296 @@ function MyListingsBody({ setScreen }: { setScreen: (screen: Screen) => void }) 
                 <Text style={styles.productPrice}>{amount(Number(l.farmer_expected_price || 0), lang)}<Text style={styles.unit}> /{l.unit || ''}</Text></Text>
                 <Badge label={isPending ? tx('অনুমোদনের অপেক্ষায়', 'Pending approval') : tEnum(status, lang)} tone={listingStatusTone(status)} />
               </View>
+              <Text style={styles.trailDesc}>
+                {status === 'paid' && l.paid_at
+                  ? tx(`পরিশোধিত · ${formatDate(l.paid_at, lang)}`, `Paid · ${formatDate(l.paid_at, lang)}`)
+                  : visitDate
+                    ? tx(`মাঠ পরিদর্শন · ${visitDate}`, `Field visit · ${visitDate}`)
+                    : tx('অগ্রগতি দেখতে ট্যাপ করুন →', 'Tap to see progress →')}
+              </Text>
             </View>
-          </View>
+          </Pressable>
         );
       })}
     </>
   );
 }
 
-function MyListings({ setScreen }: { setScreen: (screen: Screen) => void }) {
+// ---------------------------------------------------------------------------
+// Progress trails
+// ---------------------------------------------------------------------------
+
+type ProgressStep = {
+  key: string;
+  index: number;
+  title_en: string;
+  title_bn: string;
+  desc_en: string;
+  desc_bn: string;
+  state: 'done' | 'current' | 'upcoming';
+  date: string | null;
+  note: string | null;
+};
+
+type ProgressPayload = {
+  reference?: string;
+  status?: string;
+  rejected?: boolean;
+  steps?: ProgressStep[];
+  note?: string | null;
+  officer?: { name?: string; phone?: string; area?: string } | null;
+  listing?: ApiRow;
+  application?: ApiRow;
+};
+
+/** One-shot fetch of a single object. `useApiList` only speaks in arrays. */
+function useApiObject<T>(resource: string | null) {
+  const { lang } = useLanguage();
+  const refreshTick = useRefreshTick();
+  const [state, setState] = useState<{ data: T | null; loading: boolean; error: string | null }>({ data: null, loading: !!resource, error: null });
+  useEffect(() => {
+    if (!resource) {
+      setState({ data: null, loading: false, error: null });
+      return;
+    }
+    let alive = true;
+    setState({ data: null, loading: true, error: null });
+    apiRequest<{ data?: T }>(resource)
+      .then((json) => { if (alive) setState({ data: json.data ?? null, loading: false, error: null }); })
+      .catch((error) => { if (alive) setState({ data: null, loading: false, error: naturalApiError(error, lang) }); });
+    return () => { alive = false; };
+  }, [resource, refreshTick, lang]);
+  return state;
+}
+
+function ProgressTrail({ steps }: { steps: ProgressStep[] }) {
+  const { tx, lang } = useLanguage();
+  return (
+    <View style={styles.trail}>
+      {steps.map((step, i) => {
+        const done = step.state === 'done';
+        const current = step.state === 'current';
+        const last = i === steps.length - 1;
+        return (
+          <View key={step.key} style={styles.trailRow}>
+            <View style={styles.trailRail}>
+              <View style={[styles.trailDot, done && styles.trailDotDone, current && styles.trailDotCurrent]}>
+                <Text style={done || current ? styles.trailDotText : styles.trailDotTextPending}>{done ? '✓' : String(step.index)}</Text>
+              </View>
+              {/* The connector is coloured by the step above it, so the green
+                  stops exactly where progress stopped. */}
+              {!last ? <View style={[styles.trailLine, done && styles.trailLineDone]} /> : null}
+            </View>
+            <View style={styles.trailBody}>
+              <Text style={[styles.trailTitle, step.state === 'upcoming' && styles.trailTitleMuted]}>{tx(step.title_bn, step.title_en)}</Text>
+              <Text style={styles.trailDesc}>{tx(step.desc_bn, step.desc_en)}</Text>
+              {step.date ? <Text style={styles.trailDate}>{formatDate(step.date, lang)}</Text> : null}
+              {current ? (
+                <View style={styles.trailCurrentPill}>
+                  <Text style={styles.trailCurrentPillText}>{tx('এখন এই ধাপে', 'HAPPENING NOW')}</Text>
+                </View>
+              ) : null}
+              {step.note ? <Text style={styles.trailNote}>{step.note}</Text> : null}
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function OfficerCard({ officer }: { officer: { name?: string; phone?: string; area?: string } }) {
+  const { tx } = useLanguage();
+  return (
+    <Card style={styles.officerCard}>
+      <Text style={styles.smallUpper}>{tx('নির্ধারিত মাঠ কর্মকর্তা', 'Assigned field officer')}</Text>
+      <Text style={styles.officerName}>{officer.name}</Text>
+      <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${officer.phone}` : '', officer.area].filter(Boolean).join(' · ')}</Text>
+    </Card>
+  );
+}
+
+function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen) => void; listingId: string | null }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const resource = listingId
+    ? `app/sale/listing-progress?listing_id=${encodeURIComponent(listingId)}${user?.id ? `&user_id=${encodeURIComponent(String(user.id))}` : ''}`
+    : null;
+  const state = useApiObject<ProgressPayload>(resource);
+  const data = state.data;
+  const listing = (data?.listing ?? {}) as ApiRow;
+  const live = Number(listing.weight_kg || 0);
+  const meat = Number(listing.meat_weight_kg || 0) || (live * (Number(listing.dressing_pct) || DEFAULT_DRESSING_PCT)) / 100;
+
+  return (
+    <>
+      <Header title={tx('তালিকার অগ্রগতি', 'Listing Progress')} onBack={() => setScreen('myListings')} />
+      {state.loading ? <Text style={styles.fieldHint}>{tx('অগ্রগতি আনা হচ্ছে...', 'Loading progress...')}</Text> : null}
+      {!state.loading && !data ? (
+        <View style={styles.projEmpty}>
+          <Text style={styles.projEmptyIcon}>🏷️</Text>
+          <Text style={styles.projEmptyTitle}>{tx('তালিকাটি পাওয়া যায়নি', 'Listing not found')}</Text>
+          <Text style={styles.projEmptyText}>{state.error || tx('তালিকাটি সরানো হয়েছে অথবা আপনার নয়।', 'It may have been removed, or it is not yours.')}</Text>
+          <AppButton title={tx('আমার তালিকা', 'My Listings')} onPress={() => setScreen('myListings')} />
+        </View>
+      ) : null}
+      {data ? (
+        <>
+          <Card>
+            <Text style={styles.smallUpper}>{tx('রেফারেন্স', 'Reference')}</Text>
+            <Text style={styles.officerName}>{String(data.reference || '')}</Text>
+            <Text style={styles.officerMeta}>
+              {[rowTitle(listing, lang, String(listing.animal_name || 'Livestock')), listing.breed_name ? String(lang === 'bn' ? listing.breed_name_bn || listing.breed_name : listing.breed_name) : ''].filter(Boolean).join(' · ')}
+            </Text>
+            <View style={styles.summaryChips}>
+              {live > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('জীবিত', 'Live')} {num(live, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
+              {meat > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('মাংস', 'Meat')} {num(Math.round(meat), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
+              {Number(listing.verified_weight_kg || 0) > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('যাচাইকৃত', 'Verified')} {num(Number(listing.verified_weight_kg), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
+            </View>
+          </Card>
+          {data.rejected ? (
+            <View style={styles.infoBar}>
+              <Text style={styles.infoText}>{tx('এই তালিকাটি বাতিল হয়েছে। মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This listing was cancelled or rejected. Talk to your field officer.')}</Text>
+            </View>
+          ) : null}
+          <ProgressTrail steps={data.steps || []} />
+          <View style={styles.priceTable}>
+            <View style={styles.finalRow}>
+              <View style={styles.flex}>
+                <Text style={styles.finalLabel}>{Number(listing.paid_amount || 0) > 0 ? tx('পরিশোধিত', 'Paid') : tx('আনুমানিক আয়', 'Estimated earning')}</Text>
+                <Text style={styles.finalSub}>
+                  {Number(listing.paid_amount || 0) > 0
+                    ? [listing.payment_method ? tEnum(String(listing.payment_method), lang) : '', listing.payment_reference].filter(Boolean).join(' · ')
+                    : tx('চূড়ান্ত পেমেন্ট যাচাইকৃত ওজনে', 'Final payment is set on the verified weight')}
+                </Text>
+              </View>
+              <Text style={styles.finalValue}>{amount(Number(listing.paid_amount || listing.estimated_earning || 0), lang)}</Text>
+            </View>
+          </View>
+          {data.officer ? <OfficerCard officer={data.officer} /> : null}
+        </>
+      ) : null}
+      <AppButton title={tx('আমার তালিকায় ফিরুন', 'Back to My Listings')} variant="outline" onPress={() => setScreen('myListings')} />
+    </>
+  );
+}
+
+function ProjectProgress({ setScreen, applicationId }: { setScreen: (screen: Screen) => void; applicationId: string | null }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const resource = applicationId
+    ? `app/projects/application-progress?application_id=${encodeURIComponent(applicationId)}${user?.id ? `&user_id=${encodeURIComponent(String(user.id))}` : ''}`
+    : null;
+  const state = useApiObject<ProgressPayload>(resource);
+  const data = state.data;
+  const app = (data?.application ?? {}) as ApiRow;
+
+  return (
+    <>
+      <Header title={tx('প্রকল্পের অগ্রগতি', 'Project Progress')} onBack={() => setScreen('myProjects')} />
+      {state.loading ? <Text style={styles.fieldHint}>{tx('অগ্রগতি আনা হচ্ছে...', 'Loading progress...')}</Text> : null}
+      {!state.loading && !data ? (
+        <View style={styles.projEmpty}>
+          <Text style={styles.projEmptyIcon}>🤝</Text>
+          <Text style={styles.projEmptyTitle}>{tx('আবেদন পাওয়া যায়নি', 'Application not found')}</Text>
+          <Text style={styles.projEmptyText}>{state.error || tx('আবেদনটি সরানো হয়েছে অথবা আপনার নয়।', 'It may have been removed, or it is not yours.')}</Text>
+          <AppButton title={tx('আমার প্রকল্প', 'My Projects')} onPress={() => setScreen('myProjects')} />
+        </View>
+      ) : null}
+      {data ? (
+        <>
+          <Card>
+            <Text style={styles.smallUpper}>{tx('রেফারেন্স', 'Reference')}</Text>
+            <Text style={styles.officerName}>{String(data.reference || '')}</Text>
+            <Text style={styles.productTitle}>{lang === 'bn' ? String(app.project_name_bn || app.project_name || '') : String(app.project_name || '')}</Text>
+            {app.model_en ? <Text style={styles.officerMeta}>{lang === 'bn' ? String(app.model_bn || app.model_en) : String(app.model_en)}</Text> : null}
+            <View style={styles.summaryChips}>
+              {app.duration_label ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⏱ {String(app.duration_label)}</Text></View> : null}
+              {Number(app.income_amount || 0) > 0 ? (
+                <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{(lang === 'bn' ? String(app.income_label_bn || '') : String(app.income_label_en || '')) || amount(Number(app.income_amount), lang)}</Text></View>
+              ) : null}
+            </View>
+            {app.loan_partners_en ? <Text style={styles.trailDesc}>{lang === 'bn' ? String(app.loan_partners_bn || app.loan_partners_en) : String(app.loan_partners_en)}</Text> : null}
+          </Card>
+          {data.rejected ? (
+            <View style={styles.infoBar}>
+              <Text style={styles.infoText}>{tx('এই আবেদনটি অনুমোদিত হয়নি। মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This application was not approved. Talk to your field officer.')}</Text>
+            </View>
+          ) : null}
+          <ProgressTrail steps={data.steps || []} />
+          {data.note ? (
+            <View style={styles.noteBlue}>
+              <Text style={styles.noteText}>{data.note}</Text>
+            </View>
+          ) : null}
+          {data.officer ? <OfficerCard officer={data.officer} /> : null}
+        </>
+      ) : null}
+      <AppButton title={tx('আমার প্রকল্পে ফিরুন', 'Back to My Projects')} variant="outline" onPress={() => setScreen('myProjects')} />
+    </>
+  );
+}
+
+function applicationStatusTone(s: string): 'green' | 'gold' | 'rose' | 'blue' {
+  if (s === 'approved') return 'green';
+  if (s === 'rejected') return 'rose';
+  if (s === 'officer_verification' || s === 'ready_to_approve') return 'blue';
+  return 'gold';
+}
+
+function MyProjects({ setScreen, onOpen }: { setScreen: (screen: Screen) => void; onOpen: (applicationId: string) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
+  const apps = useApiList<ApiRow>(`app/projects/applications${uid}`);
+  const rows = apps.rows;
+  return (
+    <>
+      <Header title={tx('আমার প্রকল্প', 'My Projects')} onBack={() => setScreen('profile')} />
+      {apps.loading ? <ApiStatus state={apps} /> : null}
+      {!apps.loading && rows.length === 0 ? (
+        <View style={styles.projEmpty}>
+          <Text style={styles.projEmptyIcon}>🤝</Text>
+          <Text style={styles.projEmptyTitle}>{tx('এখনো কোনো প্রকল্প নেই', 'No projects yet')}</Text>
+          <Text style={styles.projEmptyText}>{tx('প্রকল্পে যোগ দিলে এখানে অগ্রগতি দেখতে পাবেন।', 'Join a project and its progress shows up here.')}</Text>
+          <AppButton title={tx('প্রকল্প দেখুন', 'Browse projects')} onPress={() => setScreen('projects')} />
+        </View>
+      ) : null}
+      {rows.map((a) => {
+        const status = String(a.status || 'submitted');
+        const img = a.image_url ? String(a.image_url) : '';
+        return (
+          <Pressable key={String(a.id)} onPress={() => onOpen(String(a.id))} style={({ pressed }) => [styles.listingCard, pressed && styles.pressed]}>
+            {img
+              ? <Image source={{ uri: img }} style={styles.listingCardImage} resizeMode="cover" />
+              : <View style={styles.listingCardImagePh}><Text style={styles.buyCardImagePhText}>🤝</Text></View>}
+            <View style={styles.listingCardBody}>
+              <Text style={styles.productTitle} numberOfLines={1}>{lang === 'bn' ? String(a.project_name_bn || a.project_name || '') : String(a.project_name || '')}</Text>
+              <Text style={styles.productSub} numberOfLines={1}>{[String(a.application_code || ''), a.duration_label ? String(a.duration_label) : ''].filter(Boolean).join(' · ')}</Text>
+              <Text style={styles.buyCardPack}>{formatDate(a.created_at, lang)}</Text>
+              <View style={styles.buyCardFoot}>
+                <Text style={styles.productPrice}>{Number(a.income_amount || 0) > 0 ? amount(Number(a.income_amount), lang) : ''}</Text>
+                <Badge label={tEnum(status, lang)} tone={applicationStatusTone(status)} />
+              </View>
+              {/* A project the platform has since closed keeps showing its
+                  progress to the farmers already in it. */}
+              {Number(a.project_is_active ?? 1) === 0 ? (
+                <Text style={styles.trailDesc}>{tx('নতুন আবেদন বন্ধ — আপনার তালিকাভুক্তি চালু আছে।', 'Closed to new applications — your enrolment continues.')}</Text>
+              ) : null}
+            </View>
+          </Pressable>
+        );
+      })}
+    </>
+  );
+}
+
+function MyListings({ setScreen, onOpenProgress }: { setScreen: (screen: Screen) => void; onOpenProgress?: (listingId: string) => void }) {
   const { tx } = useLanguage();
   return (
     <>
       <Header title={tx('আমার বিক্রির তালিকা', 'My Listings')} onBack={() => setScreen('profile')} />
-      <MyListingsBody setScreen={setScreen} />
+      <MyListingsBody setScreen={setScreen} onOpenProgress={onOpenProgress} />
     </>
   );
 }
@@ -5732,6 +6378,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
     // (MOB-RDY-05).
     { icon: '🧭', title: tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness'), sub: tx('আপনার ঋণ প্রস্তুতি দেখুন', 'See your finance readiness'), target: 'financeReadinessResult' },
     { icon: '🏷️', title: tx('আমার বিক্রির তালিকা', 'My Listings'), sub: tx('তালিকা ও অনুমোদনের অবস্থা', 'Listings & approval status'), target: 'myListings' },
+    { icon: '🤝', title: tx('আমার প্রকল্প', 'My Projects'), sub: tx('আবেদন ও প্রকল্পের অগ্রগতি', 'Applications & project progress'), target: 'myProjects' },
     { icon: '🗂️', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
     { icon: '🌐', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
     { icon: '❓', title: tx('সাহায্য ও FAQ', 'Help & FAQ'), sub: tx('সাধারণ জিজ্ঞাসা', 'Common questions'), target: 'menuFaq' },
@@ -6299,6 +6946,9 @@ function SuccessScreen({
   action,
   children,
   gold,
+  headerTitle,
+  onBack,
+  primary,
 }: {
   icon: string;
   title: string;
@@ -6307,19 +6957,30 @@ function SuccessScreen({
   action: () => void;
   children?: React.ReactNode;
   gold?: boolean;
+  /** Renders the standard top nav so the farmer is not trapped on the tick. */
+  headerTitle?: string;
+  onBack?: () => void;
+  /** Optional call to action shown above "Back to Home". */
+  primary?: { title: string; onPress: () => void };
 }) {
   const { tx } = useLanguage();
   return (
-    <View style={styles.success}>
-      <View style={[styles.successCircle, gold && styles.successGold]}>
-        <Text style={styles.successIcon}>{icon}</Text>
+    <>
+      {onBack ? <Header title={headerTitle || title} onBack={onBack} /> : null}
+      <View style={styles.success}>
+        <View style={[styles.successCircle, gold && styles.successGold]}>
+          <Text style={styles.successIcon}>{icon}</Text>
+        </View>
+        <Text style={[styles.successTitle, gold && styles.successGoldText]}>{title}</Text>
+        <Text style={styles.refNo}>{refNo}</Text>
+        <Text style={styles.successDesc}>{desc}</Text>
+        {children}
+        <View style={styles.successActions}>
+          {primary ? <AppButton title={primary.title} onPress={primary.onPress} /> : null}
+          <AppButton title={tx('হোমে ফিরুন', 'Back to Home')} variant={primary ? 'outline' : 'primary'} onPress={action} />
+        </View>
       </View>
-      <Text style={[styles.successTitle, gold && styles.successGoldText]}>{title}</Text>
-      <Text style={styles.refNo}>{refNo}</Text>
-      <Text style={styles.successDesc}>{desc}</Text>
-      {children}
-      <AppButton title={tx('হোমে ফিরুন', 'Back to Home')} onPress={action} />
-    </View>
+    </>
   );
 }
 
@@ -6341,6 +7002,142 @@ function SuccessScreen({
 // ===========================================================================
 
 const fin = StyleSheet.create({
+  // Readiness result badge. One maroon block instead of a white card with the
+  // grade ring, score, label and chips stacked down it — that layout spent most
+  // of the first screen on whitespace and pushed the breakdown below the fold.
+  badge: { marginHorizontal: 16, marginTop: 14, backgroundColor: colors.maroon, borderRadius: 20, padding: 18 },
+  badgeTop: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  badgeRing: { width: 88, height: 88, borderRadius: 44, borderWidth: 2.5, alignItems: 'center', justifyContent: 'center' },
+  badgeGrade: { fontSize: 38, fontWeight: '800' },
+  badgePip: { position: 'absolute', right: -2, bottom: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: colors.gold, borderWidth: 2, borderColor: colors.maroon },
+  badgeScoreLabel: { color: 'rgba(255,255,255,0.78)', fontSize: 12, fontWeight: '700', letterSpacing: 0.4 },
+  badgeScore: { color: 'white', fontSize: 38, lineHeight: 46, fontWeight: '800' },
+  badgeOutOf: { color: 'rgba(255,255,255,0.6)', fontSize: 17, fontWeight: '600' },
+  badgeMessage: { color: '#FFF3C4', fontSize: 15, lineHeight: 22, fontWeight: '700', marginTop: 12 },
+  badgeChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 14 },
+  badgeChip: { borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.16)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.34)', paddingHorizontal: 11, paddingVertical: 5 },
+  badgeChipText: { color: 'white', fontSize: 11.5, fontWeight: '700' },
+  badgeChipTextGold: { color: '#FFF3C4' },
+  badgeProvisional: { marginTop: 12, backgroundColor: 'rgba(245,158,11,0.22)', borderWidth: 1, borderColor: 'rgba(245,158,11,0.55)', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  badgeProvisionalTag: { color: '#FFE9B8', fontSize: 12, fontWeight: '800' },
+  badgeProvisionalNote: { color: 'rgba(255,255,255,0.86)', fontSize: 12.5, lineHeight: 19, marginTop: 3 },
+  badgeFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 14 },
+  badgeMicro: { color: 'rgba(255,255,255,0.72)', fontSize: 11.5, lineHeight: 16 },
+  badgeRetake: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.45)', borderRadius: 9, paddingHorizontal: 14, paddingVertical: 9, minHeight: 38, justifyContent: 'center' },
+  badgeRetakeText: { color: 'white', fontSize: 13, fontWeight: '700' },
+
+  // Requested vs recommended, drawn to scale. Named `ask*` because `amountRow`
+  // is already taken by the loan amount input further down this sheet.
+  askRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  askLabel: { color: colors.muted, fontSize: 12.5, fontWeight: '600' },
+  askValue: { color: colors.ink, fontSize: 14, fontWeight: '800' },
+  askValueMuted: { color: colors.muted, fontSize: 13.5, fontWeight: '700' },
+  askTrack: { height: 8, borderRadius: 999, backgroundColor: colors.line, marginTop: 6, overflow: 'hidden' },
+  askFill: { height: 8, borderRadius: 999, backgroundColor: colors.maroon },
+  askFillMuted: { height: 8, borderRadius: 999, backgroundColor: '#DCCBD4' },
+  askNote: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 10 },
+
+  // Readiness questionnaire
+  quizPage: { flex: 1, backgroundColor: colors.cream },
+  quizBody: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 18 },
+  tagRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  tagPhase: { backgroundColor: '#F1E3EA', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5 },
+  tagPhaseText: { color: colors.maroon, fontSize: 12.5, fontWeight: '800' },
+  tagCat: { borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5 },
+  tagCatText: { color: colors.ink, fontSize: 12.5, fontWeight: '700' },
+  tagFlag: { alignSelf: 'flex-start', marginTop: 8, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5 },
+  tagFlagText: { color: '#7A5200', fontSize: 12, fontWeight: '800' },
+  questionRow: { flexDirection: 'row', gap: 14, alignItems: 'flex-start', marginTop: 16 },
+  questionIcon: { width: 52, height: 52, borderRadius: 12, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+  questionText: { flex: 1, color: colors.ink, fontSize: 22, fontWeight: '800', lineHeight: 31 },
+  whyTitle: { color: colors.maroon, fontSize: 14, fontWeight: '800', marginTop: 20 },
+  whyBox: { marginTop: 8, backgroundColor: '#FBEEF3', borderRadius: 12, padding: 14 },
+  whyText: { color: colors.ink, fontSize: 14, lineHeight: 21 },
+
+  // Answers are docked to the bottom edge so they never move between questions.
+  answerDock: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.cream },
+  answerBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line, borderRadius: 14, paddingVertical: 17, marginTop: 10, minHeight: 56 },
+  answerGlyph: { fontSize: 20, fontWeight: '800' },
+  answerLabel: { color: colors.ink, fontSize: 18, fontWeight: '800' },
+  privacyNote: { textAlign: 'center', color: colors.maroon, fontSize: 12, marginTop: 12, lineHeight: 17 },
+  quizError: { color: colors.danger, fontSize: 13, lineHeight: 19, marginBottom: 4 },
+  quizSubmitting: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.55)', alignItems: 'center', justifyContent: 'center' },
+  weakNotice: { padding: 16, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A' },
+  weakTitle: { color: '#7A5200', fontSize: 15.5, fontWeight: '800' },
+  weakBody: { color: '#7A5200', fontSize: 13.5, marginTop: 6, lineHeight: 20 },
+  stageMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 5, flexWrap: 'wrap' },
+  ownerChip: { borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 2 },
+  ownerChipText: { color: colors.muted, fontSize: 11.5, fontWeight: '700' },
+  stageDate: { color: colors.muted, fontSize: 11.5 },
+  refreshHint: { textAlign: 'center', color: colors.muted, fontSize: 12, marginTop: 16 },
+  // Officer contact card
+  officerCard: { marginHorizontal: 16, padding: 14 },
+  officerRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  officerActions: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  smsBtn: { flex: 1, borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingVertical: 11, alignItems: 'center', justifyContent: 'center', minHeight: 44 },
+  smsBtnText: { color: colors.ink, fontSize: 14, fontWeight: '700' },
+  officerHours: { marginTop: 10, backgroundColor: colors.rose, borderRadius: 8, padding: 9 },
+
+  // Indicative terms table
+  termRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, paddingVertical: 9, borderTopWidth: 1, borderTopColor: colors.line },
+  termLabel: { color: colors.muted, fontSize: 13.5 },
+  termValue: { color: colors.ink, fontSize: 13.5, fontWeight: '700', flexShrink: 1, textAlign: 'right' },
+
+  promiseCard: { marginHorizontal: 16, marginTop: 12, padding: 13, backgroundColor: '#E6F5ED', borderWidth: 1, borderColor: '#B7E0C9' },
+  promiseText: { color: '#1E7A46', fontSize: 13.5, fontWeight: '600', lineHeight: 20 },
+  // Consent step
+  consentAllCard: { marginHorizontal: 16, marginTop: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  consentRow: { marginHorizontal: 16, marginTop: 10, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  switchTrack: { width: 44, height: 26, borderRadius: 999, backgroundColor: colors.line, padding: 3, justifyContent: 'center' },
+  switchKnob: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff' },
+  stillNeeded: { marginHorizontal: 16, marginTop: 14, color: colors.maroon, fontSize: 12.5, lineHeight: 18 },
+  noteInput: { minHeight: 64, borderWidth: 1, borderColor: colors.line, borderRadius: 10, padding: 11, color: colors.ink, fontSize: 14, textAlignVertical: 'top' },
+  // Inline repayment schedule on the amount step
+  schedHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 10, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.line, minHeight: 44 },
+  schedHeadText: { flex: 1, color: colors.maroon, fontSize: 13.5, fontWeight: '800' },
+  schedChevron: { color: colors.maroon, fontSize: 19, fontWeight: '800', width: 18, textAlign: 'center' },
+  schedRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#FAF4F7' },
+  schedNo: { width: 24, color: colors.muted, fontSize: 12, fontWeight: '700' },
+  schedDate: { flex: 1, color: colors.ink, fontSize: 13 },
+  schedAmount: { color: colors.ink, fontSize: 13.5, fontWeight: '700' },
+  // Loan hub — live application summary
+  hubStatRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  hubStat: { flex: 1, backgroundColor: colors.rose, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 10 },
+  hubStatLabel: { color: colors.muted, fontSize: 11, fontWeight: '700' },
+  hubStatValue: { color: colors.ink, fontSize: 13.5, fontWeight: '800', marginTop: 3 },
+  hubProgressTrack: { height: 7, backgroundColor: colors.line, borderRadius: 999, marginTop: 8, overflow: 'hidden' },
+  hubProgressFill: { height: 7, borderRadius: 999, backgroundColor: colors.maroon },
+
+  // Loan hub — how it works
+  howCard: { marginHorizontal: 16, marginTop: 14, padding: 16, backgroundColor: colors.rose, borderWidth: 1, borderColor: '#EBDDE4' },
+  howKicker: { color: colors.maroon, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.4, textTransform: 'uppercase' },
+  howTitle: { color: colors.ink, fontSize: 16.5, fontWeight: '800', marginTop: 4, marginBottom: 10 },
+  howStep: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  howNum: { color: colors.maroon, fontSize: 13.5, fontWeight: '800', minWidth: 20 },
+  howText: { flex: 1, color: colors.ink, fontSize: 13.5, lineHeight: 20 },
+  howNote: { flexDirection: 'row', gap: 9, alignItems: 'flex-start', marginTop: 14, backgroundColor: colors.card, borderRadius: 10, padding: 11 },
+  howNoteText: { flex: 1, color: colors.maroon, fontSize: 12.5, lineHeight: 18, fontWeight: '600' },
+
+  // Loan hub — readiness entry
+  readyCard: { marginHorizontal: 16, marginTop: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  readyIcon: { width: 38, height: 38, borderRadius: 10, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' },
+
+  productTerms: { color: colors.maroon, fontSize: 12, fontWeight: '700', marginTop: 3 },
+  // Collapsible section header
+  collapseHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 16, marginTop: 18, marginBottom: 8, minHeight: 44 },
+  collapseTitle: { flex: 1, color: colors.ink, fontSize: 16, fontWeight: '800' },
+  collapseBadge: { backgroundColor: '#E6F5ED', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 3 },
+  collapseBadgeText: { color: colors.green, fontSize: 12.5, fontWeight: '800' },
+  collapseChevron: { color: colors.maroon, fontSize: 20, fontWeight: '800', width: 18, textAlign: 'center' },
+
+  // Profile-strength meter
+  strengthBar: { flexDirection: 'row', gap: 4, marginBottom: 10 },
+  strengthSeg: { flex: 1, height: 7, borderRadius: 999 },
+  strengthMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, flexWrap: 'wrap' },
+
+  // Confidence ring on the home passport badge
+  confidenceRing: { position: 'absolute', right: -2, bottom: -2, width: 18, height: 18, borderRadius: 9, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.card },
+  confidenceGlyph: { fontSize: 10, fontWeight: '900' },
   // Home Finance Passport card
   passport: { marginHorizontal: 16, marginTop: 12, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 },
   passportBadge: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', borderWidth: 2 },
@@ -6366,11 +7163,6 @@ const fin = StyleSheet.create({
   question: { color: colors.ink, fontSize: 23, fontWeight: '800', lineHeight: 33 },
   helperToggle: { color: colors.maroon, fontSize: 13.5, fontWeight: '600', marginTop: 12 },
   helperBody: { color: colors.muted, fontSize: 13.5, lineHeight: 20, marginTop: 8 },
-  answerStack: { gap: 12, paddingBottom: 8 },
-  answerBtn: { minHeight: 56, borderRadius: 14, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.card,
-               alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 },
-  answerText: { fontSize: 17, fontWeight: '700', color: colors.ink },
-  privacyNote: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 14 },
 
   // Result
   scoreWrap: { alignItems: 'center', paddingVertical: 18 },
@@ -6460,20 +7252,92 @@ const fin = StyleSheet.create({
 });
 
 /** Grade badge used on the home card and the result screens. */
-function GradeBadge({ grade, size = 56, verified }: { grade: FinanceGrade | '?'; size?: number; verified?: boolean }) {
-  const color = GRADE_COLORS[grade];
+/**
+ * A titled section that collapses. The badge on the header carries the count, so
+ * a closed section still answers "how many" without being opened — which is the
+ * only reason to collapse a list rather than truncate it.
+ */
+function Collapsible({
+  title, badge, tone, open, onToggle, children,
+}: {
+  title: string;
+  badge?: string | number;
+  tone?: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
   return (
-    <View
-      style={[
-        fin.passportBadge,
-        {
-          width: size, height: size, borderRadius: size / 2,
-          borderColor: color,
-          backgroundColor: verified ? color : GRADE_TINTS[grade],
-        },
-      ]}
-    >
-      <Text style={[fin.passportBadgeText, { color: verified ? '#fff' : color, fontSize: size * 0.42 }]}>{grade}</Text>
+    <>
+      <Pressable
+        onPress={onToggle}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        style={({ pressed }) => [fin.collapseHead, pressed && styles.pressed]}
+      >
+        <Text style={fin.collapseTitle}>{title}</Text>
+        {badge != null ? (
+          <View style={[fin.collapseBadge, tone ? { backgroundColor: `${tone}22` } : null]}>
+            <Text style={[fin.collapseBadgeText, tone ? { color: tone } : null]}>{badge}</Text>
+          </View>
+        ) : null}
+        <Text style={fin.collapseChevron}>{open ? '−' : '+'}</Text>
+      </Pressable>
+      {open ? <Card style={{ marginHorizontal: 16, padding: 16 }}>{children}</Card> : null}
+    </>
+  );
+}
+
+/** Confidence is a property of the evidence, not of the farmer. */
+const CONFIDENCE_TONE: Record<string, string> = {
+  high: '#1E9E5A',
+  medium: '#D97706',
+  low: '#8A7680',
+};
+
+function GradeBadge({
+  grade, size = 56, verified, confidence,
+}: {
+  grade: FinanceGrade | '?';
+  size?: number;
+  verified?: boolean;
+  /** Renders a small ring on the badge instead of a separate text chip. */
+  confidence?: string | null;
+}) {
+  const { tx, lang } = useLanguage();
+  const color = GRADE_COLORS[grade];
+  const tone = confidence ? CONFIDENCE_TONE[confidence] ?? CONFIDENCE_TONE.low : null;
+
+  return (
+    <View style={{ position: 'relative' }}>
+      <View
+        style={[
+          fin.passportBadge,
+          {
+            width: size, height: size, borderRadius: size / 2,
+            borderColor: color,
+            backgroundColor: verified ? color : GRADE_TINTS[grade],
+          },
+        ]}
+      >
+        <Text style={[fin.passportBadgeText, { color: verified ? '#fff' : color, fontSize: size * 0.42 }]}>{grade}</Text>
+      </View>
+
+      {/* "Confidence: Low" spelled out next to a grade reads as a second, worse
+          grade — people saw it as a judgement on them rather than on how much of
+          their file we had verified. A filled/half/hollow ring carries the same
+          three states without competing with the grade for meaning, and the
+          accessibility label still says it in full. */}
+      {tone ? (
+        <View
+          style={[fin.confidenceRing, { backgroundColor: confidence === 'low' ? colors.card : tone, borderColor: tone }]}
+          accessibilityLabel={`${tx('তথ্য নির্ভরযোগ্যতা', 'Data confidence')}: ${financeLabel(confidence!, lang)}`}
+        >
+          <Text style={[fin.confidenceGlyph, { color: confidence === 'low' ? tone : '#fff' }]}>
+            {confidence === 'high' ? '✓' : confidence === 'medium' ? '◐' : '○'}
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -6491,7 +7355,7 @@ function OutputChip({ label, tone }: { label: string; tone: string }) {
  * central support rather than rendering empty, and reads from cache offline —
  * a phone number is exactly what a farmer needs when connectivity has failed.
  */
-function OfficerHelpStrip({ district }: { district?: string | null }) {
+function OfficerHelpStrip({ district, title }: { district?: string | null; title?: string }) {
   const { tx, lang } = useLanguage();
   const officers = useApiList<ApiRow>(`community/officers${district ? `?district=${encodeURIComponent(district)}` : ''}`);
   const officer = officers.rows[0];
@@ -6499,25 +7363,54 @@ function OfficerHelpStrip({ district }: { district?: string | null }) {
   const role = officer
     ? rowTitle({ title_bn: officer.role_bn, title_en: officer.role }, lang, tx('মাঠ কর্মকর্তা', 'Field officer'))
     : tx('কেন্দ্রীয় সহায়তা', 'Central support');
+  const area = officer ? String(officer.upazila ?? officer.district ?? district ?? '') : '';
   const phone = officer ? String(officer.phone ?? officer.mobile ?? '') : '16234';
+  const initials = (name || 'S').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 
   return (
-    <Card style={fin.officerStrip}>
-      <View style={fin.officerAvatar}>
-        <Text style={fin.officerAvatarText}>{(name || 'S').slice(0, 1)}</Text>
-      </View>
-      <View style={styles.flex}>
-        <Text style={{ color: colors.ink, fontSize: 15, fontWeight: '700' }}>{name}</Text>
-        <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>{role}</Text>
-      </View>
-      <Pressable
-        onPress={() => Linking.openURL(`tel:${phone}`)}
-        accessibilityLabel={tx('কল করুন', 'Call')}
-        style={({ pressed }) => [fin.callBtn, pressed && styles.pressed]}
-      >
-        <Text style={fin.callBtnText}>{tx('কল করুন', 'Call')}</Text>
-      </Pressable>
-    </Card>
+    <>
+      <SectionTitle title={title ?? tx('আপনার এলাকার শাথী কর্মকর্তা', 'Your local Shathi officer')} />
+      <Card style={fin.officerCard}>
+        <View style={fin.officerRow}>
+          <View style={fin.officerAvatar}>
+            <Text style={fin.officerAvatarText}>{initials}</Text>
+          </View>
+          <View style={styles.flex}>
+            <Text style={{ color: colors.ink, fontSize: 15.5, fontWeight: '700' }}>{name}</Text>
+            <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>
+              {role}{area ? ` · ${area}` : ''}
+            </Text>
+            {phone ? <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 1 }}>{num(phone, lang)}</Text> : null}
+          </View>
+        </View>
+
+        {/* Call and SMS both: a farmer standing in a field with one bar of signal
+            can send a message when a call will not connect. */}
+        <View style={fin.officerActions}>
+          <Pressable
+            onPress={() => Linking.openURL(`tel:${phone}`)}
+            accessibilityLabel={tx('কল করুন', 'Call')}
+            style={({ pressed }) => [fin.callBtn, pressed && styles.pressed]}
+          >
+            <Text style={fin.callBtnText}>📞  {tx('কল করুন', 'Call')}</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => Linking.openURL(`sms:${phone}`)}
+            accessibilityLabel={tx('এসএমএস', 'SMS')}
+            style={({ pressed }) => [fin.smsBtn, pressed && styles.pressed]}
+          >
+            <Text style={fin.smsBtnText}>✉  {tx('এসএমএস', 'SMS')}</Text>
+          </Pressable>
+        </View>
+
+        <View style={fin.officerHours}>
+          <Text style={{ color: colors.muted, fontSize: 12, lineHeight: 17 }}>
+            🕐  {tx('শনি – বৃহস্পতি, সকাল ৯টা – সন্ধ্যা ৬টা। কল না ধরলে তিনি ফিরতি কল করবেন।',
+                    'Sat – Thu, 9:00 am – 6:00 pm. If he cannot answer, he will call you back.')}
+          </Text>
+        </View>
+      </Card>
+    </>
   );
 }
 
@@ -6531,10 +7424,15 @@ function useFinanceSummary() {
     if (!user?.id) { setData(null); return; }
     (async () => {
       try {
-        const res = await apiRequest<{ data?: FinanceSummary }>('app/finance/summary');
+        // Silent: this refires every time Home mounts, and a full-screen spinner
+        // over an already-rendered page is what made returning from the loan
+        // screens feel like the app had stalled.
+        const res = await apiRequest<{ data?: FinanceSummary }>('app/finance/summary', { silent: true });
         if (alive) setData(res.data ?? null);
       } catch {
-        if (alive) setData(null);
+        // Keep whatever was last shown rather than blanking the card — a failed
+        // background refresh is not a reason to remove information already on
+        // screen.
       }
     })();
     return () => { alive = false; };
@@ -6596,7 +7494,7 @@ function FinancePassportCard({ setScreen }: { setScreen: (screen: Screen) => voi
     <>
       <Pressable onPress={() => setScreen(target)} style={({ pressed }) => [pressed && styles.pressed]}>
         <Card style={fin.passport}>
-          <GradeBadge grade={grade} verified={verified} />
+          <GradeBadge grade={grade} verified={verified} confidence={summary?.data_confidence} />
           <View style={styles.flex}>
             <Text style={[fin.passportKicker, { color: verified ? GRADE_COLORS[grade] : colors.muted }]}>{kicker}</Text>
             <Text style={fin.passportTitle}>{title}</Text>
@@ -6605,9 +7503,9 @@ function FinancePassportCard({ setScreen }: { setScreen: (screen: Screen) => voi
               <View style={fin.chipRow}>
                 {summary.grade ? <OutputChip label={`${tx('গ্রেড', 'Grade')} ${summary.grade}`} tone={GRADE_COLORS[grade]} /> : null}
                 {summary.readiness_status ? <OutputChip label={financeLabel(summary.readiness_status, lang)} tone={colors.maroon} /> : null}
-                {summary.data_confidence ? (
-                  <OutputChip label={`${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${financeLabel(summary.data_confidence, lang)}`} tone={colors.blue} />
-                ) : null}
+                {/* Data confidence is deliberately NOT a chip here — it rides on
+                    the grade badge as a ring (see GradeBadge). Spelled out beside
+                    the grade it read as a second, worse grade. */}
               </View>
             ) : null}
           </View>
@@ -6699,6 +7597,29 @@ function FinanceReadinessIntro({ setScreen }: { setScreen: (screen: Screen) => v
   );
 }
 
+/** Tag vocabulary from the questionnaire screens. */
+const CATEGORY_TONE: Record<string, string> = {
+  kyc: '#EFE7EB',
+  enterprise: '#E7EFFE',
+  financial: '#FDF3E3',
+};
+
+const CATEGORY_ICON: Record<string, string> = {
+  kyc: '🪪',
+  enterprise: '🌾',
+  financial: '💰',
+};
+
+function categoryLabel(category: string, lang: Lang) {
+  const map: Record<string, [string, string]> = {
+    kyc: ['কেওয়াইসি', 'KYC'],
+    enterprise: ['ব্যবসা', 'Enterprise'],
+    financial: ['আর্থিক', 'Financial'],
+  };
+  const pair = map[category];
+  return pair ? (lang === 'bn' ? pair[0] : pair[1]) : category;
+}
+
 function FinanceReadinessQuiz({
   setScreen, part, onFinished,
 }: {
@@ -6712,7 +7633,6 @@ function FinanceReadinessQuiz({
   const [index, setIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [showHelper, setShowHelper] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -6751,7 +7671,6 @@ function FinanceReadinessQuiz({
     if (!current) return;
     const next = { ...answers, [current.id]: value };
     setAnswers(next);
-    setShowHelper(false);
 
     if (index + 1 < total) { setIndex(index + 1); return; }
 
@@ -6776,7 +7695,7 @@ function FinanceReadinessQuiz({
   if (loading) {
     return (
       <>
-        <Header title={tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness')} onBack={() => setScreen('financeReadinessIntro')} />
+        <Header title={tx('প্রস্তুতি প্রশ্নমালা', 'Readiness questionnaire')} onBack={() => setScreen('financeReadinessIntro')} />
         <View style={{ padding: 24 }}>
           <ActivityIndicator color={colors.maroon} />
         </View>
@@ -6784,89 +7703,181 @@ function FinanceReadinessQuiz({
     );
   }
 
+  const helper = current ? (lang === 'bn' ? current.helper_bn : current.helper_en) : null;
+
   return (
     <>
       <Header
-        title={tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness')}
+        title={tx('প্রস্তুতি প্রশ্নমালা', 'Readiness questionnaire')}
         onBack={() => (index > 0 ? setIndex(index - 1) : setScreen('financeReadinessIntro'))}
         right={total ? `${tx('প্রশ্ন', 'Question')} ${num(index + 1, lang)} / ${num(total, lang)}` : undefined}
       />
-      <View style={fin.quizWrap}>
+
+      {/* Fixed column, not a scroll view: the answer buttons sit on the bottom
+          edge on every question, so the tap target never moves between one
+          question and the next. Only the body scrolls if a question runs long. */}
+      <View style={fin.quizPage}>
         <View style={fin.progressTrack}>
           <View style={[fin.progressFill, { width: `${total ? ((index + 1) / total) * 100 : 0}%` }]} />
         </View>
 
-        <View style={fin.partChip}>
-          <Text style={fin.partChipText}>{part === 'core' ? tx('অংশ ১', 'Part 1') : tx('অংশ ২', 'Part 2')}</Text>
-        </View>
-
         {current ? (
           <>
-            <Text style={fin.question}>{lang === 'bn' ? current.question_bn : current.question_en}</Text>
-            {(current.helper_bn || current.helper_en) ? (
-              <>
-                <Pressable onPress={() => setShowHelper((v) => !v)} hitSlop={8}>
-                  <Text style={fin.helperToggle}>▸ {tx('কেন জিজ্ঞাসা করছি', 'Why we ask')}</Text>
-                </Pressable>
-                {showHelper ? (
-                  <Text style={fin.helperBody}>{lang === 'bn' ? current.helper_bn : current.helper_en}</Text>
+            <ScrollView
+              style={styles.flex}
+              contentContainerStyle={fin.quizBody}
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={fin.tagRow}>
+                <View style={fin.tagPhase}>
+                  <Text style={fin.tagPhaseText}>
+                    {part === 'core' ? tx('অংশ ১', 'Phase 1') : tx('অংশ ২', 'Phase 2')}
+                  </Text>
+                </View>
+                {current.category ? (
+                  <View style={[fin.tagCat, { backgroundColor: CATEGORY_TONE[current.category] ?? colors.line }]}>
+                    <Text style={fin.tagCatText}>{categoryLabel(current.category, lang)}</Text>
+                  </View>
                 ) : null}
-              </>
-            ) : null}
+              </View>
+
+              {/* Only for the two questions that behave differently from the rest.
+                  Saying so up front is fairer than letting someone discover it
+                  from a score that did not move. */}
+              {current.flag ? (
+                <View style={fin.tagFlag}>
+                  <Text style={fin.tagFlagText}>
+                    {current.flag === 'gate'
+                      ? tx('গেট প্রশ্ন — "না" হলে স্কোর নয়', 'Gate — "No" suppresses the score')
+                      : tx('ঝুঁকি প্রশ্ন', 'Risk override')}
+                  </Text>
+                </View>
+              ) : null}
+
+              <View style={fin.questionRow}>
+                <View style={[fin.questionIcon, current.flag === 'gate' || current.flag === 'risk'
+                  ? { backgroundColor: colors.goldPale } : null]}>
+                  <Text style={{ fontSize: 22 }}>
+                    {current.flag ? '⚠️' : CATEGORY_ICON[current.category ?? 'financial']}
+                  </Text>
+                </View>
+                <Text style={fin.questionText}>
+                  {lang === 'bn' ? current.question_bn : current.question_en}
+                </Text>
+              </View>
+
+              {/* Always open. Collapsed, it was a row of chevrons nobody tapped in
+                  the middle of an otherwise empty screen — the space was there
+                  either way, so the explanation may as well be in it. */}
+              {helper ? (
+                <>
+                  <Text style={fin.whyTitle}>{tx('কেন জিজ্ঞাসা করছি?', 'Why we ask')}</Text>
+                  <View style={fin.whyBox}>
+                    <Text style={fin.whyText}>{helper}</Text>
+                  </View>
+                </>
+              ) : null}
+            </ScrollView>
+
+            <View style={fin.answerDock}>
+              {error ? <Text style={fin.quizError}>{error}</Text> : null}
+
+              <Pressable
+                disabled={submitting}
+                onPress={() => answer(true)}
+                accessibilityRole="button"
+                accessibilityLabel={tx('হ্যাঁ', 'Yes')}
+                style={({ pressed }) => [fin.answerBtn, pressed && styles.pressed]}
+              >
+                <Text style={[fin.answerGlyph, { color: colors.green }]}>✓</Text>
+                <Text style={fin.answerLabel}>{tx('হ্যাঁ', 'Yes')}</Text>
+              </Pressable>
+
+              <Pressable
+                disabled={submitting}
+                onPress={() => answer(false)}
+                accessibilityRole="button"
+                accessibilityLabel={tx('না', 'No')}
+                style={({ pressed }) => [fin.answerBtn, pressed && styles.pressed]}
+              >
+                <Text style={[fin.answerGlyph, { color: colors.muted }]}>✕</Text>
+                <Text style={fin.answerLabel}>{tx('না', 'No')}</Text>
+              </Pressable>
+
+              <Text style={fin.privacyNote}>
+                {tx('আপনার উত্তর গোপন থাকবে। "হ্যাঁ" সবসময় ভালো উত্তর।',
+                    'Your answers stay private. "Yes" is always the favourable answer.')}
+              </Text>
+            </View>
           </>
         ) : (
-          <Text style={fin.question}>{tx('কোনো প্রশ্ন পাওয়া যায়নি।', 'No questions available.')}</Text>
+          <View style={{ padding: 24 }}>
+            <Text style={fin.questionText}>{tx('কোনো প্রশ্ন পাওয়া যায়নি।', 'No questions available.')}</Text>
+          </View>
         )}
 
-        <View style={styles.flex} />
-
-        {error ? (
-          <Text style={{ color: colors.danger, fontSize: 13.5, marginBottom: 10, lineHeight: 20 }}>{error}</Text>
+        {submitting ? (
+          <View style={fin.quizSubmitting}>
+            <ActivityIndicator color={colors.maroon} />
+          </View>
         ) : null}
-
-        <View style={fin.answerStack}>
-          <Pressable
-            disabled={submitting || !current}
-            onPress={() => answer(true)}
-            style={({ pressed }) => [fin.answerBtn, pressed && styles.pressed]}
-            accessibilityLabel={tx('হ্যাঁ', 'Yes')}
-          >
-            <Text style={[fin.answerText, { color: colors.green }]}>✓</Text>
-            <Text style={fin.answerText}>{tx('হ্যাঁ', 'Yes')}</Text>
-          </Pressable>
-          <Pressable
-            disabled={submitting || !current}
-            onPress={() => answer(false)}
-            style={({ pressed }) => [fin.answerBtn, pressed && styles.pressed]}
-            accessibilityLabel={tx('না', 'No')}
-          >
-            <Text style={[fin.answerText, { color: colors.danger }]}>✕</Text>
-            <Text style={fin.answerText}>{tx('না', 'No')}</Text>
-          </Pressable>
-        </View>
-
-        <Text style={fin.privacyNote}>
-          {tx('আপনার উত্তর গোপন থাকবে। "হ্যাঁ" সবসময় ভালো উত্তর।', 'Your answers stay private. "Yes" is always the favourable answer.')}
-        </Text>
-        {submitting ? <ActivityIndicator color={colors.maroon} style={{ marginTop: 10 }} /> : null}
       </View>
     </>
   );
 }
 
+/**
+ * What each grade band tells the farmer to do next. The grade letter and its
+ * label say where they stand; this says what to do about it, which is the part
+ * a farmer reads first.
+ */
+const GRADE_NEXT_STEP: Record<FinanceGrade, { bn: string; en: string }> = {
+  A: {
+    bn: 'আপনি সম্পূর্ণ প্রস্তুত — এখনই ব্যাংক বা এমএফআই ঋণের জন্য আবেদন করুন।',
+    en: 'You are fully ready — apply for bank or MFI finance now.',
+  },
+  B: {
+    bn: 'শাথী প্রকল্প ও সহজ শর্তের ছোট ঋণ দিয়ে শুরু করুন।',
+    en: 'Start with a Shathi project and a starter loan.',
+  },
+  C: {
+    bn: 'উন্নয়ন পরিকল্পনা দিয়ে শুরু করুন, তারপর আবেদন করুন।',
+    en: 'Start with a development plan, then apply.',
+  },
+  D: {
+    bn: 'প্রস্তুতির প্রোফাইল গড়তে কর্মকর্তার সহায়তা নিন।',
+    en: 'Get support from your officer to build your readiness profile.',
+  },
+};
+
+function gradeMessage(grade: FinanceGrade, lang: Lang): string {
+  const band = GRADE_NEXT_STEP[grade];
+  if (!band) return '';
+  return lang === 'bn' ? band.bn : band.en;
+}
+
 function FinanceReadinessResult({
-  setScreen, result, onContinuePart2, onOpenSheet,
+  setScreen, result, onContinuePart2, onOpenSheet, onNavigateAway,
 }: {
   setScreen: (screen: Screen) => void;
   result: ReadinessResult | null;
   onContinuePart2: () => void;
   onOpenSheet: (topic: string) => void;
+  /** Navigate out while recording this screen as the place back should return to. */
+  onNavigateAway: (screen: Screen) => void;
 }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const [signals, setSignals] = useState<ConfidenceSignal[]>([]);
   const [loaded, setLoaded] = useState<ReadinessResult | null>(result);
   const [showAllActions, setShowAllActions] = useState(false);
+  const [showStrengths, setShowStrengths] = useState(false);
+  const [showGaps, setShowGaps] = useState(false);
+  // Only true while a fetch is actually running. Starting from `!result` rather
+  // than `true` keeps a result passed in by the quiz from flashing a spinner.
+  const [busy, setBusy] = useState(!result);
+  // A weak grade gets one honest interstitial before the apply button appears.
+  const [acknowledgedWeak, setAcknowledgedWeak] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -6874,67 +7885,142 @@ function FinanceReadinessResult({
       try {
         if (!result) {
           const res = await apiRequest<{ data?: ReadinessResult }>('app/finance/readiness/latest');
-          if (alive && res.data) setLoaded(res.data);
+          // Must be an actual assessment. A truthy-but-empty payload here is what
+          // made this screen render a result with no grade in it.
+          const d = res.data as ReadinessResult | undefined;
+          if (alive && d && typeof d === 'object' && !Array.isArray(d) && d.grade) setLoaded(d);
         }
         const sig = await apiRequest<{ data?: ConfidenceSignal[] }>('app/finance/readiness/signals');
         if (alive) setSignals(sig.data ?? []);
       } catch {
         /* the result screen still renders from whatever it already has */
+      } finally {
+        if (alive) setBusy(false);
       }
     })();
     return () => { alive = false; };
   }, [result]);
 
   const r = loaded;
+
+  // Two different "no result" cases, and they must not look the same. While the
+  // fetch is in flight a spinner is right; once it has finished and there is
+  // genuinely nothing, a spinner is a screen that never resolves — which is what
+  // the Profile menu entry landed on for anyone who had not taken the check yet.
   if (!r) {
     return (
       <>
-        <Header title={tx('আপনার ফলাফল', 'Your result')} onBack={() => setScreen('home')} />
-        <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+        <Header title={tx('আপনার ফলাফল', 'Your result')} onBack={() => setScreen('profile')} />
+        {busy ? (
+          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+        ) : (
+          <RefreshScroll>
+            <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
+              <Text style={{ color: colors.ink, fontSize: 17, fontWeight: '800' }}>
+                {tx('এখনো প্রস্তুতি যাচাই করা হয়নি', 'You have not taken the check yet')}
+              </Text>
+              <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 8, lineHeight: 20 }}>
+                {tx('১০টি সহজ প্রশ্নের উত্তর দিন — মাত্র ২ মিনিট। আপনি ঋণের জন্য কতটা প্রস্তুত তা জানতে পারবেন।',
+                    'Answer 10 simple questions — about 2 minutes. You will see how finance-ready you are.')}
+              </Text>
+              <View style={{ marginTop: 14 }}>
+                <AppButton title={tx('শুরু করুন', 'Start the check')} onPress={() => setScreen('financeReadinessIntro')} />
+              </View>
+            </Card>
+            <OfficerHelpStrip district={user?.district} />
+            <View style={{ height: 28 }} />
+          </RefreshScroll>
+        )}
       </>
     );
   }
 
   const provisional = r.depth === 'core';
+  const weakGrade = r.grade === 'C' || r.grade === 'D';
+
+  // The invitation used to promise ten regardless. Q11-13 are only presented to
+  // someone who answered Yes to Q9 ("have you ever borrowed?"), so a farmer who
+  // has never borrowed is shown seven — and a screen that said ten read as a bug
+  // rather than as the branching working. The server counts what will actually
+  // be asked, because only it holds the answers; ten is the fallback for an
+  // older response that predates the field.
+  const part2Pending = r.part2_pending ?? 10;
   const actions = showAllActions ? r.actions : r.actions.slice(0, 5);
 
   function runAction(link: string | null) {
     const target = resolveActionLink(link);
     if (!target) return;
     if (target.kind === 'sheet') { onOpenSheet(target.topic); return; }
-    setScreen(target.screen);
+    // Remember where we came from so the destination's back button returns here
+    // rather than to whatever it normally falls back to.
+    onNavigateAway(target.screen);
   }
 
   return (
     <>
-      <Header
-        title={tx('আপনার ফলাফল', 'Your result')}
-        onBack={() => setScreen('home')}
-        right={tx('আবার', 'Retake')}
-        onRightPress={() => setScreen('financeReadinessIntro')}
-      />
+      {/* Retake lives on the badge now, where the score it replaces is. */}
+      <Header title={tx('আপনার ফলাফল', 'Your result')} onBack={() => setScreen('home')} />
       <RefreshScroll>
-        {/* ① Score header — grade, readiness and confidence as three separate outputs (P2) */}
-        <Card style={{ marginHorizontal: 16, marginTop: 14, paddingVertical: 8 }}>
-          <View style={fin.scoreWrap}>
-            <View style={[fin.scoreCircle, { borderColor: GRADE_COLORS[r.grade], backgroundColor: GRADE_TINTS[r.grade] }]}>
-              <Text style={[fin.scoreLetter, { color: GRADE_COLORS[r.grade] }]}>{r.grade}</Text>
+        {/* (1) Score badge. One maroon block carries grade, score, the band's
+            next step, all three status chips, the provisional note and the
+            retake control. The previous layout stacked the same information
+            down a white card and pushed the breakdown a full screen below the
+            fold. */}
+        <View style={fin.badge}>
+          <View style={fin.badgeTop}>
+            <View>
+              <View style={[fin.badgeRing, { borderColor: GRADE_COLORS[r.grade], backgroundColor: GRADE_TINTS[r.grade] }]}>
+                <Text style={[fin.badgeGrade, { color: GRADE_COLORS[r.grade] }]}>{r.grade}</Text>
+              </View>
+              {/* The amber pip marks a part-1-only score, so the ring itself
+                  says "not final" without a second line of text. */}
+              {provisional ? <View style={fin.badgePip} /> : null}
             </View>
-            <Text style={fin.scoreValue}>
-              {num(r.score, lang)}<Text style={fin.scoreOutOf}> / {num(100, lang)}</Text>
-            </Text>
-            <Text style={{ color: GRADE_COLORS[r.grade], fontWeight: '700', fontSize: 15, marginTop: 4 }}>
-              {lang === 'bn' ? r.grade_label.bn : r.grade_label.en}
-            </Text>
-            <Text style={fin.selfDeclared}>{tx('স্ব-ঘোষিত মূল্যায়ন', 'Self-declared assessment')}</Text>
-
-            <View style={[fin.chipRow, { justifyContent: 'center', marginTop: 12 }]}>
-              <OutputChip label={`${tx('গ্রেড', 'Grade')} ${r.grade}`} tone={GRADE_COLORS[r.grade]} />
-              <OutputChip label={financeLabel(r.readiness_status, lang)} tone={colors.maroon} />
-              <OutputChip label={`${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${financeLabel(r.data_confidence, lang)}`} tone={colors.blue} />
+            <View style={styles.flex}>
+              <Text style={fin.badgeScoreLabel}>{tx('সম্ভাব্য প্রস্তুতি স্কোর', 'Indicative readiness score')}</Text>
+              <Text style={fin.badgeScore}>
+                {num(r.score, lang)}<Text style={fin.badgeOutOf}> / {num(100, lang)}</Text>
+              </Text>
             </View>
           </View>
-        </Card>
+
+          <Text style={fin.badgeMessage}>{gradeMessage(r.grade, lang)}</Text>
+
+          <View style={fin.badgeChipRow}>
+            {[
+              `${tx('গ্রেড', 'Grade')} ${r.grade}`,
+              financeLabel(r.readiness_status, lang),
+              `${tx('তথ্য যাচাই', 'Verification')}: ${financeLabel(r.data_confidence, lang)}`,
+            ].map((label, i) => (
+              <View key={label} style={fin.badgeChip}>
+                <Text style={[fin.badgeChipText, i === 1 && fin.badgeChipTextGold]}>{label}</Text>
+              </View>
+            ))}
+          </View>
+
+          {provisional ? (
+            <View style={fin.badgeProvisional}>
+              <Text style={fin.badgeProvisionalTag}>{tx('প্রাথমিক ফলাফল', 'Provisional result')}</Text>
+              <Text style={fin.badgeProvisionalNote}>
+                {tx(`বাকি ${num(part2Pending, 'bn')}টি প্রশ্নের উত্তর দিলে স্কোর বাড়তে বা কমতে পারে।`,
+                    `Your score may go up or down once you answer the remaining ${part2Pending} questions.`)}
+              </Text>
+            </View>
+          ) : null}
+
+          <View style={fin.badgeFoot}>
+            <View style={styles.flex}>
+              <Text style={fin.badgeMicro}>{tx('স্ব-ঘোষিত মূল্যায়ন', 'Self-declared assessment')}</Text>
+              {r.created_at ? <Text style={fin.badgeMicro}>{formatDate(r.created_at, lang)}</Text> : null}
+            </View>
+            <Pressable
+              onPress={() => setScreen('financeReadinessIntro')}
+              style={({ pressed }) => [fin.badgeRetake, pressed && styles.pressed]}
+            >
+              <Text style={fin.badgeRetakeText}>{tx('আবার মূল্যায়ন', 'Retake')}</Text>
+            </Pressable>
+          </View>
+        </View>
 
         {/* Gate / risk flag lead with the single corrective action (ENG-06) */}
         {r.gate_triggered ? (
@@ -6970,11 +8056,14 @@ function FinanceReadinessResult({
               {tx('এটি প্রাথমিক ফলাফল', 'This is a provisional result')}
             </Text>
             <Text style={{ color: '#7A5200', fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
-              {tx('বাকি ১০টি প্রশ্নের উত্তর দিলে স্কোর বাড়তে বা কমতে পারে।',
-                  'Your score may go up or down once you answer the remaining 10 questions.')}
+              {tx(`বাকি ${num(part2Pending, 'bn')}টি প্রশ্নের উত্তর দিলে স্কোর বাড়তে বা কমতে পারে।`,
+                  `Your score may go up or down once you answer the remaining ${part2Pending} questions.`)}
             </Text>
             <View style={{ marginTop: 12 }}>
-              <AppButton title={tx('আরও ১০টি প্রশ্নের উত্তর দিন', 'Answer 10 more questions')} onPress={onContinuePart2} />
+              <AppButton
+                title={tx(`আরও ${num(part2Pending, 'bn')}টি প্রশ্নের উত্তর দিন`, `Answer ${part2Pending} more questions`)}
+                onPress={onContinuePart2}
+              />
             </View>
           </Card>
         ) : null}
@@ -7002,10 +8091,33 @@ function FinanceReadinessResult({
         {/* ④ Profile strength — what we can already verify (ENG-08 / MOB-RDY-15) */}
         <SectionTitle title={tx('প্রোফাইলের শক্তি', 'Profile strength')} />
         <Card style={{ marginHorizontal: 16, padding: 16 }}>
-          <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 19, marginBottom: 6 }}>
+          <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 19, marginBottom: 10 }}>
             {tx('আপনার দেওয়া তথ্যের কতটুকু আমরা যাচাই করতে পেরেছি',
                 'How much of what you told us we can already verify')}
           </Text>
+
+          {/* A segment per signal, filled for the ones that are confirmed. A
+              plain count tells you the number; the bar tells you the shape of
+              what is missing at a glance. */}
+          <View style={fin.strengthBar}>
+            {signals.map((s) => (
+              <View
+                key={`bar-${s.code}`}
+                style={[fin.strengthSeg, { backgroundColor: s.present ? colors.maroon : colors.line }]}
+              />
+            ))}
+          </View>
+          <View style={fin.strengthMeta}>
+            <Text style={{ color: colors.ink, fontSize: 13, fontWeight: '700' }}>
+              {num(signals.filter((s) => s.present).length, lang)} / {num(signals.length, lang)}{' '}
+              {tx('সংকেত যাচাই হয়েছে', 'signals confirmed')}
+            </Text>
+            <OutputChip
+              label={`${tx('তথ্য নির্ভরযোগ্যতা', 'Data confidence')}: ${financeLabel(r.data_confidence, lang)}`}
+              tone={colors.blue}
+            />
+          </View>
+
           {signals.map((s) => (
             <Pressable
               key={s.code}
@@ -7026,33 +8138,40 @@ function FinanceReadinessResult({
           ))}
         </Card>
 
-        {/* ⑤ Remarks */}
+        {/* ⑤ Remarks. Collapsed by default with the count on the header: a strong
+            profile can produce fifteen strengths, and an unbroken wall of ticks
+            buries the two or three gaps that are the actionable part. */}
         {r.strengths.length ? (
-          <>
-            <SectionTitle title={tx('যা শক্তিশালী', 'What is strong')} />
-            <Card style={{ marginHorizontal: 16, padding: 16 }}>
-              {r.strengths.map((s, i) => (
-                <View key={`s${i}`} style={fin.listItem}>
-                  <Text style={[fin.listGlyph, { color: colors.green }]}>✓</Text>
-                  <Text style={fin.listText}>{lang === 'bn' ? s.bn : s.en}</Text>
-                </View>
-              ))}
-            </Card>
-          </>
+          <Collapsible
+            title={tx('যা শক্তিশালী', 'What is strong')}
+            badge={`${num(r.strengths.length, lang)} / ${num(r.strengths.length + r.gaps.length, lang)}`}
+            open={showStrengths}
+            onToggle={() => setShowStrengths((v) => !v)}
+          >
+            {r.strengths.map((s, i) => (
+              <View key={`s${i}`} style={fin.listItem}>
+                <Text style={[fin.listGlyph, { color: colors.green }]}>✓</Text>
+                <Text style={fin.listText}>{lang === 'bn' ? s.bn : s.en}</Text>
+              </View>
+            ))}
+          </Collapsible>
         ) : null}
 
         {r.gaps.length ? (
-          <>
-            <SectionTitle title={tx('যা উন্নত করা দরকার', 'What needs improvement')} />
-            <Card style={{ marginHorizontal: 16, padding: 16 }}>
-              {r.gaps.map((g, i) => (
-                <View key={`g${i}`} style={fin.listItem}>
-                  <Text style={[fin.listGlyph, { color: colors.gold }]}>•</Text>
-                  <Text style={fin.listText}>{lang === 'bn' ? g.bn : g.en}</Text>
-                </View>
-              ))}
-            </Card>
-          </>
+          <Collapsible
+            title={tx('যা উন্নত করা দরকার', 'What needs improvement')}
+            badge={num(r.gaps.length, lang)}
+            tone={colors.gold}
+            open={showGaps}
+            onToggle={() => setShowGaps((v) => !v)}
+          >
+            {r.gaps.map((g, i) => (
+              <View key={`g${i}`} style={fin.listItem}>
+                <Text style={[fin.listGlyph, { color: colors.gold }]}>•</Text>
+                <Text style={fin.listText}>{lang === 'bn' ? g.bn : g.en}</Text>
+              </View>
+            ))}
+          </Collapsible>
         ) : null}
 
         {/* ⑥ Recommended actions — ranked, deep-linked */}
@@ -7086,12 +8205,39 @@ function FinanceReadinessResult({
         {/* Apply CTA only where the status permits it (MOB-RDY-21) */}
         {['bank_ready_indicative', 'conditionally_ready', 'project_ready'].includes(r.readiness_status) ? (
           <View style={{ paddingHorizontal: 16, marginTop: 18 }}>
-            <AppButton title={tx('ঋণের জন্য আবেদন করুন', 'Apply for finance')} onPress={() => setScreen('financeHub')} />
+            {weakGrade && !acknowledgedWeak ? (
+              <>
+                {/* Never a block — the farmer may still apply. But saying what is
+                    likely to happen first is the difference between an informed
+                    choice and a wasted visit for both sides. */}
+                <Card style={fin.weakNotice}>
+                  <Text style={fin.weakTitle}>
+                    {tx('আবেদনের আগে জেনে নিন', 'Before you apply')}
+                  </Text>
+                  <Text style={fin.weakBody}>
+                    {tx('আপনার বর্তমান গ্রেড ' + r.grade + '। এখনই আবেদন করলে অনুমোদনের সম্ভাবনা কম, এবং প্রক্রিয়াটি কয়েক সপ্তাহ সময় নেয়। উপরের ধাপগুলো আগে সম্পন্ন করলে সম্ভাবনা অনেক বাড়ে।',
+                        `Your current grade is ${r.grade}. Applying now is unlikely to be approved, and the process takes several weeks. Completing the steps above first improves your chances considerably.`)}
+                  </Text>
+                  <View style={{ marginTop: 12, gap: 8 }}>
+                    <AppButton
+                      title={tx('আগে ধাপগুলো সম্পন্ন করি', 'I will complete the steps first')}
+                      onPress={() => setShowGaps(true)}
+                    />
+                    <AppButton
+                      variant="outline"
+                      title={tx('তবুও আবেদন করব', 'Apply anyway')}
+                      onPress={() => setAcknowledgedWeak(true)}
+                    />
+                  </View>
+                </Card>
+              </>
+            ) : (
+              <AppButton title={tx('ঋণের জন্য আবেদন করুন', 'Apply for finance')} onPress={() => setScreen('financeHub')} />
+            )}
           </View>
         ) : null}
 
         {/* ⑦ Local officer */}
-        <SectionTitle title={tx('আপনার এলাকার শাথী কর্মকর্তা', 'Your local Shathi officer')} />
         <OfficerHelpStrip district={user?.district} />
         <View style={{ height: 28 }} />
       </RefreshScroll>
@@ -7152,50 +8298,93 @@ function FinanceGuidanceSheet({ setScreen, topic }: { setScreen: (screen: Screen
 // ---------------------------------------------------------------------------
 
 function FinanceHub({
-  setScreen, onPickProduct,
+  setScreen, onPickProduct, onSelectProduct,
 }: {
   setScreen: (screen: Screen) => void;
   onPickProduct: () => void;
+  onSelectProduct: (product: LoanProduct) => void;
 }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const summary = useFinanceSummary();
   const apps = useApiList<ApiRow>('app/finance/applications');
+  const products = useApiList<LoanProduct>('app/finance/loan-products');
 
   const active = apps.rows[0];
   const hasActive = active && !['closed', 'withdrawn', 'cancelled'].includes(String(active.status));
+  const tookCheck = Boolean(summary && summary.state !== 'not_assessed');
+
+  const STEPS: [string, string][] = [
+    [
+      'আপনার প্রয়োজন জানান ও সম্মতি দিন — ৪টি ছোট ধাপ।',
+      'You state what you need and give consent — four short steps.',
+    ],
+    [
+      'মাঠ কর্মকর্তা ৫ কর্মদিবসের মধ্যে যোগাযোগ করে সব তথ্য ও কাগজ সংগ্রহ করবেন।',
+      'A field officer contacts you within 5 working days and collects everything.',
+    ],
+    [
+      'শাথী সেবা মূল্যায়ন করে ব্যাংক/এমএফআই-তে পাঠায়; সিদ্ধান্ত তাদের।',
+      'Shathi Sheba assesses and forwards to the lender, who decides.',
+    ],
+  ];
 
   return (
     <>
-      <Header title={tx('ঋণ ও প্রকল্প', 'Finance & Projects')} onBack={() => setScreen('home')} />
+      {/* Loans only. Partner projects live on the bottom navigation — putting
+          both behind one tile made two unrelated flows compete for one screen. */}
+      <Header title={tx('ঋণের আবেদন', 'Apply for Loan')} onBack={() => setScreen('home')} />
       <RefreshScroll>
+        {/* A live application outranks everything else: it is why the farmer
+            opened this screen. */}
         {hasActive ? (
           <>
-            <SectionTitle title={tx('আপনার আবেদন', 'Your application')} />
+            <SectionTitle title={tx('আপনার আবেদনের অবস্থা', 'Loan application status')} />
             <Pressable onPress={() => setScreen('loanStatus')} style={({ pressed }) => [pressed && styles.pressed]}>
               <Card style={{ marginHorizontal: 16, padding: 16 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                  <Text style={{ fontSize: 28 }}>{String(active.product_icon ?? '💼')}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
                   <View style={styles.flex}>
-                    <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '800' }}>
-                      {rowTitle({ title_bn: active.product_bn, title_en: active.product_en }, lang, '')}
+                    <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '700', letterSpacing: 0.3 }}>
+                      {tx('আবেদন কোড', 'Application code')}
                     </Text>
-                    <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>{String(active.application_code)}</Text>
+                    <Text style={{ color: colors.ink, fontSize: 17, fontWeight: '800', marginTop: 2 }}>
+                      {String(active.application_code)}
+                    </Text>
                   </View>
-                  <Text style={{ color: colors.muted, fontSize: 20 }}>›</Text>
+                  <Badge label={financeLabel(String(active.status), lang)} tone="gold" />
                 </View>
-                <View style={fin.quoteDivider} />
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                  <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('চাহিদা', 'Requested')}</Text>
-                  <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '700' }}>
-                    {amount(Number(active.requested_amount ?? 0), lang)}
-                  </Text>
+
+                <View style={fin.hubStatRow}>
+                  {([
+                    [tx('ধরন', 'Product'), rowTitle({ title_bn: active.product_bn, title_en: active.product_en }, lang, '—')],
+                    [tx('আবেদনকৃত', 'Requested'), amount(Number(active.requested_amount ?? 0), lang)],
+                    [tx('সুদ', 'Rate'), `${num(Number(active.interest_rate_annual ?? 0), lang)}% ${tx('বার্ষিক', 'p.a.')}`],
+                  ] as [string, string][]).map(([k, v]) => (
+                    <View key={k} style={fin.hubStat}>
+                      <Text style={fin.hubStatLabel}>{k}</Text>
+                      <Text style={fin.hubStatValue}>{v}</Text>
+                    </View>
+                  ))}
                 </View>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
-                  <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('অবস্থা', 'Status')}</Text>
-                  <Text style={{ color: colors.maroon, fontSize: 14, fontWeight: '700' }}>
-                    {financeLabel(String(active.status), lang)}
-                  </Text>
+
+                {summary?.stage_index ? (
+                  <>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 }}>
+                      <Text style={{ color: colors.ink, fontSize: 13, fontWeight: '700' }}>
+                        {financeLabel(String(active.status), lang)}
+                      </Text>
+                      <Text style={{ color: colors.muted, fontSize: 12.5 }}>
+                        {tx('ধাপ', 'Stage')} {num(summary.stage_index, lang)} / {num(summary.stage_total, lang)}
+                      </Text>
+                    </View>
+                    <View style={fin.hubProgressTrack}>
+                      <View style={[fin.hubProgressFill, { width: `${(summary.stage_index / Math.max(1, summary.stage_total)) * 100}%` }]} />
+                    </View>
+                  </>
+                ) : null}
+
+                <View style={{ marginTop: 14 }}>
+                  <AppButton variant="outline" title={tx('অগ্রগতি দেখুন', 'View progress')} onPress={() => setScreen('loanStatus')} />
                 </View>
               </Card>
             </Pressable>
@@ -7216,55 +8405,103 @@ function FinanceHub({
                 </View>
               </Card>
             ) : null}
+          </>
+        ) : null}
 
-            <View style={{ paddingHorizontal: 16, marginTop: 16 }}>
-              <AppButton title={tx('অগ্রগতি দেখুন', 'View progress')} onPress={() => setScreen('loanStatus')} />
+        {/* How it works — the three things that happen, in the order they happen. */}
+        <Card style={fin.howCard}>
+          <Text style={fin.howKicker}>{tx('কীভাবে কাজ করে', 'How it works')}</Text>
+          <Text style={fin.howTitle}>{tx('শাথী সেবার মাধ্যমে অর্থায়ন', 'Finance through Shathi Sheba')}</Text>
+          {STEPS.map(([bn, en], i) => (
+            <View key={i} style={fin.howStep}>
+              <Text style={fin.howNum}>{num(i + 1, lang)}।</Text>
+              <Text style={fin.howText}>{lang === 'bn' ? bn : en}</Text>
             </View>
-          </>
-        ) : (
-          <>
-            <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>
-              <Text style={{ color: colors.ink, fontSize: 17, fontWeight: '800' }}>
-                {tx('ঋণের জন্য আবেদন করুন', 'Apply for finance')}
-              </Text>
-              <Text style={{ color: colors.muted, fontSize: 14, marginTop: 8, lineHeight: 21 }}>
-                {tx(
-                  'আপনাকে কোনো কাগজপত্র আপলোড করতে হবে না। আবেদনের পর মাঠ কর্মকর্তা আপনার সাথে যোগাযোগ করে সব তথ্য সংগ্রহ করবেন।',
-                  'You do not upload any documents. After you apply, a field officer contacts you and collects everything.'
-                )}
-              </Text>
-              {summary && !summary.can_apply && summary.state === 'not_assessed' ? (
-                <View style={{ marginTop: 14 }}>
-                  <AppButton
-                    variant="outline"
-                    title={tx('প্রথমে প্রস্তুতি চেক নিন', 'Take the readiness check first')}
-                    onPress={() => setScreen('financeReadinessIntro')}
-                  />
-                </View>
-              ) : (
-                <View style={{ marginTop: 14 }}>
-                  <AppButton title={tx('শুরু করুন', 'Get started')} onPress={onPickProduct} />
-                </View>
-              )}
-            </Card>
-          </>
-        )}
+          ))}
+          <View style={fin.howNote}>
+            <Text style={{ fontSize: 15 }}>📄</Text>
+            <Text style={fin.howNoteText}>
+              {tx('আপনাকে কোনো কাগজপত্র আপলোড করতে হবে না — মাঠ কর্মকর্তা সব সংগ্রহ করবেন।',
+                  'You do not need to upload anything — your field officer collects it all.')}
+            </Text>
+          </View>
+        </Card>
 
-        <SectionTitle title={tx('প্রকল্প', 'Projects')} />
-        <Pressable onPress={() => setScreen('projects')} style={({ pressed }) => [pressed && styles.pressed]}>
-          <Card style={{ marginHorizontal: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <Text style={{ fontSize: 26 }}>🤝</Text>
+        {/* Readiness check. Always offered: before applying it is the cheapest way
+            to find out what is missing, and afterwards it is how the score moves. */}
+        <Pressable
+          onPress={() => setScreen(tookCheck ? 'financeReadinessResult' : 'financeReadinessIntro')}
+          style={({ pressed }) => [pressed && styles.pressed]}
+        >
+          <Card style={fin.readyCard}>
+            <View style={fin.readyIcon}><Text style={{ fontSize: 17 }}>📊</Text></View>
             <View style={styles.flex}>
-              <Text style={{ color: colors.ink, fontSize: 15.5, fontWeight: '700' }}>
-                {tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')}
+              <Text style={{ color: colors.ink, fontSize: 14.5, fontWeight: '700', lineHeight: 20 }}>
+                {tookCheck
+                  ? tx('আপনার প্রস্তুতির ফলাফল দেখুন', 'See your readiness result')
+                  : tx('আগে ২ মিনিটের প্রস্তুতি চেক নিন', 'Take the 2-minute readiness check first')}
               </Text>
               <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2 }}>
-                {tx('চুক্তি চাষ ও জামানতবিহীন অর্থায়ন', 'Contract farming & collateral-free finance')}
+                {tookCheck
+                  ? tx('কী বাকি আছে দেখে নিন', 'See what is still missing')
+                  : tx('আবেদনের আগে কী বাকি আছে দেখুন', 'See what is missing before you apply')}
               </Text>
             </View>
             <Text style={{ color: colors.muted, fontSize: 20 }}>›</Text>
           </Card>
         </Pressable>
+
+        {/* Loan types */}
+        <SectionTitle title={tx('ঋণের ধরন', 'Loan types')} />
+        <ApiStatus state={products as any} empty={tx('কোনো ঋণ পাওয়া যায়নি।', 'No loan types available.')} />
+        {products.rows.map((p) => {
+          const dim = !p.is_active;
+          return (
+            <Pressable
+              key={p.id}
+              disabled={dim}
+              onPress={() => onSelectProduct(p)}
+              style={({ pressed }) => [pressed && !dim && styles.pressed]}
+            >
+              <Card style={[fin.productCard, dim && fin.productDim]}>
+                <View style={fin.productHead}>
+                  <Text style={fin.productIcon}>{p.icon ?? '💼'}</Text>
+                  <View style={styles.flex}>
+                    <Text style={fin.productName}>{lang === 'bn' ? p.name_bn : p.name_en}</Text>
+                    {p.is_active ? (
+                      <>
+                        <Text style={fin.productMeta}>
+                          {amount(Number(p.min_amount), lang)} – {amount(Number(p.max_amount), lang)}
+                        </Text>
+                        <Text style={fin.productTerms}>
+                          {num(Number(p.interest_rate_annual), lang)}% {tx('বার্ষিক', 'p.a.')}
+                          {'  ·  '}
+                          {p.allowed_tenures.map((t) => num(t, lang)).join(' / ')} {tx('মাস', 'mo')}
+                        </Text>
+                      </>
+                    ) : (
+                      (p.description_bn || p.description_en) ? (
+                        <Text style={fin.productDesc}>{lang === 'bn' ? p.description_bn : p.description_en}</Text>
+                      ) : null
+                    )}
+                  </View>
+                  <Badge
+                    label={p.is_active ? tx('উপলব্ধ', 'Available') : tx('শীঘ্রই আসছে', 'Coming soon')}
+                    tone={p.is_active ? 'green' : 'gold'}
+                  />
+                </View>
+              </Card>
+            </Pressable>
+          );
+        })}
+
+        {/* Always present, whatever the state above — it is the screen's job. */}
+        <View style={{ paddingHorizontal: 16, marginTop: 18 }}>
+          <AppButton
+            title={hasActive ? tx('আরেকটি ঋণের আবেদন', 'Apply for another loan') : tx('ঋণের জন্য আবেদন করুন', 'Apply for loan')}
+            onPress={onPickProduct}
+          />
+        </View>
 
         <OfficerHelpStrip district={user?.district} />
         <View style={{ height: 28 }} />
@@ -7344,6 +8581,11 @@ function LoanApplyDetails({
   const [quoting, setQuoting] = useState(false);
   const [error, setError] = useState('');
   const purposes = useApiList<ApiRow>('app/finance/purposes');
+  // The schedule is shown inline rather than on its own screen: "how much, how
+  // often, for how long" is one question, and answering it across two screens
+  // meant nobody checked the dates before committing.
+  const [schedule, setSchedule] = useState<{ installment_no: number; due_date: string; amount_due: number }[]>([]);
+  const [showSchedule, setShowSchedule] = useState(false);
 
   const min = Number(product?.min_amount ?? 0);
   const max = Number(product?.max_amount ?? 0);
@@ -7369,6 +8611,17 @@ function LoanApplyDetails({
         if (!alive) return;
         setQuote(res.result ?? null);
         patchDraft({ quote: res.result ?? null });
+
+        const sched = await apiRequest<{ result?: { rows: typeof schedule } }>('app/finance/quote/schedule', {
+          method: 'POST',
+          body: JSON.stringify({
+            product_id: product.id,
+            amount: draft.amount,
+            tenure_months: draft.tenureMonths,
+            repayment_mode: draft.repaymentMode,
+          }),
+        });
+        if (alive) setSchedule(sched.result?.rows ?? []);
       } catch (e) {
         if (alive) { setQuote(null); setError(naturalApiError(e, lang)); }
       } finally {
@@ -7539,9 +8792,41 @@ function LoanApplyDetails({
             <Text style={fin.caveat}>
               {tx('চূড়ান্ত পরিমাণ ও তারিখ অনুমোদনের পর নির্ধারিত হবে।', 'Final amounts and dates are set after approval.')}
             </Text>
-            <View style={{ marginTop: 6 }}>
-              <AppButton variant="outline" title={tx('সব কিস্তি দেখুন', 'See full schedule')} onPress={() => setScreen('loanSchedulePreview')} />
-            </View>
+            {/* Collapsed by default, with the count and cadence on the header so
+                the answer is visible without opening it — and it restates itself
+                whenever the tenure or mode above changes. */}
+            {schedule.length ? (
+              <>
+                <Pressable
+                  onPress={() => setShowSchedule((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: showSchedule }}
+                  style={({ pressed }) => [fin.schedHead, pressed && styles.pressed]}
+                >
+                  <Text style={fin.schedHeadText}>
+                    {num(schedule.length, lang)}{tx('টি ', ' ')}
+                    {financeLabel(quote.repayment_mode, lang)} {tx('কিস্তি', 'instalments')}
+                    {'  '}
+                    <Text style={{ color: colors.muted, fontWeight: '600' }}>
+                      ({amount(quote.total_payable, lang)})
+                    </Text>
+                  </Text>
+                  <Text style={fin.schedChevron}>{showSchedule ? '−' : '+'}</Text>
+                </Pressable>
+
+                {showSchedule ? (
+                  <View style={{ marginTop: 4 }}>
+                    {schedule.map((r) => (
+                      <View key={r.installment_no} style={fin.schedRow}>
+                        <Text style={fin.schedNo}>{num(r.installment_no, lang)}</Text>
+                        <Text style={fin.schedDate}>{formatDate(r.due_date, lang)}</Text>
+                        <Text style={fin.schedAmount}>{amount(r.amount_due, lang)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+              </>
+            ) : null}
           </Card>
         ) : (
           <Card style={{ marginHorizontal: 16, padding: 16 }}>
@@ -7672,21 +8957,52 @@ function LoanApplyProfile({
 
         <Pressable
           onPress={() => patchDraft({ needsCorrection: !draft.needsCorrection })}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: draft.needsCorrection }}
           style={({ pressed }) => [pressed && styles.pressed]}
         >
-          <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <View style={[fin.consentCheck, draft.needsCorrection && { backgroundColor: colors.maroon }]}>
+          <Card style={{
+            marginHorizontal: 16, marginTop: 12, padding: 14,
+            flexDirection: 'row', alignItems: 'center', gap: 12,
+            borderWidth: 1, borderColor: draft.needsCorrection ? colors.maroon : 'transparent',
+          }}>
+            <View style={[fin.consentCheck, draft.needsCorrection && { backgroundColor: colors.maroon, borderColor: colors.maroon }]}>
               {draft.needsCorrection ? <Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text> : null}
             </View>
-            <Text style={[styles.flex, { color: colors.ink, fontSize: 14, lineHeight: 20 }]}>
-              {tx('কিছু তথ্য ভুল আছে — কর্মকর্তাকে জানান',
-                  'Something here is wrong — flag it for the officer')}
-            </Text>
+            <View style={styles.flex}>
+              <Text style={{ color: colors.ink, fontSize: 14, lineHeight: 20, fontWeight: '600' }}>
+                {tx('কিছু তথ্য ভুল আছে — কর্মকর্তাকে জানান',
+                    'Something here is wrong — flag it for the officer')}
+              </Text>
+              <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 3, lineHeight: 18 }}>
+                {tx('আবেদন থামবে না। কর্মকর্তা যোগাযোগের সময় ঠিক করে নেবেন।',
+                    'This does not stop your application. The officer fixes it when they contact you.')}
+              </Text>
+            </View>
           </Card>
         </Pressable>
 
+        {/* Only asked once the box is ticked — an always-visible free-text field
+            invites people to type where nobody is going to read it. */}
+        {draft.needsCorrection ? (
+          <Card style={{ marginHorizontal: 16, marginTop: 10, padding: 14 }}>
+            <Text style={{ color: colors.muted, fontSize: 12.5, fontWeight: '700', marginBottom: 6 }}>
+              {tx('কোনটি ভুল?', 'What is wrong?')}
+            </Text>
+            <TextInput
+              style={fin.noteInput}
+              value={draft.correctionNote ?? ''}
+              onChangeText={(t) => patchDraft({ correctionNote: t })}
+              placeholder={tx('যেমন: উপজেলা ভুল আছে', 'For example: the upazila is wrong')}
+              placeholderTextColor={colors.muted}
+              multiline
+              accessibilityLabel={tx('কোনটি ভুল', 'What is wrong')}
+            />
+          </Card>
+        ) : null}
+
         <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
-          <AppButton title={tx('তথ্য ঠিক আছে', 'Information is correct')} onPress={() => setScreen('loanApplyConsent')} />
+          <AppButton title={tx('পরবর্তী', 'Next')} onPress={() => setScreen('loanApplyConsent')} />
         </View>
       </RefreshScroll>
     </>
@@ -7702,15 +9018,24 @@ function LoanApplyConsent({
 }) {
   const { tx, lang } = useLanguage();
   const consents = useApiList<ApiRow>('app/finance/consents');
-  const [agreed, setAgreed] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  // One switch per consent rather than a single blanket tick. Each is stored
+  // separately with its own version and can be withdrawn on its own later, so a
+  // single "I agree to everything" would misrepresent what is actually recorded.
+  const [granted, setGranted] = useState<Record<string, boolean>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const required = consents.rows.filter((c) => Number(c.is_required) === 1);
+  const missing = required.filter((c) => !granted[String(c.consent_key)]);
+  const allOn = required.length > 0 && missing.length === 0;
+
+  function toggleAll() {
+    const next = !allOn;
+    setGranted(Object.fromEntries(required.map((c) => [String(c.consent_key), next])));
+  }
 
   async function submit() {
-    if (!draft.product) return;
+    if (!draft.product || !allOn) return;
     setSubmitting(true);
     setError('');
     try {
@@ -7721,8 +9046,10 @@ function LoanApplyConsent({
         repayment_mode: draft.repaymentMode,
         purpose_code: draft.purposeCode,
         purpose_text: draft.purposeText || undefined,
-        // All six are granted together, but the server still writes one row per
-        // consent, each with its own version (MOB-LON-10A).
+        // Passed through so the officer sees what the farmer flagged on step 3
+        // rather than discovering it on the visit.
+        needs_correction: draft.needsCorrection || undefined,
+        needs_correction_note: draft.needsCorrection ? (draft.correctionNote || undefined) : undefined,
         consents: required.map((c) => String(c.consent_key)),
       });
       const result = (res as any).result;
@@ -7736,49 +9063,65 @@ function LoanApplyConsent({
 
   return (
     <>
-      <Header title={tx('সম্মতি', 'Consent')} onBack={() => setScreen('loanApplyProfile')} right={tx('ধাপ ৪/৪', 'Step 4/4')} />
+      <Header title={tx('ঋণের আবেদন', 'Loan application')} onBack={() => setScreen('loanApplyProfile')} right={tx('ধাপ ৪/৪', 'Step 4/4')} />
       <RefreshScroll>
-        <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
-          <Text style={{ color: colors.muted, fontSize: 13.5, lineHeight: 20 }}>
-            {tx('আবেদন করতে নিচের সবকটি অনুমতি প্রয়োজন। প্রতিটি আলাদাভাবে সংরক্ষিত থাকে এবং আপনি পরে প্রত্যাহার করতে পারবেন।',
-                'All of the following are needed to apply. Each is recorded separately and you can withdraw them later.')}
+        <View style={{ paddingHorizontal: 16, marginTop: 14 }}>
+          <Text style={{ color: colors.ink, fontSize: 19, fontWeight: '800' }}>
+            {tx('সম্মতি দিন', 'Give your consent')}
           </Text>
-        </Card>
-
-        <View style={{ paddingHorizontal: 16, marginTop: 12 }}>
-          <Pressable onPress={() => setAgreed((v) => !v)} style={({ pressed }) => [fin.consentAllBtn, pressed && styles.pressed]}>
-            <View style={[fin.consentCheck, agreed && { backgroundColor: colors.maroon }]}>
-              {agreed ? <Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text> : null}
-            </View>
-            <Text style={[styles.flex, { color: colors.ink, fontSize: 15.5, fontWeight: '700' }]}>
-              {tx('আমি সবগুলোতে সম্মত', 'I agree to all')}
-            </Text>
-          </Pressable>
+          <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 6, lineHeight: 20 }}>
+            {tx('প্রতিটি সম্মতি আলাদাভাবে সংরক্ষিত হয় এবং প্রোফাইল থেকে প্রত্যাহার করা যায়। আবেদনের জন্য সবকটি প্রয়োজন।',
+                'Each consent is stored separately and can be withdrawn later from your profile. All are needed to apply.')}
+          </Text>
         </View>
 
-        <Pressable onPress={() => setExpanded((v) => !v)} style={{ paddingHorizontal: 16, paddingVertical: 14 }}>
-          <Text style={{ color: colors.maroon, fontWeight: '700' }}>
-            {expanded ? tx('বিস্তারিত লুকান', 'Hide details') : `${tx('বিস্তারিত দেখুন', 'See what you are agreeing to')} (${num(required.length, lang)})`}
-          </Text>
-        </Pressable>
+        <ApiStatus state={consents as any} empty={tx('সম্মতির তালিকা পাওয়া যায়নি।', 'Consent list unavailable.')} />
 
-        {expanded ? (
-          <Card style={{ marginHorizontal: 16, padding: 16 }}>
-            {required.map((c) => (
-              <View key={String(c.consent_key)} style={fin.consentItem}>
-                <Text style={{ color: colors.green, fontSize: 15 }}>✓</Text>
+        {required.length ? (
+          <Pressable onPress={toggleAll} style={({ pressed }) => [pressed && styles.pressed]}>
+            <Card style={fin.consentAllCard}>
+              <View style={[fin.consentCheck, allOn && { backgroundColor: colors.maroon, borderColor: colors.maroon }]}>
+                {allOn ? <Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text> : null}
+              </View>
+              <Text style={[styles.flex, { color: colors.ink, fontSize: 15.5, fontWeight: '700' }]}>
+                {tx('সব নির্বাচন করুন', 'Select all')}
+              </Text>
+            </Card>
+          </Pressable>
+        ) : null}
+
+        {required.map((c) => {
+          const key = String(c.consent_key);
+          const on = !!granted[key];
+          return (
+            <Pressable
+              key={key}
+              onPress={() => setGranted((g) => ({ ...g, [key]: !g[key] }))}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: on }}
+              style={({ pressed }) => [pressed && styles.pressed]}
+            >
+              <Card style={fin.consentRow}>
                 <View style={styles.flex}>
                   <Text style={{ color: colors.ink, fontSize: 14.5, fontWeight: '700' }}>
-                    {rowTitle({ title_bn: c.title_bn, title_en: c.title_en }, lang, '')}
+                    {rowTitle({ title_bn: c.title_bn, title_en: c.title_en }, lang, key)}
+                    <Text style={{ color: colors.maroon }}> ★</Text>
                   </Text>
-                  <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 2, lineHeight: 18 }}>
-                    {rowBody({ body_bn: c.description_bn, body_en: c.description_en }, lang, '')}
-                  </Text>
+                  {(c.description_bn || c.description_en) ? (
+                    <Text style={{ color: colors.muted, fontSize: 12.5, marginTop: 3, lineHeight: 18 }}>
+                      {rowTitle({ title_bn: c.description_bn, title_en: c.description_en }, lang, '')}
+                    </Text>
+                  ) : null}
                 </View>
-              </View>
-            ))}
-          </Card>
-        ) : null}
+                {/* A switch, not a checkbox: consent is a setting you hold and can
+                    turn off, and the profile screen shows the same control. */}
+                <View style={[fin.switchTrack, on && { backgroundColor: colors.maroon }]}>
+                  <View style={[fin.switchKnob, on && { alignSelf: 'flex-end' }]} />
+                </View>
+              </Card>
+            </Pressable>
+          );
+        })}
 
         {error ? (
           <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14 }}>
@@ -7786,10 +9129,19 @@ function LoanApplyConsent({
           </Card>
         ) : null}
 
-        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+        {/* Names exactly what is still missing. "Submit is disabled" without
+            saying why is the single most common dead end in a form like this. */}
+        {missing.length ? (
+          <Text style={fin.stillNeeded}>
+            {tx('বাকি আছে: ', 'Still needed: ')}
+            {missing.map((c) => rowTitle({ title_bn: c.title_bn, title_en: c.title_en }, lang, String(c.consent_key))).join(', ')}
+          </Text>
+        ) : null}
+
+        <View style={{ paddingHorizontal: 16, marginTop: 16, marginBottom: 28 }}>
           <AppButton
             title={submitting ? tx('জমা হচ্ছে…', 'Submitting…') : tx('আবেদন জমা দিন', 'Submit application')}
-            disabled={!agreed || submitting || !required.length}
+            disabled={!allOn || submitting}
             onPress={submit}
           />
         </View>
@@ -7836,6 +9188,22 @@ function LoanApplyDone({ setScreen, result }: { setScreen: (screen: Screen) => v
           </Card>
         ) : null}
 
+        <SectionTitle title={tx('আপনার চাহিদা অনুযায়ী প্রাথমিক হিসাব', 'Indicative terms for what you requested')} />
+        <Card style={{ marginHorizontal: 16, padding: 16 }}>
+          {([
+            [tx('ঋণের ধরন', 'Product'), String(result?.product_en ?? result?.product_bn ?? '—')],
+            [tx('সুদের হার', 'Interest rate'), `${num(Number(quote.interest_rate_annual ?? 0), lang)}% ${tx('বার্ষিক (সরল)', 'p.a. flat')}`],
+            [tx('মেয়াদ', 'Term'), `${num(Number(quote.tenure_months ?? 0), lang)} ${tx('মাস', 'months')} · ${num(Number(quote.installment_count ?? 0), lang)} ${tx('কিস্তি', 'instalments')}`],
+            [tx('প্রতি কিস্তি', 'Each instalment'), amount(Number(quote.emi_amount ?? 0), lang)],
+            [tx('মোট পরিশোধযোগ্য', 'Total payable'), amount(Number(quote.total_payable ?? 0), lang)],
+          ] as [string, string][]).map(([k, v], i) => (
+            <View key={k} style={[fin.termRow, i === 0 && { borderTopWidth: 0 }]}>
+              <Text style={fin.termLabel}>{k}</Text>
+              <Text style={fin.termValue}>{v}</Text>
+            </View>
+          ))}
+        </Card>
+
         <SectionTitle title={tx('এরপর কী হবে', 'What happens next')} />
         <Card style={{ marginHorizontal: 16, padding: 16 }}>
           {[
@@ -7852,10 +9220,20 @@ function LoanApplyDone({ setScreen, result }: { setScreen: (screen: Screen) => v
           ))}
         </Card>
 
+        {/* The one promise with a number in it, given its own line so it is not
+            lost in the list above. */}
+        <Card style={fin.promiseCard}>
+          <Text style={fin.promiseText}>
+            ✓  {tx('৫ কর্মদিবসের মধ্যে একজন মাঠ কর্মকর্তা আপনার সাথে যোগাযোগ করবেন।',
+                   'A field officer will contact you within 5 working days.')}
+          </Text>
+        </Card>
+
         <OfficerHelpStrip district={user?.district} />
 
-        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
+        <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28, gap: 10 }}>
           <AppButton title={tx('অগ্রগতি দেখুন', 'View progress')} onPress={() => setScreen('loanStatus')} />
+          <AppButton variant="outline" title={tx('হোমে ফিরে যান', 'Return to home')} onPress={() => setScreen('home')} />
         </View>
       </RefreshScroll>
     </>
@@ -7914,21 +9292,35 @@ function LoanStatus({ setScreen }: { setScreen: (screen: Screen) => void }) {
         {detail ? (
           <>
             <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
-              <Text style={{ color: colors.muted, fontSize: 12.5 }}>{String(detail.application_code)}</Text>
-              <Text style={{ color: colors.ink, fontSize: 17, fontWeight: '800', marginTop: 3 }}>
-                {rowTitle({ title_bn: detail.product_bn, title_en: detail.product_en }, lang, '')}
-              </Text>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 }}>
-                <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('চাহিদা', 'Requested')}</Text>
-                <Text style={{ color: colors.ink, fontSize: 14, fontWeight: '700' }}>
-                  {amount(Number(detail.requested_amount ?? 0), lang)}
-                </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                <View style={styles.flex}>
+                  <Text style={{ color: colors.muted, fontSize: 12, fontWeight: '700', letterSpacing: 0.3 }}>
+                    {tx('আবেদন কোড', 'Application code')}
+                  </Text>
+                  <Text style={{ color: colors.ink, fontSize: 18, fontWeight: '800', marginTop: 2 }}>
+                    {String(detail.application_code)}
+                  </Text>
+                  <Text style={{ color: colors.muted, fontSize: 13, marginTop: 2 }}>
+                    {rowTitle({ title_bn: detail.product_bn, title_en: detail.product_en }, lang, '')}
+                  </Text>
+                </View>
+                <Badge label={financeLabel(String(detail.status), lang)} tone="gold" />
               </View>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
-                <Text style={{ color: colors.muted, fontSize: 13 }}>{tx('অবস্থা', 'Status')}</Text>
-                <Text style={{ color: colors.maroon, fontSize: 14, fontWeight: '700' }}>
-                  {financeLabel(String(detail.status), lang)}
-                </Text>
+
+              {/* The three numbers a borrower checks, side by side rather than as
+                  a stack of label/value rows they have to read through. */}
+              <View style={fin.hubStatRow}>
+                {([
+                  [tx('আবেদনকৃত', 'Requested'), amount(Number(detail.requested_amount ?? 0), lang)],
+                  [tx('সুদ ও মেয়াদ', 'Rate & term'),
+                   `${num(Number(detail.interest_rate_annual ?? 0), lang)}% · ${num(Number(detail.tenure_months ?? 0), lang)} ${tx('মাস', 'mo')}`],
+                  [tx('সম্ভাব্য কিস্তি', 'Est. instalment'), amount(Number(detail.emi_amount ?? 0), lang)],
+                ] as [string, string][]).map(([k, v]) => (
+                  <View key={k} style={fin.hubStat}>
+                    <Text style={fin.hubStatLabel}>{k}</Text>
+                    <Text style={fin.hubStatValue}>{v}</Text>
+                  </View>
+                ))}
               </View>
             </Card>
 
@@ -7966,10 +9358,22 @@ function LoanStatus({ setScreen }: { setScreen: (screen: Screen) => void }) {
                         {rowTitle({ title_bn: s.title_bn, title_en: s.title_en }, lang, '')}
                       </Text>
                       {/* Who holds the work right now — the single biggest
-                          anxiety-reducer for someone waiting on a loan. */}
-                      <Text style={fin.stageOwner}>
-                        {tx('দায়িত্বে', 'With')}: {rowTitle({ title_bn: s.owner_bn, title_en: s.owner_en }, lang, '')}
-                      </Text>
+                          anxiety-reducer for someone waiting on a loan. A chip
+                          rather than a sentence so it scans down the column. */}
+                      <View style={fin.stageMetaRow}>
+                        <View style={[fin.ownerChip, active && { backgroundColor: colors.rose, borderColor: '#EBDDE4' }]}>
+                          <Text style={fin.ownerChipText}>
+                            {rowTitle({ title_bn: s.owner_bn, title_en: s.owner_en }, lang, '')}
+                          </Text>
+                        </View>
+                        {s.completed_at ? (
+                          <Text style={fin.stageDate}>✓ {formatDate(String(s.completed_at), lang)}</Text>
+                        ) : active ? (
+                          <Text style={fin.stageDate}>{tx('চলমান', 'In progress')}</Text>
+                        ) : (
+                          <Text style={fin.stageDate}>{tx('অপেক্ষমাণ', 'Pending')}</Text>
+                        )}
+                      </View>
                     </View>
                   </View>
                 );
@@ -7978,7 +9382,11 @@ function LoanStatus({ setScreen }: { setScreen: (screen: Screen) => void }) {
           </>
         ) : null}
 
-        <OfficerHelpStrip district={user?.district} />
+        <OfficerHelpStrip district={user?.district} title={tx('আপনার আবেদনের দায়িত্বে', 'Handling your application')} />
+
+        <Text style={fin.refreshHint}>
+          {tx('টানুন — সর্বশেষ তথ্যের জন্য রিফ্রেশ করুন', 'Pull to refresh for the latest update')}
+        </Text>
         <View style={{ height: 28 }} />
       </RefreshScroll>
     </>
@@ -8066,12 +9474,8 @@ function LoanResult({
 
   return (
     <>
-      <Header
-        title={tx('আপনার ফাইন্যান্স প্রোফাইল', 'Your finance profile')}
-        onBack={() => setScreen('financeHub')}
-        right={tx('ইতিহাস', 'History')}
-        onRightPress={() => setScreen('assessmentHistory')}
-      />
+      {/* History sits on the badge, beside the assessment it belongs to. */}
+      <Header title={tx('আপনার ফাইন্যান্স প্রোফাইল', 'Your finance profile')} onBack={() => setScreen('financeHub')} />
       <RefreshScroll>
         {/* MOB-LON-27. A blocked result leads with what would change it, and never
             with the word "rejected". */}
@@ -8097,32 +9501,59 @@ function LoanResult({
           </Card>
         ) : null}
 
-        {/* Three separate labelled outputs (P2) — never merged into one verdict. */}
-        <Card style={{ marginHorizontal: 16, marginTop: 14, paddingVertical: 8 }}>
-          <View style={fin.scoreWrap}>
-            <View style={[fin.scoreCircle, { borderColor: GRADE_COLORS[a.grade], backgroundColor: GRADE_TINTS[a.grade] }]}>
-              <Text style={[fin.scoreLetter, { color: GRADE_COLORS[a.grade] }]}>{a.grade}</Text>
+        {/* Three separate labelled outputs (P2) — never merged into one verdict.
+            Same compact badge as the readiness result: this is the verified
+            twin of that screen and the two should not look like different
+            products. */}
+        <View style={fin.badge}>
+          <View style={fin.badgeTop}>
+            <View style={[fin.badgeRing, { borderColor: GRADE_COLORS[a.grade], backgroundColor: GRADE_TINTS[a.grade] }]}>
+              <Text style={[fin.badgeGrade, { color: GRADE_COLORS[a.grade] }]}>{a.grade}</Text>
             </View>
-            <Text style={fin.scoreValue}>
-              {num(a.score, lang)}<Text style={fin.scoreOutOf}> / {num(100, lang)}</Text>
-            </Text>
-            <Text style={{ color: GRADE_COLORS[a.grade], fontWeight: '700', fontSize: 15, marginTop: 4 }}>
-              {lang === 'bn' ? a.grade_label.bn : a.grade_label.en}
-            </Text>
-            <Text style={fin.selfDeclared}>
-              {tx('যাচাইকৃত মূল্যায়ন', 'Verified assessment')} · {a.application_code}
-            </Text>
-
-            <View style={[fin.chipRow, { justifyContent: 'center', marginTop: 12 }]}>
-              <OutputChip label={`${tx('ঝুঁকি গ্রেড', 'Risk grade')} ${a.grade}`} tone={GRADE_COLORS[a.grade]} />
-              <OutputChip label={lang === 'bn' ? a.readiness_label.bn : a.readiness_label.en} tone={colors.maroon} />
-              <OutputChip
-                label={`${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${lang === 'bn' ? a.confidence_label.bn : a.confidence_label.en}`}
-                tone={colors.blue}
-              />
+            <View style={styles.flex}>
+              <Text style={fin.badgeScoreLabel}>{tx('যাচাইকৃত ঝুঁকি স্কোর', 'Verified risk score')}</Text>
+              <Text style={fin.badgeScore}>
+                {num(a.score, lang)}<Text style={fin.badgeOutOf}> / {num(100, lang)}</Text>
+              </Text>
             </View>
           </View>
-        </Card>
+
+          <Text style={fin.badgeMessage}>{lang === 'bn' ? a.grade_label.bn : a.grade_label.en}</Text>
+
+          <View style={fin.badgeChipRow}>
+            {[
+              `${tx('ঝুঁকি গ্রেড', 'Risk grade')} ${a.grade}`,
+              lang === 'bn' ? a.readiness_label.bn : a.readiness_label.en,
+              `${tx('নির্ভরযোগ্যতা', 'Confidence')}: ${lang === 'bn' ? a.confidence_label.bn : a.confidence_label.en}`,
+            ].map((label, i) => (
+              <View key={label} style={fin.badgeChip}>
+                <Text style={[fin.badgeChipText, i === 1 && fin.badgeChipTextGold]}>{label}</Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={fin.badgeFoot}>
+            <View style={styles.flex}>
+              <Text style={fin.badgeMicro}>
+                {tx('যাচাইকৃত মূল্যায়ন', 'Verified assessment')} · {a.application_code}
+              </Text>
+              <Text style={fin.badgeMicro}>
+                {/* The sequence number matters: a farmer who has been assessed
+                    twice needs to know which one they are looking at. */}
+                {a.sequence_no > 1
+                  ? tx(`${num(a.sequence_no, 'bn')}তম মূল্যায়ন · ${formatDate(a.assessed_at, lang)}`,
+                       `Assessment #${a.sequence_no} · ${formatDate(a.assessed_at, lang)}`)
+                  : formatDate(a.assessed_at, lang)}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => setScreen('assessmentHistory')}
+              style={({ pressed }) => [fin.badgeRetake, pressed && styles.pressed]}
+            >
+              <Text style={fin.badgeRetakeText}>{tx('ইতিহাস', 'History')}</Text>
+            </Pressable>
+          </View>
+        </View>
 
         {/* MOB-LON-25. Where safeguards changed the outcome, both results are shown.
             Collapsing them would credit the farmer for a guarantee they did not
@@ -8152,12 +9583,29 @@ function LoanResult({
               {lang === 'bn' ? a.pathway.label_bn : a.pathway.label_en}
             </Text>
             {a.recommended_amount != null && a.recommended_amount < a.requested_amount ? (
-              <Text style={{ color: colors.muted, fontSize: 13.5, marginTop: 8, lineHeight: 20 }}>
-                {tx('আপনি চেয়েছেন', 'You asked for')} {amount(a.requested_amount, lang)}
-                {'  ·  '}
-                {tx('এখন সুপারিশ', 'Recommended now')}{' '}
-                <Text style={{ color: colors.ink, fontWeight: '700' }}>{amount(a.recommended_amount, lang)}</Text>
-              </Text>
+              /* A reduced limit is the hardest thing on this screen to accept,
+                 so it is shown to scale rather than as two numbers in a
+                 sentence: the farmer can see how much of the ask survived. */
+              <View style={{ marginTop: 12 }}>
+                <View style={fin.askRow}>
+                  <Text style={fin.askLabel}>{tx('আপনি চেয়েছেন', 'You asked for')}</Text>
+                  <Text style={fin.askValueMuted}>{amount(a.requested_amount, lang)}</Text>
+                </View>
+                <View style={fin.askTrack}><View style={[fin.askFillMuted, { width: '100%' }]} /></View>
+                <View style={[fin.askRow, { marginTop: 10 }]}>
+                  <Text style={fin.askLabel}>{tx('এখন সুপারিশ', 'Recommended now')}</Text>
+                  <Text style={fin.askValue}>{amount(a.recommended_amount, lang)}</Text>
+                </View>
+                <View style={fin.askTrack}>
+                  <View style={[fin.askFill, {
+                    width: `${a.requested_amount > 0 ? Math.max(4, Math.min(100, Math.round((a.recommended_amount / a.requested_amount) * 100))) : 0}%`,
+                  }]} />
+                </View>
+                <Text style={fin.askNote}>
+                  {tx('সম্পূর্ণ পরিমাণ পরে পাওয়া যেতে পারে — নিচের ধাপগুলো শেষ করলে সীমা পুনর্বিবেচনা হয়।',
+                      'The full amount can come later — the limit is reconsidered once the steps below are done.')}
+                </Text>
+              </View>
             ) : null}
             <View style={{ marginTop: 14 }}>
               <AppButton
@@ -8227,10 +9675,11 @@ function LoanResult({
  * the button means nothing.
  */
 function DevelopmentPlanScreen({
-  setScreen, onOpenSheet,
+  setScreen, onOpenSheet, onNavigateAway,
 }: {
   setScreen: (screen: Screen) => void;
   onOpenSheet: (topic: string) => void;
+  onNavigateAway: (screen: Screen) => void;
 }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
@@ -8258,7 +9707,7 @@ function DevelopmentPlanScreen({
     const target = resolveActionLink(task.action_link);
     if (!target) return;
     if (target.kind === 'sheet') { onOpenSheet(target.topic); return; }
-    setScreen(target.screen);
+    onNavigateAway(target.screen);
   }
 
   async function requestReassessment() {
@@ -8273,6 +9722,10 @@ function DevelopmentPlanScreen({
   }
 
   const doneCount = plan ? plan.total - plan.outstanding : 0;
+  // Outstanding first, then done. The server returns assignment order, which
+  // buries the one step left under six that are already ticked.
+  const orderedTasks = plan ? [...plan.tasks].sort((a, b) => Number(a.done) - Number(b.done)) : [];
+  const today = new Date().toISOString().slice(0, 10);
 
   return (
     <>
@@ -8313,7 +9766,7 @@ function DevelopmentPlanScreen({
               </Text>
             </Card>
 
-            {plan.tasks.map((task) => (
+            {orderedTasks.map((task) => (
               <Pressable
                 key={task.id}
                 onPress={() => openTask(task)}
@@ -8345,8 +9798,16 @@ function DevelopmentPlanScreen({
                       ) : null}
                       <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, alignItems: 'center' }}>
                         {task.due_on ? (
-                          <Text style={{ color: colors.muted, fontSize: 12.5 }}>
-                            {tx('সময়সীমা', 'Due')}: {String(task.due_on).slice(0, 10)}
+                          /* A date that has already passed is the only thing on
+                             this card that needs to shout. */
+                          <Text style={{
+                            color: !task.done && String(task.due_on).slice(0, 10) < today ? colors.danger : colors.muted,
+                            fontSize: 12.5,
+                            fontWeight: !task.done && String(task.due_on).slice(0, 10) < today ? '700' : '400',
+                          }}>
+                            {!task.done && String(task.due_on).slice(0, 10) < today
+                              ? tx(`সময় পেরিয়েছে · ${formatDate(task.due_on, lang)}`, `Overdue · ${formatDate(task.due_on, lang)}`)
+                              : `${tx('সময়সীমা', 'Due')}: ${formatDate(task.due_on, lang)}`}
                           </Text>
                         ) : null}
                         {!task.done && task.action_link ? (
@@ -8371,6 +9832,16 @@ function DevelopmentPlanScreen({
               <View style={{ paddingHorizontal: 16, marginTop: 16 }}>
                 <AppButton title={tx('পুনরায় মূল্যায়নের আবেদন', 'Request reassessment')} onPress={requestReassessment} />
               </View>
+            ) : plan.outstanding === 0 && !requested ? (
+              /* All the farmer's work is done but the request is still withheld
+                 — usually because an officer has to verify the evidence first.
+                 A silent screen with no next move reads as a broken button. */
+              <View style={styles.noteBlue}>
+                <Text style={styles.noteText}>
+                  {tx('সব কাজ শেষ। কর্মকর্তা কাগজপত্র যাচাই করলেই পুনঃমূল্যায়নের আবেদন করা যাবে।',
+                      'All steps are done. Once your officer has verified the evidence you will be able to request a reassessment.')}
+                </Text>
+              </View>
             ) : null}
           </>
         )}
@@ -8390,6 +9861,123 @@ function DevelopmentPlanScreen({
  * and "how far through am I". Both are answered above the fold; the full
  * schedule is below for the one time in twelve that someone wants it.
  */
+/**
+ * What a farmer needs when an instalment is late: how much and how long, what
+ * it is costing, what happens next, and who to talk to. The old screen showed
+ * only the first of those, which left the farmer with a red number and no move
+ * to make.
+ */
+function OverdueHandling({ arrears, account }: { arrears?: LoanArrears; account: NonNullable<LoanAccountView['account']> }) {
+  const { tx, lang } = useLanguage();
+  const dpd = arrears?.days_past_due ?? account.days_past_due;
+  const bucket = arrears?.bucket ?? (dpd <= 30 ? '1_30' : dpd <= 60 ? '31_60' : dpd <= 90 ? '61_90' : '90_plus');
+  const overdueAmount = arrears?.overdue_amount ?? account.overdue_amount;
+  const penalty = arrears?.penalty_accrued ?? 0;
+  const count = arrears?.overdue_installments ?? 0;
+  const officer = arrears?.officer ?? null;
+
+  // The escalation ladder, stated plainly and in advance. A farmer who knows a
+  // field visit comes at 30 days can plan for it; one who is surprised by it
+  // cannot.
+  const ladder: Array<{ key: string; bn: string; en: string; from: number }> = [
+    { key: '1_30', from: 1, bn: 'মোবাইলে মনে করিয়ে দেওয়া হবে এবং মাঠ কর্মকর্তা ফোন করবেন।', en: 'SMS reminders, and a phone call from your field officer.' },
+    { key: '31_60', from: 31, bn: 'মাঠ কর্মকর্তা সরাসরি খামারে আসবেন এবং পরিশোধের পরিকল্পনা করা হবে।', en: 'Your field officer visits the farm and a repayment plan is agreed.' },
+    { key: '61_90', from: 61, bn: 'কিস্তি পুনর্গঠনের আবেদন করা যাবে; ঋণদাতাকে জানানো হবে।', en: 'You may apply to restructure the instalments; the lender is informed.' },
+    { key: '90_plus', from: 91, bn: 'ঋণ খেলাপি হিসেবে চিহ্নিত হবে এবং ভবিষ্যতের ঋণ সীমিত হবে।', en: 'The loan is classified in default and future credit is restricted.' },
+  ];
+  const currentIndex = ladder.findIndex((l) => l.key === bucket);
+
+  return (
+    <>
+      <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16, backgroundColor: '#F8EAE9', borderWidth: 1, borderColor: '#E5B5B1' }}>
+        <Text style={{ color: '#8A2F28', fontWeight: '800', fontSize: 15.5 }}>
+          {tx('বকেয়া কিস্তি আছে', 'You have overdue instalments')}
+        </Text>
+        <Text style={{ color: '#8A2F28', fontSize: 26, fontWeight: '800', marginTop: 6 }}>
+          {amount(overdueAmount, lang)}
+        </Text>
+        <Text style={{ color: '#8A2F28', fontSize: 13, marginTop: 6, lineHeight: 19 }}>
+          {count > 0
+            ? tx(`${num(count, 'bn')}টি কিস্তি · ${num(dpd, 'bn')} দিন পার হয়েছে`, `${count} instalment${count > 1 ? 's' : ''} · ${dpd} days past due`)
+            : tx(`${num(dpd, 'bn')} দিন পার হয়েছে`, `${dpd} days past due`)}
+          {arrears?.oldest_due_date ? ` · ${tx('প্রথম বকেয়া', 'Oldest due')} ${formatDate(arrears.oldest_due_date, lang)}` : ''}
+        </Text>
+        {penalty > 0 ? (
+          <View style={{ marginTop: 12, backgroundColor: 'white', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 8 }}>
+            <Text style={{ color: '#8A2F28', fontSize: 12.5, fontWeight: '700' }}>
+              {tx('জরিমানা জমা হয়েছে', 'Penalty accrued so far')}: {amount(penalty, lang)}
+            </Text>
+            <Text style={{ color: colors.muted, fontSize: 11.5, marginTop: 3, lineHeight: 16 }}>
+              {tx('দেরি যত বাড়বে, জরিমানাও তত বাড়বে। আগে পরিশোধ করলে খরচ কম।',
+                  'The longer it runs, the more it costs. Paying sooner costs less.')}
+            </Text>
+          </View>
+        ) : null}
+      </Card>
+
+      <SectionTitle title={tx('এরপর কী হবে', 'What happens next')} />
+      <Card style={{ marginHorizontal: 16, padding: 14 }}>
+        {ladder.map((rung, i) => {
+          const reached = i <= currentIndex;
+          const now = i === currentIndex;
+          return (
+            <View key={rung.key} style={{ flexDirection: 'row', gap: 10, paddingTop: i ? 10 : 0, marginTop: i ? 10 : 0, borderTopWidth: i ? 1 : 0, borderTopColor: colors.line }}>
+              <View style={[styles.trailDot, reached && styles.trailDotDone, now && styles.trailDotCurrent]}>
+                <Text style={reached ? styles.trailDotText : styles.trailDotTextPending}>{num(i + 1, lang)}</Text>
+              </View>
+              <View style={styles.flex}>
+                <Text style={{ color: now ? colors.ink : colors.muted, fontSize: 12, fontWeight: '800' }}>
+                  {rung.from >= 91
+                    ? tx('৯০+ দিন', '90+ days')
+                    : tx(`${num(rung.from, 'bn')}–${num(rung.from + 29, 'bn')} দিন`, `${rung.from}–${rung.from + 29} days`)}
+                </Text>
+                <Text style={{ color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 2 }}>{tx(rung.bn, rung.en)}</Text>
+                {now ? (
+                  <View style={styles.trailCurrentPill}>
+                    <Text style={styles.trailCurrentPillText}>{tx('আপনি এখানে', 'YOU ARE HERE')}</Text>
+                  </View>
+                ) : null}
+              </View>
+            </View>
+          );
+        })}
+      </Card>
+
+      <SectionTitle title={tx('এখন কী করবেন', 'What you can do now')} />
+      <Card style={{ marginHorizontal: 16, padding: 14 }}>
+        {[
+          { bn: 'নিকটস্থ শাখা বা মাঠ কর্মকর্তার কাছে বকেয়া টাকা জমা দিন।', en: 'Pay the overdue amount at your branch or to your field officer.' },
+          { bn: 'একবারে দিতে না পারলে আংশিক জমা দিন — জরিমানার হিসাব কমে।', en: 'If you cannot pay it all, pay part of it — the penalty is calculated on what is left.' },
+          { bn: 'সমস্যা থাকলে কিস্তি পুনর্গঠনের জন্য মাঠ কর্মকর্তার সঙ্গে কথা বলুন।', en: 'If something has gone wrong, talk to your field officer about restructuring the instalments.' },
+        ].map((row, i) => (
+          <View key={row.en} style={{ flexDirection: 'row', gap: 8, marginTop: i ? 10 : 0 }}>
+            <Text style={{ color: colors.maroon, fontSize: 13.5, fontWeight: '800' }}>·</Text>
+            <Text style={{ color: colors.ink, fontSize: 13.5, lineHeight: 20, flex: 1 }}>{tx(row.bn, row.en)}</Text>
+          </View>
+        ))}
+        {/* In-app payment does not exist in v1. Saying so is better than a
+            button that goes nowhere. */}
+        <Text style={{ color: colors.muted, fontSize: 11.5, lineHeight: 16, marginTop: 12 }}>
+          {tx('এই মুহূর্তে অ্যাপ থেকে সরাসরি পরিশোধ করা যায় না।', 'Paying directly from the app is not available yet.')}
+        </Text>
+      </Card>
+
+      {officer ? (
+        <>
+          <SectionTitle title={tx('যোগাযোগ করুন', 'Who to contact')} />
+          <Card style={{ marginHorizontal: 16, padding: 14 }}>
+            <Text style={styles.officerName}>{officer.name}</Text>
+            <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${officer.phone}` : '', officer.area].filter(Boolean).join(' · ')}</Text>
+            {officer.phone ? (
+              <AppButton title={tx('কর্মকর্তাকে কল করুন', 'Call your officer')} variant="outline" onPress={() => Linking.openURL(`tel:${officer.phone}`)} />
+            ) : null}
+          </Card>
+        </>
+      ) : null}
+    </>
+  );
+}
+
 function LoanAccountScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
@@ -8442,20 +10030,7 @@ function LoanAccountScreen({ setScreen }: { setScreen: (screen: Screen) => void 
           <>
             {/* Overdue leads, because it is the only thing on this screen that
                 needs action today. */}
-            {acc.is_overdue ? (
-              <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16, backgroundColor: '#F8EAE9', borderWidth: 1, borderColor: '#E5B5B1' }}>
-                <Text style={{ color: '#8A2F28', fontWeight: '800', fontSize: 15.5 }}>
-                  {tx('বকেয়া আছে', 'You have an overdue amount')}
-                </Text>
-                <Text style={{ color: '#8A2F28', fontSize: 20, fontWeight: '800', marginTop: 6 }}>
-                  {amount(acc.overdue_amount, lang)}
-                </Text>
-                <Text style={{ color: '#8A2F28', fontSize: 13, marginTop: 6, lineHeight: 19 }}>
-                  {num(acc.days_past_due, lang)} {tx('দিন পার হয়েছে। আপনার এলাকার কর্মকর্তার সঙ্গে যোগাযোগ করুন।',
-                                                     'days past due. Please contact your local officer.')}
-                </Text>
-              </Card>
-            ) : null}
+            {acc.is_overdue ? <OverdueHandling arrears={data?.arrears} account={acc} /> : null}
 
             {/* How much, and when. */}
             <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 18 }}>

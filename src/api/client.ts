@@ -155,8 +155,19 @@ export function authHeaders(): Record<string, string> {
   return apiAuthToken ? { Authorization: `Bearer ${apiAuthToken}` } : {};
 }
 
-export async function apiRequest<T = any>(resource: string, options?: RequestInit): Promise<T> {
-  loadingStore.begin();
+/**
+ * `silent` opts a request out of the global spinner.
+ *
+ * The overlay is right for a fetch the user is waiting on, and wrong for a
+ * background refresh of a screen they are already reading — returning to Home
+ * re-fetched the finance summary and threw a full-screen loader over a page that
+ * was already rendered.
+ */
+export type ApiOptions = RequestInit & { silent?: boolean };
+
+export async function apiRequest<T = any>(resource: string, options?: ApiOptions): Promise<T> {
+  const silent = options?.silent === true;
+  if (!silent) loadingStore.begin();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -188,7 +199,7 @@ export async function apiRequest<T = any>(resource: string, options?: RequestIni
     throw error;
   } finally {
     clearTimeout(timer);
-    loadingStore.end();
+    if (!silent) loadingStore.end();
   }
 }
 
