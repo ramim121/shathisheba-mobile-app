@@ -103,6 +103,13 @@ export type ReadinessQuestion = {
   /** Server-declared branching — the client evaluates only this rule. */
   branch_parent_id: string | null;
   branch_show_when: 'yes' | 'no' | null;
+  /**
+   * Whether the server, which holds the answers given in earlier sessions,
+   * considers this branching question presented to this user. Used only when
+   * the client has no local answer for the parent — which is every Part 2
+   * question whose parent was answered back in Part 1.
+   */
+  branch_default_visible?: boolean | null;
 };
 
 export type ReadinessResult = {

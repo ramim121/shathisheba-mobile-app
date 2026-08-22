@@ -3377,7 +3377,11 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
     const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
     apiRequest<{ data?: { available?: string[] } }>(`app/sale/category-availability${uid}`)
       .then((j) => { if (alive) setAvailable(j.data?.available ?? []); })
-      .catch(() => { if (alive) setAvailable([]); });
+      // Leave it unknown on failure. Treating a failed lookup as "nothing is
+      // available" greys out every tile on the screen, which is the same thing
+      // the farmer sees when the platform genuinely does not serve their area —
+      // an outage should not be indistinguishable from a coverage decision.
+      .catch(() => {});
     return () => { alive = false; };
   }, [user?.id]);
 
@@ -7658,7 +7662,13 @@ function FinanceReadinessQuiz({
       .filter((q) => {
         if (!q.branch_parent_id || !q.branch_show_when) return true;
         const parent = answers[q.branch_parent_id];
-        if (parent === undefined) return false;
+        // Part 2's branch parents were answered back in Part 1 and are not in
+        // this screen's state, so an undefined parent is "I cannot know", not
+        // "No". Falling back to false hid Q11-13 and offered seven questions
+        // while the server still required ten, which made the submission
+        // unrejectable-but-refused. The server's verdict is derived from the
+        // stored answer; it never sends the answer itself.
+        if (parent === undefined) return q.branch_default_visible === true;
         return parent === (q.branch_show_when === 'yes');
       })
       .sort((a, b) => a.sort_order - b.sort_order);
