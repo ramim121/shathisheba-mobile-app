@@ -679,6 +679,9 @@ export const styles = StyleSheet.create({
   unitChipText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   unitChipTextActive: { color: 'white' },
   summaryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 16, marginTop: 12 },
+  // Same chips inside a Card, which already supplies the 16pt inset. Using the
+  // screen-level style there indents them past everything else in the card.
+  summaryChipsInline: { marginHorizontal: 0, marginTop: 10 },
   summaryChip: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: colors.rose, borderWidth: 1, borderColor: colors.line },
   summaryChipText: { color: colors.maroon, fontSize: 12, fontWeight: '700' },
   projTabBar: { flexDirection: 'row', marginHorizontal: 16, marginTop: 6, marginBottom: 4, backgroundColor: colors.rose, borderRadius: 12, padding: 4, gap: 4 },
@@ -711,7 +714,7 @@ export const styles = StyleSheet.create({
   digitalIdCode: { color: colors.maroon, fontSize: 18, fontWeight: '800', letterSpacing: 1, marginTop: 3 },
   digitalIdHint: { color: colors.muted, fontSize: 11.5, lineHeight: 16, marginTop: 3 },
   digitalIdIcon: { fontSize: 26 },
-  orderProductPhoto: { width: '100%', height: 180, borderRadius: 12 },
+  orderProductPhoto: { width: '100%', height: 190, borderRadius: 12, backgroundColor: colors.line },
 
   projName: { color: colors.ink, fontSize: 16, fontWeight: '700' },
   // The commercial model, stated directly under the project name.
@@ -896,6 +899,9 @@ export const styles = StyleSheet.create({
   finalSub: { color: 'rgba(255,255,255,0.55)', fontSize: 12 },
   finalValue: { color: colors.goldPale, fontSize: 24, fontWeight: '700' },
   noteBlue: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderWidth: 1, marginHorizontal: 16, marginBottom: 10, borderRadius: 10, padding: 12 },
+  // The notes carry a bottom margin but no top one, which is right when they
+  // follow each other and wrong when one follows a Card.
+  noteSpaced: { marginTop: 12 },
   noteGold: { backgroundColor: '#FFF7ED', borderColor: '#FDBA74', borderWidth: 1, marginHorizontal: 16, marginBottom: 4, borderRadius: 10, padding: 12 },
   noteGreen: { backgroundColor: colors.greenPale, borderColor: '#86EFAC', borderWidth: 1, marginHorizontal: 16, marginTop: 12, borderRadius: 10, padding: 12 },
   noteText: { color: colors.maroon, fontSize: 14, lineHeight: 21, fontWeight: '500' },
@@ -927,7 +933,11 @@ export const styles = StyleSheet.create({
   // Inline choice chips. Used wherever a picker would hold only a few short
   // options (input type, animal, repayment mode): the options stay on screen,
   // and choosing one is a single tap instead of open-scroll-tap.
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  // Matches the inset of `input` and `fakeSelect`, which is what chips stand in
+  // for. Without it a screen-level chip row runs to the screen edge while the
+  // field above it is inset by 16.
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 16, marginTop: 6 },
+  chipRowCompact: { marginHorizontal: 0, marginTop: 0 },
   chipOption: {
     minHeight: 42,
     paddingHorizontal: 16,
@@ -1006,6 +1016,8 @@ export const styles = StyleSheet.create({
   mutedPrice: { color: colors.muted },
   unit: { color: colors.muted, fontSize: 12, fontWeight: '400' },
   orderHeroCard: { flexDirection: 'row', gap: 14, alignItems: 'center', backgroundColor: '#FFF8ED', borderColor: '#F4D385' },
+  // Stacked variant, used when the product has a real photograph.
+  orderHeroCardStacked: { flexDirection: 'column', alignItems: 'stretch', gap: 12 },
   orderProductVisual: { width: 118, minHeight: 142, borderRadius: 18, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center', padding: 12, overflow: 'hidden' },
   orderProductEmoji: { fontSize: 38, marginBottom: 8 },
   orderSackText: { color: 'white', fontSize: 15, lineHeight: 18, fontWeight: '700', textAlign: 'center' },

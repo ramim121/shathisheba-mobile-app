@@ -3756,14 +3756,16 @@ function PickerSelect({ value, placeholder, items, onSelect, disabled = false, c
  * `autoChips` below is what decides which of the two a call site gets, so the
  * rule lives in one place rather than being re-judged at every picker.
  */
-function ChipSelect({ value, items, onSelect, disabled = false }: {
+function ChipSelect({ value, items, onSelect, disabled = false, compact = false }: {
   value?: string;
   items: { id: string; label: string; disabled?: boolean; raw?: any }[];
   onSelect: (item: any) => void;
   disabled?: boolean;
+  /** Already inside a padded container (a card, or a two-column row). */
+  compact?: boolean;
 }) {
   return (
-    <View style={styles.chipRow}>
+    <View style={[styles.chipRow, compact && styles.chipRowCompact]}>
       {items.map((item) => {
         const selected = item.label === value || item.id === value;
         const off = disabled || item.disabled;
@@ -3816,7 +3818,7 @@ function ChoiceSelect({ value, placeholder, items, onSelect, disabled = false, c
   compact?: boolean;
 }) {
   if (autoChips(items)) {
-    return <ChipSelect value={value} items={items} onSelect={onSelect} disabled={disabled} />;
+    return <ChipSelect value={value} items={items} onSelect={onSelect} disabled={disabled} compact={compact} />;
   }
   return <PickerSelect value={value} placeholder={placeholder} items={items} onSelect={onSelect} disabled={disabled} compact={compact} />;
 }
@@ -4743,12 +4745,12 @@ function ProductDetailBlocks({ product }: { product: ApiRow | null }) {
         </Card>
       ) : null}
       {purpose ? (
-        <View style={styles.noteBlue}>
+        <View style={[styles.noteBlue, styles.noteSpaced]}>
           <Text style={styles.noteText}>{purpose}</Text>
         </View>
       ) : null}
       {mrpPerKg > 0 ? (
-        <View style={styles.noteGold}>
+        <View style={[styles.noteGold, styles.noteSpaced]}>
           <Text style={styles.noteText}>{tx(`এমআরপি ৳${num(mrpPerKg, 'bn')}/কেজি`, `MRP ৳${num(mrpPerKg, 'en')}/kg`)}</Text>
         </View>
       ) : null}
@@ -4838,7 +4840,12 @@ function BuyOrder({
   return (
     <>
       <Header title={tx('অর্ডার দিন', 'Place Order')} onBack={() => setScreen('buyProducts')} />
-      <Card style={styles.orderHeroCard}>
+      {/* With a photo the card stacks: a full-width image cannot share a row
+          with the copy, and putting it there collapsed the copy column to zero
+          width, wrapping its text one character per line and stretching the
+          card to a screen and a half of cream. Without a photo the original
+          side-by-side tile is still right. */}
+      <Card style={[styles.orderHeroCard, productImage ? styles.orderHeroCardStacked : null]}>
         {productImage ? (
           <Image source={{ uri: productImage }} style={styles.orderProductPhoto} resizeMode="cover" />
         ) : (
@@ -6174,8 +6181,11 @@ function ProgressTrail({ steps }: { steps: ProgressStep[] }) {
 
 function OfficerCard({ officer }: { officer: { name?: string; phone?: string; area?: string } }) {
   const { tx } = useLanguage();
+  // A plain Card, not styles.officerCard: that variant zeroes the horizontal
+  // margin for the success screens, which already inset their own content. Used
+  // at screen level it renders full-bleed beside cards that are inset by 16.
   return (
-    <Card style={styles.officerCard}>
+    <Card>
       <Text style={styles.smallUpper}>{tx('নির্ধারিত মাঠ কর্মকর্তা', 'Assigned field officer')}</Text>
       <Text style={styles.officerName}>{officer.name}</Text>
       <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${officer.phone}` : '', officer.area].filter(Boolean).join(' · ')}</Text>
@@ -6215,7 +6225,7 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
             <Text style={styles.officerMeta}>
               {[rowTitle(listing, lang, String(listing.animal_name || 'Livestock')), listing.breed_name ? String(lang === 'bn' ? listing.breed_name_bn || listing.breed_name : listing.breed_name) : ''].filter(Boolean).join(' · ')}
             </Text>
-            <View style={styles.summaryChips}>
+            <View style={[styles.summaryChips, styles.summaryChipsInline]}>
               {live > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('জীবিত', 'Live')} {num(live, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
               {meat > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('মাংস', 'Meat')} {num(Math.round(meat), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
               {Number(listing.verified_weight_kg || 0) > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('যাচাইকৃত', 'Verified')} {num(Number(listing.verified_weight_kg), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
@@ -6277,7 +6287,7 @@ function ProjectProgress({ setScreen, applicationId }: { setScreen: (screen: Scr
             <Text style={styles.officerName}>{String(data.reference || '')}</Text>
             <Text style={styles.productTitle}>{lang === 'bn' ? String(app.project_name_bn || app.project_name || '') : String(app.project_name || '')}</Text>
             {app.model_en ? <Text style={styles.officerMeta}>{lang === 'bn' ? String(app.model_bn || app.model_en) : String(app.model_en)}</Text> : null}
-            <View style={styles.summaryChips}>
+            <View style={[styles.summaryChips, styles.summaryChipsInline]}>
               {app.duration_label ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⏱ {String(app.duration_label)}</Text></View> : null}
               {Number(app.income_amount || 0) > 0 ? (
                 <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{(lang === 'bn' ? String(app.income_label_bn || '') : String(app.income_label_en || '')) || amount(Number(app.income_amount), lang)}</Text></View>
