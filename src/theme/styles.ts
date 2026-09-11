@@ -458,10 +458,16 @@ export const styles = StyleSheet.create({
   // A soft pill behind the active icon rather than the old hard-edged square.
   // Fully rounded and a touch wider, so it reads as part of the same rounded
   // language as the cards and chips instead of a selection artefact.
-  navIconWrap: { minWidth: 56, height: 32, paddingHorizontal: 16, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
+  // The border and clipping are always present and only their colours change
+  // on selection. Adding a border to a view after first render dropped its
+  // radius on the new architecture, so after the first tab switch the pill
+  // turned into a square.
+  navIconWrap: {
+    minWidth: 56, height: 32, paddingHorizontal: 16, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 4,
+    borderWidth: 1, borderColor: 'transparent', backgroundColor: 'transparent', overflow: 'hidden', borderCurve: 'continuous',
+  },
   navIconWrapActive: {
     backgroundColor: 'rgba(255,255,255,0.22)',
-    borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.30)',
   },
   navIcon: { color: 'rgba(255,255,255,0.85)', fontSize: 23, lineHeight: 28, textAlign: 'center' },
@@ -721,6 +727,8 @@ export const styles = StyleSheet.create({
   projModel: { color: colors.maroon, fontSize: 12.5, fontWeight: '700', marginTop: 3 },
   projPartner: { marginTop: 10, backgroundColor: colors.bluePale, borderRadius: 9, paddingHorizontal: 10, paddingVertical: 8 },
   projPartnerText: { color: colors.ink, fontSize: 12, lineHeight: 17, fontWeight: '600' },
+  projLogoRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6, opacity: 0.9 },
+  projLogo: { height: 14, width: 84 },
   projMeta: { color: colors.muted, fontSize: 12, marginTop: 4 },
   projSummary: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 6 },
   projStatsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, backgroundColor: colors.rose, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14 },
@@ -1026,6 +1034,30 @@ export const styles = StyleSheet.create({
   orderHeroTitle: { color: colors.ink, fontSize: 21, lineHeight: 27, fontWeight: '700', marginTop: 8 },
   orderHeroSub: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 5 },
   orderInfoCard: { padding: 14 },
+  // Photo hero: its own frame, image on top, copy below — no flex sharing.
+  orderPhotoHero: { marginHorizontal: 16, marginTop: 12, borderRadius: 14, overflow: 'hidden', backgroundColor: 'white', borderWidth: 1, borderColor: colors.line },
+  orderPhotoHeroImage: { width: '100%', aspectRatio: 16 / 10, backgroundColor: colors.line },
+  orderPhotoHeroBody: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 14 },
+  orderSoldIn: { color: colors.green, fontSize: 12, fontWeight: '700', marginTop: 6 },
+  orderDiscountLabel: { color: colors.green, fontSize: 13, fontWeight: '600', flexShrink: 1, paddingRight: 8 },
+  orderDiscountValue: { color: colors.green, fontSize: 13, fontWeight: '800' },
+  orderCardDiscount: { color: colors.green, fontSize: 12, fontWeight: '700', marginTop: 4 },
+  deliveryAreaRow: { marginHorizontal: 16, marginTop: 2, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: 'white', borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12 },
+  deliveryAreaText: { flex: 1, color: colors.ink, fontSize: 14, fontWeight: '600' },
+  deliveryAreaLink: { color: colors.maroon, fontSize: 13, fontWeight: '800' },
+  promoRow: { marginHorizontal: 16, flexDirection: 'row', gap: 8, alignItems: 'center' },
+  promoInput: { flex: 1, height: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', paddingHorizontal: 12, color: colors.ink, fontSize: 15, fontWeight: '700', letterSpacing: 1 },
+  promoApply: { height: 46, paddingHorizontal: 18, borderRadius: 12, backgroundColor: colors.maroon, alignItems: 'center', justifyContent: 'center' },
+  promoApplyText: { color: 'white', fontSize: 14, fontWeight: '800' },
+  promoRemove: { backgroundColor: 'white', borderWidth: 1, borderColor: colors.line },
+  promoRemoveText: { color: colors.maroon, fontSize: 14, fontWeight: '800' },
+  promoOk: { marginHorizontal: 16, marginTop: 6, color: colors.green, fontSize: 12.5, fontWeight: '700' },
+  promoErr: { marginHorizontal: 16, marginTop: 6, color: '#B45309', fontSize: 12.5, lineHeight: 18 },
+  // First-purchase offer: a thin strip on the catalogue, a corner tag on cards.
+  fpStrip: { marginHorizontal: 16, marginTop: 10, borderRadius: 10, backgroundColor: '#FFF4E0', borderWidth: 1, borderColor: '#F4D385', paddingHorizontal: 12, paddingVertical: 8 },
+  fpStripText: { color: '#7A4A06', fontSize: 12.5, fontWeight: '700', lineHeight: 18 },
+  fpSticker: { position: 'absolute', top: 6, left: 6, backgroundColor: 'rgba(122, 21, 54, 0.88)', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
+  fpStickerText: { color: 'white', fontSize: 9.5, fontWeight: '800', letterSpacing: 0.2 },
   orderSectionTitle: { color: colors.ink, fontSize: 17, fontWeight: '700', marginBottom: 8 },
   orderDescription: { color: colors.muted, fontSize: 13, lineHeight: 21 },
   orderFeatureRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
@@ -1254,7 +1286,8 @@ export const styles = StyleSheet.create({
   trailRail: { width: 32, alignItems: 'center' },
   trailDot: { width: 26, height: 26, borderRadius: 13, backgroundColor: '#F7F3F5', borderWidth: 2, borderColor: '#E7E0E4', alignItems: 'center', justifyContent: 'center' },
   trailDotDone: { backgroundColor: colors.green, borderColor: colors.green },
-  trailDotCurrent: { backgroundColor: colors.gold, borderColor: '#D97706' },
+  // Done is green, the step in progress is brown, what is still ahead is grey.
+  trailDotCurrent: { backgroundColor: '#8B5A2B', borderColor: '#6B4423' },
   trailDotText: { color: 'white', fontSize: 12, fontWeight: '700' },
   trailDotTextPending: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   trailLine: { width: 3, flex: 1, minHeight: 22, borderRadius: 3, backgroundColor: '#E7E0E4', marginVertical: 3 },
@@ -1265,8 +1298,8 @@ export const styles = StyleSheet.create({
   trailDesc: { color: colors.muted, fontSize: 12.5, lineHeight: 18, marginTop: 2 },
   trailDate: { color: colors.green, fontSize: 11.5, fontWeight: '700', marginTop: 4 },
   trailNote: { color: colors.ink, fontSize: 12, lineHeight: 17, marginTop: 5, backgroundColor: colors.cream, borderRadius: 8, paddingHorizontal: 9, paddingVertical: 6 },
-  trailCurrentPill: { alignSelf: 'flex-start', marginTop: 6, backgroundColor: '#FEF3C7', borderRadius: 20, paddingHorizontal: 9, paddingVertical: 3 },
-  trailCurrentPillText: { color: '#92400E', fontSize: 10.5, fontWeight: '800', letterSpacing: 0.3 },
+  trailCurrentPill: { alignSelf: 'flex-start', marginTop: 6, backgroundColor: '#F3E6D8', borderRadius: 20, paddingHorizontal: 9, paddingVertical: 3 },
+  trailCurrentPillText: { color: '#6B4423', fontSize: 10.5, fontWeight: '800', letterSpacing: 0.3 },
 
   // Success screens: the two-button footer under the tick.
   successActions: { alignSelf: 'stretch', marginTop: 4 },

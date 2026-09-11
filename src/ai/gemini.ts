@@ -1,4 +1,4 @@
-import { Audio } from 'expo-av';
+import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { GoogleGenAI, MediaResolution } from '@google/genai';
 import type { CattleAiResult, ChatMessage, Lang } from '../types';
 
@@ -340,13 +340,16 @@ export async function analyzeCattlePhoto(uri: string, lang: Lang): Promise<Cattl
 }
 
 
-export let activeTtsSound: Audio.Sound | null = null;
+export let activeTtsSound: AudioPlayer | null = null;
 
 export async function stopAiSpeech() {
   if (activeTtsSound) {
-    await activeTtsSound.stopAsync().catch(() => undefined);
-    await activeTtsSound.unloadAsync().catch(() => undefined);
+    // Clear the binding first: remove() releases the native player, and a
+    // status event arriving after it must not find a handle to act on.
+    const player = activeTtsSound;
     activeTtsSound = null;
+    try { player.pause(); } catch { /* already stopped */ }
+    try { player.remove(); } catch { /* already released */ }
   }
 }
 
@@ -376,13 +379,14 @@ export async function playAiSpeech(text: string, lang: Lang, onStart?: () => voi
     const mimeType = inlineData?.mimeType || 'audio/wav';
     if (!audioBase64) throw new Error('No TTS audio returned.');
     const playableBase64 = mimeType.includes('wav') ? audioBase64 : pcm16Base64ToWavBase64(audioBase64);
-    const created = await Audio.Sound.createAsync({ uri: `data:audio/wav;base64,${playableBase64}` }, { shouldPlay: true });
-    activeTtsSound = created.sound;
-    activeTtsSound.setOnPlaybackStatusUpdate((status) => {
-      if ('didJustFinish' in status && status.didJustFinish) {
+    const player = createAudioPlayer({ uri: `data:audio/wav;base64,${playableBase64}` });
+    activeTtsSound = player;
+    player.addListener('playbackStatusUpdate', (status) => {
+      if (status.didJustFinish && activeTtsSound === player) {
         stopAiSpeech().finally(() => onEnd?.());
       }
     });
+    player.play();
   } catch (error) {
     onEnd?.();
     throw error;

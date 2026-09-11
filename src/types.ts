@@ -38,6 +38,9 @@ export type Screen =
   | 'inputsPrice'
   | 'myListings'
   | 'listingProgress'
+  | 'buyCheckout'
+  | 'orderDetail'
+  | 'notifications'
   | 'myProjects'
   | 'projectProgress'
   | 'buyCategories'
@@ -62,6 +65,7 @@ export type Screen =
   | 'marketDetail'
   | 'officers'
   | 'inactive'
+  | 'geoLocked'
   // Feature 1 — Finance Readiness
   | 'financeReadinessIntro'
   | 'financeReadinessQuiz'
@@ -405,9 +409,11 @@ export type ListingDraft = {
   categorySlug: string;          // 'livestock' | 'inputs' | ...
   animalId: string | null;
   animalName: string;
+  animalNameBn?: string;
   species: string | null;
   breedId: string | null;
   breedName: string;
+  breedNameBn?: string;
   saleItemId: string | null;     // for inputs: seeds/feed/fertilizer item
   saleItemName: string;
   variety: string;               // for inputs: brand / variety name
@@ -419,13 +425,14 @@ export type ListingDraft = {
   description: string;
   aiGenerating: boolean;
   images: string[];
+  // A listing's location is not chosen here: it inherits the seller's approved
+  // profile location on the server. These mirror it for display only.
   divisionId: string | null;
   divisionName: string;
   districtId: string | null;
   districtName: string;
-  thanaId: string | null;
-  thanaName: string;
-  thanaOther: boolean;           // user typed a thana not in the list
+  upazilaId: string | null;
+  upazilaName: string;
   contactSelf: boolean;          // true = me, false = someone else
   contactName: string;
   contactPhone: string;
@@ -445,7 +452,9 @@ export type LocationState = {
   fallback: boolean;
   latitude?: number | null;
   longitude?: number | null;
-  detected?: { division?: string; district?: string; thana?: string } | null;
+  detected?: { division?: string; district?: string; upazila?: string } | null;
+  /** The detected names resolved to geo ids by the server. Null when nothing matched. */
+  geo?: { divisionId: string | null; districtId: string | null; upazilaId: string | null } | null;
 };
 
 export type AppRole = 'field_officer' | 'shathisheba_seller' | 'shathisheba_buyer';
@@ -463,6 +472,18 @@ export type AuthUser = {
   status?: string | null;
   roles?: AppRole[];
   division?: string | null;
+  /** Approved location, as ids into the geo masters. These drive every geo lock. */
+  division_id?: string | null;
+  district_id?: string | null;
+  upazila_id?: string | null;
+  division_bn?: string | null;
+  district_bn?: string | null;
+  upazila_bn?: string | null;
+  /** Village or street address — needed before a loan application. */
+  village?: string | null;
+  /** A profile change is waiting for an admin; the live profile is unchanged until then. */
+  profile_change_pending?: boolean;
+  profile_change_request_id?: string | null;
   is_kyc_verified?: boolean;
   nid_number?: string | null;
   kyc?: { nid?: string; selfie?: string; trade_license?: string; banking?: boolean; document_count?: number } | null;
@@ -474,3 +495,26 @@ export type AuthUser = {
 export type LearnCat = { id: string; name: string; emoji?: string };
 
 export type LearnMod = { id: string; title: string; level: number };
+
+/** A place in the hierarchy, as picked or resolved: ids plus both languages. */
+export type GeoValue = {
+  divisionId: string | null;
+  districtId: string | null;
+  upazilaId: string | null;
+  division: string;
+  district: string;
+  upazila: string;
+  divisionBn: string;
+  districtBn: string;
+  upazilaBn: string;
+};
+
+export type ProfileChangeRequest = {
+  id: string;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  requested: Record<string, unknown>;
+  current: Record<string, unknown>;
+  reviewer_note: string | null;
+  created_at: string;
+  reviewed_at: string | null;
+};

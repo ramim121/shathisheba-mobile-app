@@ -6,7 +6,7 @@
 
 | Build | Env file Expo loads | Backend |
 |---|---|---|
-| `npx expo start` | `.env` | your LAN address, e.g. `http://192.168.x.x:3000/api/v1` |
+| `npx expo start` | — | `http://<Metro host>:3000/api/v1`, auto-detected (override: `EXPO_PUBLIC_DEV_API_BASE_URL` in `.env`) |
 | release APK | `.env.production` | `https://shathisheba.digigramventures.com/api/v1` |
 
 Both files are gitignored. `.env.production` is the one the APK ships with.
@@ -38,16 +38,16 @@ cd ../ShathiShebaAdmin && npm run dev        # binds 0.0.0.0:3000
 npx expo start                               # scan the QR with Expo Go
 ```
 
-**When the phone cannot connect, check the LAN address first.** This machine's
-address has changed repeatedly. Confirm it and update `.env`:
+The app finds the backend on its own: it takes the host the phone loaded the
+bundle from (Expo's `hostUri`, i.e. this machine's current LAN address) and uses
+port 3000 on it. A changed Wi-Fi IP needs no edit — just rescan the QR.
 
-```bash
-ipconfig | findstr /i "IPv4"                 # Windows
-ifconfig | grep 'inet '                      # macOS/Linux
-```
-
-`EXPO_PUBLIC_*` values are read at bundle time, so restart Expo after editing
-`.env` — a Fast Refresh will not pick it up.
+- Web / iOS simulator: that host is `localhost`, so it hits `localhost:3000`.
+- `npx expo start --tunnel`: the tunnel only forwards Metro, so the app falls back
+  to `localhost:3000`. On an Android device over USB, run
+  `adb reverse tcp:3000 tcp:3000` to make that work.
+- To point development anywhere else, set `EXPO_PUBLIC_DEV_API_BASE_URL` in `.env`
+  and restart Expo (`EXPO_PUBLIC_*` values are read at bundle time).
 
 ---
 

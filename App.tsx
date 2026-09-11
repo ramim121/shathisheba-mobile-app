@@ -2,7 +2,7 @@ import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
-import { Audio } from 'expo-av';
+import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { Ionicons } from '@expo/vector-icons';
 import { GoogleGenAI, MediaResolution } from '@google/genai';
 import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
@@ -17,7 +17,6 @@ import {
   Modal,
   Pressable,
   RefreshControl,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -29,6 +28,9 @@ import {
 } from 'react-native';
 import { colors } from './src/theme/colors';
 import { androidNavigationInset, androidStatusBarInset, styles } from './src/theme/styles';
+import { ui } from './src/theme/ui';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { onNotificationTap, registerForPush } from './src/notifications';
 import type {
   ApiRow, ApiState, AppRole, AuthUser, CattleAiResult, ChatMessage, Lang, LearnCat, LearnMod,
   ListingDraft, LocationState, MainTab, PreferenceKey, PreferenceOption, PreferenceSection,
@@ -36,7 +38,7 @@ import type {
   FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
   LoanProduct, LoanQuote, LoanDraft, RepaymentMode,
   CreditAssessment, AssessmentEnvelope, DevelopmentPlan, DevelopmentTask, AssessmentHistory,
-  NarrativeChange, LoanAccountView, LoanArrears,
+  NarrativeChange, LoanAccountView, LoanArrears, GeoValue, ProfileChangeRequest,
 } from './src/types';
 import {
   analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
@@ -49,6 +51,7 @@ import {
   apiCreate, apiList, apiRequest, apiUrl, authHeaders, loadingStore, naturalApiError, refreshStore,
   setApiAuthToken, setAuthExpiredHandler, staleStore, uploadImage, weatherApiUrl,
 } from './src/api/client';
+import { apiErrorCode } from './src/api/client';
 import {
   GRADE_COLORS, GRADE_TINTS, financeLabel, resolveActionLink, GUIDANCE_TOPICS,
   REPAYMENT_MODES, PENDING_ACTION_LABEL, parseDigits,
@@ -106,7 +109,7 @@ function makeListingDraft(): ListingDraft {
     ageMonths: '24', weightKg: '', meatWeightKg: '', quantity: '1',
     description: '', aiGenerating: false, images: [],
     divisionId: null, divisionName: '', districtId: null, districtName: '',
-    thanaId: null, thanaName: '', thanaOther: false,
+    upazilaId: null, upazilaName: '',
     contactSelf: true, contactName: '', contactPhone: '', contactNid: '', addressText: '', measure: null,
   };
 }
@@ -131,6 +134,19 @@ const LocationContext = createContext<LocationState>({
   error: null,
   fallback: true,
 });
+
+// A screen's own pinned bottom bar (order total + next step). The root hands it
+// to Shell, which already pins Shathi Apa's input bar above the nav.
+const AccessoryContext = createContext<(node: React.ReactNode) => void>(() => {});
+
+function useScreenAccessory(node: React.ReactNode, deps: unknown[]) {
+  const setAccessory = useContext(AccessoryContext);
+  useEffect(() => {
+    setAccessory(node);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  useEffect(() => () => setAccessory(null), [setAccessory]);
+}
 
 function useLanguage() {
   const context = useContext(LanguageContext);
@@ -413,12 +429,13 @@ function prefSectionsForRoot(roots: ApiRow[], rootSlug: string, lang: Lang, fall
 
 function useAppHome(userId?: string | null) {
   const { lang } = useLanguage();
+  const gps = useAppLocation().geo;
   const refreshTick = useRefreshTick();
   const [state, setState] = useState<{ data: ApiRow | null; loading: boolean }>({ data: null, loading: true });
   useEffect(() => {
     let alive = true;
     setState((current) => ({ ...current, loading: true }));
-    const resource = userId ? `app/home?user_id=${encodeURIComponent(String(userId))}` : 'app/home';
+    const resource = `app/home${userId ? `?user_id=${encodeURIComponent(String(userId))}` : '?'}${gpsGeoQuery(gps)}`;
     apiRequest<{ data?: ApiRow }>(resource)
       .then((json) => {
         if (!alive) return;
@@ -444,7 +461,7 @@ function useAppHome(userId?: string | null) {
       alive = false;
       staleStore.clear(resource);
     };
-  }, [userId, lang, refreshTick]);
+  }, [userId, lang, refreshTick, gps?.districtId, gps?.upazilaId]);
   return state;
 }
 
@@ -601,14 +618,11 @@ function rowBody(row: ApiRow | undefined, lang: Lang, fallback = '') {
 function ApiStatus({ state, empty }: { state: ApiState<any>; empty?: string }) {
   const { tx } = useLanguage();
   if (state.loading) {
-    return (
-      <View style={styles.statusLoading}>
-        <View style={styles.statusLoadingSpinner}>
-          <ActivityIndicator color={colors.maroon} size="small" />
-        </View>
-        <Text style={styles.statusLoadingText}>{tx('তথ্য আনা হচ্ছে…', 'Loading…')}</Text>
-      </View>
-    );
+    // A list about to appear shows its outline, not a spinner; spinners are
+    // kept for actions (a button that is saving). Refetches over rows already
+    // on screen stay silent.
+    if (state.rows.length) return null;
+    return <ListSkeleton variant="row" count={2} />;
   }
   if (state.error && state.rows.length > 0) {
     // Cached data is on screen — show a slim notice, not a scary error block.
@@ -1074,6 +1088,10 @@ export default function App() {
   const [progressApplicationId, setProgressApplicationId] = useState<string | null>(null);
   const [projectsInitialTab, setProjectsInitialTab] = useState<'all' | 'area' | 'mine'>('area');
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
+  const [screenAccessory, setScreenAccessory] = useState<React.ReactNode>(null);
+  const [orderDetailId, setOrderDetailId] = useState<string | null>(null);
+  // "All products by this manufacturer", opened from the product page.
+  const [buyManufacturer, setBuyManufacturer] = useState<{ id: string; name: string } | null>(null);
   const [appLocation, setAppLocation] = useState<LocationState>({
     query: WEATHERAPI_LOCATION,
     label: 'Default location',
@@ -1176,8 +1194,8 @@ export default function App() {
         const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         if (!alive) return;
         const { latitude, longitude } = position.coords;
-        // Reverse geocode to pre-fill the user's Division / District / Thana.
-        let detected: { division?: string; district?: string; thana?: string } | null = null;
+        // Reverse geocode to pre-fill the user's division / district / upazila.
+        let detected: { division?: string; district?: string; upazila?: string } | null = null;
         try {
           const places = await Location.reverseGeocodeAsync({ latitude, longitude });
           const place = places[0];
@@ -1185,16 +1203,37 @@ export default function App() {
             detected = {
               division: (place.region || undefined) as string | undefined,
               district: (place.subregion || place.city || undefined) as string | undefined,
-              thana: (place.district || place.city || place.name || undefined) as string | undefined,
+              upazila: (place.district || place.city || place.name || undefined) as string | undefined,
             };
           }
         } catch {
           // reverse geocode is best-effort; user can still pick manually
         }
+        // Resolve the geocoder's names to geo ids once, so anything scoped to
+        // "where the phone is" (weather alerts) matches by id, not by spelling.
+        let gpsGeo: LocationState['geo'] = null;
+        if (detected) {
+          try {
+            const qs = new URLSearchParams({
+              division: detected.division ?? '', district: detected.district ?? '', upazila: detected.upazila ?? '',
+            }).toString();
+            const res = await apiRequest<{ data?: ApiRow }>(`geo/resolve?${qs}`, { silent: true });
+            const g = res.data;
+            if (g && (g.division_id || g.district_id || g.upazila_id)) {
+              gpsGeo = {
+                divisionId: g.division_id ? String(g.division_id) : null,
+                districtId: g.district_id ? String(g.district_id) : null,
+                upazilaId: g.upazila_id ? String(g.upazila_id) : null,
+              };
+            }
+          } catch {
+            // Best effort: the picker still works without it.
+          }
+        }
         if (!alive) return;
         setAppLocation({
           query: `${latitude},${longitude}`,
-          label: detected?.district ? `${detected.thana ? detected.thana + ', ' : ''}${detected.district}` : `${latitude.toFixed(3)}, ${longitude.toFixed(3)}`,
+          label: detected?.district ? `${detected.upazila ? detected.upazila + ', ' : ''}${detected.district}` : `${latitude.toFixed(3)}, ${longitude.toFixed(3)}`,
           loading: false,
           granted: true,
           error: null,
@@ -1202,6 +1241,7 @@ export default function App() {
           latitude,
           longitude,
           detected,
+          geo: gpsGeo,
         });
       } catch (error) {
         if (!alive) return;
@@ -1391,6 +1431,23 @@ async function sendApaMessage(text: string) {
     }),
     [lang],
   );
+  // A tapped notification — in the inbox or the phone's tray — opens the
+  // thing it is about.
+  const openFromNotification = useCallback((data: Record<string, unknown>) => {
+    if (data.order_id) { setOrderDetailId(String(data.order_id)); setScreen('orderDetail'); return; }
+    if (data.listing_id) { setProgressListingId(String(data.listing_id)); setScreen('listingProgress'); return; }
+    if (data.application_id) { setProgressApplicationId(String(data.application_id)); setScreen('projectProgress'); return; }
+    if (data.screen === 'buyCategories') { setScreen('buyCategories'); return; }
+    setScreen('notifications');
+  }, []);
+  useEffect(() => onNotificationTap(openFromNotification), [openFromNotification]);
+  // Once signed in: register this phone for push, and tell the server which
+  // language to write notifications in.
+  useEffect(() => { if (authToken && authUser?.id) void registerForPush(); }, [authToken, authUser?.id]);
+  useEffect(() => {
+    if (authToken && authUser?.id) apiCreate('app/me/lang', { lang }).catch(() => {});
+  }, [lang, authToken, authUser?.id]);
+
   const activeTab: MainTab =
     screen === 'community' ? 'community' : screen === 'projects' ? 'projects' : screen === 'profile' ? 'profile' : 'home';
 
@@ -1531,6 +1588,7 @@ async function sendApaMessage(text: string) {
         />
       ),
       loanApplyType: (
+        <OperationalGate feature="loan_applications" setScreen={go}>
         <LoanApplyType
           setScreen={go}
           onSelect={(product) => {
@@ -1544,8 +1602,9 @@ async function sendApaMessage(text: string) {
             go('loanApplyDetails');
           }}
         />
+        </OperationalGate>
       ),
-      loanApplyDetails: <LoanApplyDetails setScreen={go} draft={loanDraft} patchDraft={patchLoanDraft} />,
+      loanApplyDetails: <OperationalGate feature="loan_applications" setScreen={go}><LoanApplyDetails setScreen={go} draft={loanDraft} patchDraft={patchLoanDraft} /></OperationalGate>,
       loanSchedulePreview: <LoanSchedulePreview setScreen={go} draft={loanDraft} />,
       loanApplyProfile: <LoanApplyProfile setScreen={go} draft={loanDraft} patchDraft={patchLoanDraft} />,
       loanApplyConsent: (
@@ -1572,9 +1631,9 @@ async function sendApaMessage(text: string) {
       ),
       assessmentHistory: <AssessmentHistoryScreen setScreen={go} />,
       loanAccount: <LoanAccountScreen setScreen={go} />,
-      saleCategories: <SaleCategories setScreen={go} patchDraft={patchDraft} />,
+      saleCategories: <SaleCategories setScreen={go} patchDraft={patchDraft} onOpenListing={(id) => { setProgressListingId(id); go('listingProgress'); }} />,
       livestock: <Livestock setScreen={go} />,
-      cattleForm: <CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
+      cattleForm: <OperationalGate feature="sale_listings" setScreen={go}><CattleForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} /></OperationalGate>,
       cattleMeasure: <CattleMeasure setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
       cattlePrice: <CattlePrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
       cattleDone: (
@@ -1587,16 +1646,56 @@ async function sendApaMessage(text: string) {
           }}
         />
       ),
-      inputsForm: <InputsForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} />,
+      inputsForm: <OperationalGate feature="sale_listings" setScreen={go}><InputsForm setScreen={go} draft={listingDraft} patchDraft={patchDraft} /></OperationalGate>,
       inputsPrice: <InputsPrice setScreen={go} draft={listingDraft} patchDraft={patchDraft} onSubmitted={setLatestListing} />,
       myListings: <MyListings setScreen={go} onOpenProgress={(id) => { setProgressListingId(id); go('listingProgress'); }} />,
       listingProgress: <ListingProgress setScreen={go} listingId={progressListingId} />,
       myProjects: <MyProjects setScreen={go} onOpen={(id) => { setProgressApplicationId(id); go('projectProgress'); }} />,
       projectProgress: <ProjectProgress setScreen={go} applicationId={progressApplicationId} />,
-      buyCategories: <BuyCategories setScreen={go} initialTab={buyInitialTab} onSelectCategory={(c) => { setBuyCategory(c); go('buyProducts'); }} />,
-      buyProducts: <BuyProducts setScreen={go} category={buyCategory} onSelectProduct={setSelectedProduct} />,
-      buyOrder: <BuyOrder setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />,
-      buyDone: <BuyDone setScreen={go} qty={qty} product={selectedProduct} order={latestOrder} />,
+      buyCategories: (
+        <BuyCategories
+          setScreen={go}
+          initialTab={buyInitialTab}
+          onSelectCategory={(c) => { setBuyManufacturer(null); setBuyCategory(c); go('buyProducts'); }}
+          onOpenOrder={(id) => { setOrderDetailId(id); go('orderDetail'); }}
+        />
+      ),
+      buyProducts: (
+        <BuyProducts
+          setScreen={go}
+          category={buyManufacturer ? null : buyCategory}
+          manufacturer={buyManufacturer}
+          onClearManufacturer={() => setBuyManufacturer(null)}
+          onSelectProduct={setSelectedProduct}
+        />
+      ),
+      buyOrder: (
+        <OperationalGate feature="orders" setScreen={go}>
+          <BuyOrder
+            setScreen={go}
+            qty={qty}
+            setQty={setQty}
+            product={selectedProduct}
+            onViewManufacturer={(m) => { setBuyManufacturer(m); go('buyProducts'); }}
+          />
+        </OperationalGate>
+      ),
+      buyCheckout: (
+        <OperationalGate feature="orders" setScreen={go}>
+          <BuyCheckout setScreen={go} qty={qty} setQty={setQty} product={selectedProduct} onOrdered={setLatestOrder} />
+        </OperationalGate>
+      ),
+      buyDone: (
+        <BuyDone
+          setScreen={go}
+          qty={qty}
+          product={selectedProduct}
+          order={latestOrder}
+          onOpenOrder={(id) => { setOrderDetailId(id); go('orderDetail'); }}
+        />
+      ),
+      notifications: <NotificationsScreen setScreen={go} onOpen={openFromNotification} />,
+      orderDetail: <OrderDetail setScreen={go} orderId={orderDetailId} onBack={() => { setBuyInitialTab('orders'); go('buyCategories'); }} />,
       training: <TrainingHome setScreen={go} openCategory={(cat) => { setLearnCategory(cat); go('trainingCategory'); }} />,
       trainingCategory: <TrainingCategory category={learnCategory} setScreen={go} openModule={(mod) => { setLearnModule(mod); go('trainingModule'); }} />,
       trainingModule: (
@@ -1610,7 +1709,7 @@ async function sendApaMessage(text: string) {
       trainingVideo: <TrainingVideoScreen contentId={learnContentId} setScreen={go} />,
       trainingQuiz: <TrainingQuiz contentId={learnContentId} setScreen={go} />,
       partnerRegister: <PartnerRegister setScreen={go} />,
-      kyc: <Kyc setScreen={go} projectId={selectedProjectId} onSubmitted={setLatestApplication} />,
+      kyc: <OperationalGate feature="partner_projects" setScreen={go}><Kyc setScreen={go} projectId={selectedProjectId} onSubmitted={setLatestApplication} /></OperationalGate>,
       regDone: (
         <RegDone
           setScreen={go}
@@ -1622,6 +1721,7 @@ async function sendApaMessage(text: string) {
         />
       ),
       inactive: <Inactive setScreen={go} />,
+      geoLocked: <GeoLocked setScreen={go} />,
     };
 
     return routes[screen];
@@ -1631,40 +1731,46 @@ async function sendApaMessage(text: string) {
   // a repayment mode updated the state and re-rendered nothing, and a consent
   // checkbox could be ticked but never cleared. A missing dependency here does
   // not fail loudly — it silently freezes a screen's props.
-  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo]);
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo, orderDetailId, buyManufacturer, openFromNotification]);
 
   const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
 
   return (
+    <SafeAreaProvider>
     <AuthContext.Provider value={authValue}>
       <LanguageContext.Provider value={languageValue}>
         <LocationContext.Provider value={appLocation}>
         <SafeAreaView
+          // iOS: the notch and home bar. Android draws edge-to-edge and the
+          // screen pads for the status bar itself (androidStatusBarInset).
+          edges={Platform.OS === 'ios' ? ['top', 'bottom', 'left', 'right'] : []}
           style={[
             styles.safe,
             { paddingTop: androidStatusBarInset },
             screen === 'onboarding' && styles.safeOnboarding,
           ]}
         >
-          <ExpoStatusBar
-            style={screen === 'onboarding' ? 'light' : 'dark'}
-            backgroundColor={screen === 'onboarding' ? colors.maroon : colors.card}
-            translucent={false}
-          />
+          {/* Edge-to-edge is mandatory from SDK 55 (Android 16 enforces it), so the
+              status bar has no background of its own any more — the screen
+              draws behind it and only the icon style is ours to choose. */}
+          <ExpoStatusBar style={screen === 'onboarding' ? 'light' : 'dark'} />
           {authScreens.includes(screen) ? (
             <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
               <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
             </KeyboardAvoidingView>
           ) : (
-            <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaInputBar onAsk={sendApaMessage} onImage={sendApaImage} onVoice={sendApaVoice} busy={apaBusy} draftSuggestion={apaDraftSuggestion} clearDraftSuggestion={() => setApaDraftSuggestion('')} /> : undefined}>
-              <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
-            </Shell>
+            <AccessoryContext.Provider value={setScreenAccessory}>
+              <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaInputBar onAsk={sendApaMessage} onImage={sendApaImage} onVoice={sendApaVoice} busy={apaBusy} draftSuggestion={apaDraftSuggestion} clearDraftSuggestion={() => setApaDraftSuggestion('')} /> : screenAccessory ?? undefined}>
+                <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
+              </Shell>
+            </AccessoryContext.Provider>
           )}
           <GlobalLoader />
         </SafeAreaView>
         </LocationContext.Provider>
       </LanguageContext.Provider>
     </AuthContext.Provider>
+    </SafeAreaProvider>
   );
 }
 
@@ -1896,7 +2002,7 @@ function GpsGrant({ onContinue, refreshLocation }: { onContinue: () => void; ref
       <View style={styles.gpsHero}>
         <View style={styles.gpsHeroCircle}><Text style={styles.gpsHeroEmoji}>📍</Text></View>
         <Text style={styles.gpsTitle}>{tx('আপনার এলাকা চিনে নিই', 'Let us find your area')}</Text>
-        <Text style={styles.gpsSub}>{tx('লোকেশন অনুমতি দিলে আমরা আপনার বিভাগ, জেলা ও থানা অনুযায়ী প্রকল্প, বাজারদর ও আবহাওয়া দেখাতে পারব।', 'Allow location and we will tailor projects, market rates and weather to your division, district and thana.')}</Text>
+        <Text style={styles.gpsSub}>{tx('লোকেশন অনুমতি দিলে আমরা আপনার বিভাগ, জেলা ও উপজেলা অনুযায়ী প্রকল্প, বাজারদর ও আবহাওয়া দেখাতে পারব।', 'Allow location and we will tailor projects, market rates and weather to your division, district and upazila.')}</Text>
         <View style={styles.gpsPoints}>
           {points.map(([icon, text]) => (
             <View key={text} style={styles.gpsPoint}>
@@ -1911,15 +2017,42 @@ function GpsGrant({ onContinue, refreshLocation }: { onContinue: () => void; ref
         <Pressable onPress={onContinue} style={({ pressed }) => [styles.gpsSkipBtn, pressed && styles.pressed]}>
           <Text style={styles.gpsSkipText}>{tx('এখন না, পরে দেব', 'Not now')}</Text>
         </Pressable>
-        <Text style={styles.gpsPrivacy}>🔒 {tx('আমরা শুধু আপনার এলাকা নির্ধারণে এটি ব্যবহার করি।', 'We only use this to set your area — never shared.')}</Text>
+        <Text style={styles.gpsPrivacy}>🔒 {tx('আপনার এলাকা ঠিক করতে, ঋণের আবেদনে চেক-ইন করতে এবং স্থানীয় আবহাওয়া দেখাতে আমরা আপনার লোকেশন ব্যবহার করি। অবস্থান আপনার প্রোফাইলে সংরক্ষিত থাকে; পূর্বাভাস আনতে শুধু স্থানাঙ্ক আমাদের আবহাওয়া সেবাদাতার কাছে পাঠানো হয়।', 'We use your location to set your area, check you in when you apply for a loan, and show local weather. It is saved with your profile, and only your coordinates are sent to our weather provider to fetch the forecast.')}</Text>
       </View>
     </View>
+  );
+}
+
+/**
+ * Shown when a farmer reaches something locked to another area — today, a
+ * project application refused by the server. The lists never show out-of-area
+ * items; this is the honest answer for the one path that can still get here.
+ */
+function GeoLocked({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const area = geoLabel(geoValueFromUser(user), lang);
+  return (
+    <>
+      <Header title={tx('আপনার এলাকার বাইরে', 'Outside your area')} onBack={() => setScreen('home')} />
+      <View style={styles.projEmpty}>
+        <Text style={styles.projEmptyIcon}>📍</Text>
+        <Text style={styles.projEmptyTitle}>{tx('এটি আপনার এলাকার জন্য নয়', 'This is not available in your area')}</Text>
+        <Text style={styles.projEmptyText}>
+          {tx('এটি শুধু নির্দিষ্ট এলাকার কৃষকদের জন্য খোলা।', 'It is open only to farmers in a particular area.')}
+          {area ? `\n${tx('আপনার প্রোফাইলের এলাকা', 'Your profile area')}: ${area}` : ''}
+        </Text>
+        <AppButton title={tx('প্রোফাইলের এলাকা দেখুন', 'Check my profile area')} onPress={() => setScreen('menuPersonal')} />
+        <AppButton variant="outline" title={tx('হোমে ফিরুন', 'Back to Home')} onPress={() => setScreen('home')} />
+      </View>
+    </>
   );
 }
 
 function PersonalInfo({ onDone }: { onDone: () => void }) {
   const { tx, lang } = useLanguage();
   const { user, updateUser } = useAuth();
+  const appLocation = useAppLocation();
   const initialName = user?.full_name && user.full_name !== 'Shathi user' ? user.full_name : '';
   const [fullName, setFullName] = useState(initialName ?? '');
   const [gender, setGender] = useState<string>(user?.gender ?? '');
@@ -1929,45 +2062,19 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
   const [dobDay, setDobDay] = useState(initialDob[2] || '');
   const [imageUri, setImageUri] = useState<string | null>(user?.profile_image_url ?? null);
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(user?.profile_image_url ?? null);
+  const [geo, setGeo] = useState<GeoValue>(() => geoValueFromUser(user));
+  const [village, setVillage] = useState(user?.village ?? '');
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  // Region: Division -> District -> Thana, cascading from the geo API.
-  const appLocation = useAppLocation();
-  const divisions = useApiList<ApiRow>('geo/divisions');
-  const [divId, setDivId] = useState<string | null>(null);
-  const [divName, setDivName] = useState(user?.division ?? '');
-  const districts = useApiList<ApiRow>(divId ? `geo/districts?division_id=${divId}` : 'geo/districts');
-  const [distId, setDistId] = useState<string | null>(null);
-  const [distName, setDistName] = useState(user?.district ?? '');
-  const upazilas = useApiList<ApiRow>(distId ? `geo/upazilas?district_id=${distId}` : 'geo/upazilas');
-  const [thaId, setThaId] = useState<string | null>(null);
-  const [thaName, setThaName] = useState(user?.upazila ?? '');
-  const [gpsNote, setGpsNote] = useState('');
-
-  const matchByName = (rows: ApiRow[], name?: string) => {
-    const n = String(name || '').trim().toLowerCase();
-    if (!n) return undefined;
-    return rows.find((r) => String(r.name_en).toLowerCase() === n) || rows.find((r) => String(r.name_en).toLowerCase().includes(n) || n.includes(String(r.name_en).toLowerCase()));
-  };
-  // Resolve saved names -> ids once each geo list loads (keeps the cascade in sync).
-  useEffect(() => { if (!divId && divName && divisions.rows.length) { const r = matchByName(divisions.rows, divName); if (r) setDivId(String(r.id)); } /* eslint-disable-next-line */ }, [divisions.rows.length]);
-  useEffect(() => { if (!distId && distName && districts.rows.length) { const r = matchByName(districts.rows, distName); if (r) setDistId(String(r.id)); } /* eslint-disable-next-line */ }, [districts.rows.length]);
-  useEffect(() => { if (!thaId && thaName && upazilas.rows.length) { const r = matchByName(upazilas.rows, thaName); if (r) setThaId(String(r.id)); } /* eslint-disable-next-line */ }, [upazilas.rows.length]);
-
-  function useGpsLocation() {
-    const d = appLocation.detected;
-    if (!appLocation.granted || !d) {
-      setGpsNote(tx('GPS লোকেশন পাওয়া যায়নি — হাতে নির্বাচন করুন।', 'GPS location not available — please select manually.'));
-      return;
-    }
-    const dv = matchByName(divisions.rows, d.division);
-    if (dv) { setDivId(String(dv.id)); setDivName(String(dv.name_en)); }
-    // district/thana match resolves after the dependent lists load; store names now.
-    if (d.district) setDistName(d.district);
-    if (d.thana) setThaName(d.thana);
-    setDistId(null); setThaId(null);
-    setGpsNote(tx('GPS থেকে এলাকা পূরণ করা হয়েছে — প্রয়োজনে বদলান।', 'Filled region from GPS — adjust if needed.'));
-  }
+  // First save is onboarding and applies at once. Every save after that is a
+  // request an admin approves — the profile's area decides what the farmer can
+  // see and sell, so it cannot be a one-tap change.
+  const firstSave = Boolean(user?.needs_personal_info);
+  const change = useApiObject<ProfileChangeRequest>(firstSave ? null : 'app/profile/change-request');
+  const [submittedNow, setSubmittedNow] = useState(false);
+  const pending = submittedNow || Boolean(user?.profile_change_pending) || change.data?.status === 'pending';
+  const rejected = !pending && change.data?.status === 'rejected';
 
   const genders: Array<{ key: string; label: string }> = [
     { key: 'male', label: tx('পুরুষ', 'Male') },
@@ -1978,7 +2085,7 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
   async function pickPhoto() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.7 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.7 });
     if (result.canceled) return;
     const uri = result.assets[0].uri;
     setImageUri(uri);
@@ -1991,21 +2098,14 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
   }
 
   async function save() {
-    if (!fullName.trim()) {
-      setError(tx('নাম দিন।', 'Please enter your name.'));
-      return;
-    }
-    if (!gender) {
-      setError(tx('লিঙ্গ নির্বাচন করুন।', 'Please select your gender.'));
-      return;
-    }
-    if (!divName) {
-      setError(tx('অন্তত আপনার বিভাগ নির্বাচন করুন।', 'Please select at least your division.'));
-      return;
-    }
+    if (pending) return;
+    if (!fullName.trim()) { setError(tx('নাম দিন।', 'Please enter your name.')); return; }
+    if (!gender) { setError(tx('লিঙ্গ নির্বাচন করুন।', 'Please select your gender.')); return; }
+    if (!geo.divisionId) { setError(tx('অন্তত আপনার বিভাগ নির্বাচন করুন।', 'Please select at least your division.')); return; }
     setError('');
+    setSaving(true);
     try {
-      const response = await apiRequest<{ result?: { user: AuthUser } }>('app/profile', {
+      const response = await apiRequest<{ result?: { status?: string; user?: AuthUser } }>('app/profile', {
         method: 'POST',
         body: JSON.stringify({
           user_id: user?.id,
@@ -2013,106 +2113,132 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
           gender,
           date_of_birth: dobYear && dobMonth && dobDay ? `${dobYear}-${dobMonth}-${dobDay}` : null,
           profile_image_url: uploadedUrl || undefined,
-          division: divName || undefined,
-          district: distName || undefined,
-          upazila: thaName || undefined,
+          division_id: geo.divisionId,
+          district_id: geo.districtId,
+          upazila_id: geo.upazilaId,
+          village: village.trim(),
           latitude: appLocation.latitude ?? undefined,
           longitude: appLocation.longitude ?? undefined,
         }),
       });
-      if (response.result?.user) await updateUser(response.result.user);
+      const result = response.result;
+      if (result?.user) await updateUser(result.user);
+      if (result?.status === 'pending_review') {
+        setSubmittedNow(true);
+        return;
+      }
       onDone();
     } catch (saveError) {
+      if (apiErrorCode(saveError) === 'change_pending') { setSubmittedNow(true); return; }
       setError(naturalApiError(saveError, lang));
+    } finally {
+      setSaving(false);
     }
   }
 
+  const requested = (change.data?.requested ?? {}) as Record<string, unknown>;
+  const requestedArea = geoLabel(geoFromResolved(requested as ApiRow), lang);
+
   return (
     <View style={styles.prefScreen}>
-      <Header title={tx('ব্যক্তিগত তথ্য', 'Personal Information')} right={tx('এড়িয়ে যান', 'Skip')} onRightPress={onDone} />
+      <Header title={tx('ব্যক্তিগত তথ্য', 'Personal Information')} right={firstSave ? tx('এড়িয়ে যান', 'Skip') : undefined} onRightPress={firstSave ? onDone : undefined} />
       <View style={styles.prefLangCenter}><LangToggle subtle /></View>
       <RefreshScroll>
-        <Pressable style={styles.avatarPick} onPress={pickPhoto}>
-          {imageUri ? <Image source={{ uri: imageUri }} style={styles.avatarPickImage} /> : <Text style={styles.avatarPickIcon}>＋</Text>}
-        </Pressable>
-        <Text style={styles.otpEditPhone}>{tx('প্রোফাইল ছবি (ঐচ্ছিক)', 'Profile photo (optional)')}</Text>
-
-        <Text style={styles.label}>{tx('পুরো নাম', 'Full name')} *</Text>
-        <TextInput style={styles.input} value={fullName} onChangeText={setFullName} placeholder={tx('আপনার নাম লিখুন', 'Enter your name')} placeholderTextColor={colors.muted} />
-
-        <Text style={styles.label}>{tx('লিঙ্গ', 'Gender')} *</Text>
-        <View style={styles.genderRow}>
-          {genders.map((g) => (
-            <Pressable key={g.key} style={[styles.genderPill, gender === g.key && styles.genderPillActive]} onPress={() => setGender(g.key)}>
-              <Text style={[styles.genderPillText, gender === g.key && styles.genderPillTextActive]}>{g.label}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Text style={styles.label}>{tx('জন্ম তারিখ (ঐচ্ছিক)', 'Date of birth (optional)')}</Text>
-        <View style={styles.dobRow}>
-          <DropdownField
-            value={dobDay}
-            placeholder={tx('দিন', 'Day')}
-            onSelect={setDobDay}
-            options={Array.from({ length: 31 }, (_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: num(i + 1, lang) }; })}
-          />
-          <DropdownField
-            value={dobMonth}
-            placeholder={tx('মাস', 'Month')}
-            flexBasis={1.3}
-            onSelect={setDobMonth}
-            options={MONTHS_EN.map((_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: lang === 'bn' ? MONTHS_BN[i] : MONTHS_EN[i] }; })}
-          />
-          <DropdownField
-            value={dobYear}
-            placeholder={tx('সাল', 'Year')}
-            flexBasis={1.2}
-            onSelect={setDobYear}
-            options={Array.from({ length: 75 }, (_, i) => { const y = new Date().getFullYear() - 10 - i; return { value: String(y), label: num(y, lang) }; })}
-          />
-        </View>
-
-        <View style={styles.regionCard}>
-          <View style={styles.regionHead}>
-            <Text style={styles.regionTitle}>📍 {tx('আপনার এলাকা', 'Your location')} <Text style={styles.reqStar}>*</Text></Text>
-            <Pressable onPress={useGpsLocation} style={({ pressed }) => [styles.gpsBtn, pressed && styles.pressed]}>
-              <Text style={styles.gpsBtnText}>⌖ {tx('GPS দিয়ে পূরণ', 'Use GPS')}</Text>
-            </Pressable>
+        {pending ? (
+          <View style={{ marginHorizontal: 16, marginTop: 10, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A', borderRadius: 12, padding: 14 }}>
+            <Text style={{ color: '#7A5200', fontWeight: '800', fontSize: 15 }}>⏳ {tx('আপনার পরিবর্তন পর্যালোচনায় আছে', 'Your change is under review')}</Text>
+            <Text style={{ color: '#7A5200', fontSize: 13, marginTop: 6, lineHeight: 19 }}>
+              {tx('শাথী সেবা অনুমোদন দিলে নতুন তথ্য কার্যকর হবে। ততক্ষণ আপনার বর্তমান এলাকা অনুযায়ী সব দেখানো হবে, এবং নতুন অনুরোধ পাঠানো যাবে না।',
+                  'The new details take effect once Shathi Sheba approves them. Until then everything is shown for your current area, and another request cannot be sent.')}
+            </Text>
+            {requestedArea ? <Text style={{ color: '#7A5200', fontSize: 13, marginTop: 6 }}>{tx('অনুরোধ করা এলাকা', 'Requested area')}: {requestedArea}</Text> : null}
           </View>
-          <Text style={styles.regionHint}>{tx('প্রকল্প ও বাজারদর আপনার এলাকা অনুযায়ী দেখাতে এটি প্রয়োজন।', 'Needed to show projects and rates for your area.')}</Text>
-          <View style={{ height: 6 }} />
-          <DropdownField
-            value={divId ?? ''}
-            placeholder={tx('বিভাগ বেছে নিন', 'Select division')}
-            onSelect={(id) => { const r = divisions.rows.find((x) => String(x.id) === id); setDivId(id); setDivName(String(r?.name_en ?? '')); setDistId(null); setDistName(''); setThaId(null); setThaName(''); }}
-            options={divisions.rows.map((r) => ({ value: String(r.id), label: rowTitle(r, lang, r.name_en) }))}
-          />
-          <View style={styles.geoRow}>
-            <View style={styles.flex}>
-              <DropdownField
-                value={distId ?? ''}
-                placeholder={divName ? tx('জেলা বেছে নিন', 'Select district') : tx('আগে বিভাগ', 'Division first')}
-                onSelect={(id) => { const r = districts.rows.find((x) => String(x.id) === id); setDistId(id); setDistName(String(r?.name_en ?? '')); setThaId(null); setThaName(''); }}
-                options={districts.rows.map((r) => ({ value: String(r.id), label: rowTitle(r, lang, r.name_en) }))}
-              />
-            </View>
-            <View style={styles.flex}>
-              <DropdownField
-                value={thaId ?? ''}
-                placeholder={distName ? tx('থানা বেছে নিন', 'Select thana') : tx('আগে জেলা', 'District first')}
-                onSelect={(id) => { const r = upazilas.rows.find((x) => String(x.id) === id); setThaId(id); setThaName(String(r?.name_en ?? '')); }}
-                options={upazilas.rows.map((r) => ({ value: String(r.id), label: rowTitle(r, lang, r.name_en) }))}
-              />
-            </View>
+        ) : null}
+        {rejected ? (
+          <View style={{ marginHorizontal: 16, marginTop: 10, backgroundColor: '#F8EAE9', borderWidth: 1, borderColor: '#E5B5B1', borderRadius: 12, padding: 14 }}>
+            <Text style={{ color: '#8A2F28', fontWeight: '800', fontSize: 15 }}>{tx('আগের পরিবর্তন অনুমোদিত হয়নি', 'Your last change was not approved')}</Text>
+            {change.data?.reviewer_note ? <Text style={{ color: '#8A2F28', fontSize: 13, marginTop: 6, lineHeight: 19 }}>{change.data.reviewer_note}</Text> : null}
           </View>
-          {gpsNote ? <Text style={styles.regionGpsNote}>{gpsNote}</Text> : null}
+        ) : null}
+        {!firstSave && !pending ? (
+          <Text style={[styles.fieldHint, { marginTop: 10 }]}>{tx('আপনার প্রোফাইলের পরিবর্তন অনুমোদনের পর কার্যকর হয়।', 'Changes to your profile take effect after they are approved.')}</Text>
+        ) : null}
+
+        <View pointerEvents={pending ? 'none' : 'auto'} style={pending ? { opacity: 0.55 } : null}>
+          <Pressable style={styles.avatarPick} onPress={pickPhoto}>
+            {imageUri ? <Image source={{ uri: imageUri }} style={styles.avatarPickImage} /> : <Text style={styles.avatarPickIcon}>＋</Text>}
+          </Pressable>
+          <Text style={styles.otpEditPhone}>{tx('প্রোফাইল ছবি (ঐচ্ছিক)', 'Profile photo (optional)')}</Text>
+
+          <Text style={styles.label}>{tx('পুরো নাম', 'Full name')} *</Text>
+          <TextInput style={styles.input} value={fullName} onChangeText={setFullName} placeholder={tx('আপনার নাম লিখুন', 'Enter your name')} placeholderTextColor={colors.muted} />
+
+          <Text style={styles.label}>{tx('লিঙ্গ', 'Gender')} *</Text>
+          <View style={styles.genderRow}>
+            {genders.map((g) => (
+              <Pressable key={g.key} style={[styles.genderPill, gender === g.key && styles.genderPillActive]} onPress={() => setGender(g.key)}>
+                <Text style={[styles.genderPillText, gender === g.key && styles.genderPillTextActive]}>{g.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <Text style={styles.label}>{tx('জন্ম তারিখ (ঐচ্ছিক)', 'Date of birth (optional)')}</Text>
+          <View style={styles.dobRow}>
+            <DropdownField
+              value={dobDay}
+              placeholder={tx('দিন', 'Day')}
+              onSelect={setDobDay}
+              options={Array.from({ length: 31 }, (_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: num(i + 1, lang) }; })}
+            />
+            <DropdownField
+              value={dobMonth}
+              placeholder={tx('মাস', 'Month')}
+              flexBasis={1.3}
+              onSelect={setDobMonth}
+              options={MONTHS_EN.map((_, i) => { const v = String(i + 1).padStart(2, '0'); return { value: v, label: lang === 'bn' ? MONTHS_BN[i] : MONTHS_EN[i] }; })}
+            />
+            <DropdownField
+              value={dobYear}
+              placeholder={tx('সাল', 'Year')}
+              flexBasis={1.2}
+              onSelect={setDobYear}
+              options={Array.from({ length: 75 }, (_, i) => { const y = new Date().getFullYear() - 10 - i; return { value: String(y), label: num(y, lang) }; })}
+            />
+          </View>
+
+          <View style={styles.regionCard}>
+            <View style={styles.regionHead}>
+              <Text style={styles.regionTitle}>📍 {tx('আপনার এলাকা', 'Your location')} <Text style={styles.reqStar}>*</Text></Text>
+            </View>
+            <Text style={styles.regionHint}>{tx('প্রকল্প, বিক্রির তালিকা ও বাজারদর আপনার এলাকা অনুযায়ী দেখানো হয়।', 'Projects, listings and rates are shown for your area.')}</Text>
+            <View style={{ height: 6 }} />
+            <GeoSelector value={geo} onChange={setGeo} autoGps={firstSave && !geo.divisionId} disabled={pending} />
+            <FormLabel label={tx('গ্রাম / ঠিকানা', 'Village / address')} />
+            <TextInput
+              style={styles.input}
+              value={village}
+              onChangeText={setVillage}
+              editable={!pending}
+              placeholder={tx('যেমন কানাইখালী, বাড়ি ১২', 'e.g. Kanaikhali, house 12')}
+              placeholderTextColor={colors.muted}
+            />
+            <Text style={styles.fieldHint}>{tx('ঋণের আবেদনের আগে ঠিকানা লাগবে।', 'Needed before you can apply for a loan.')}</Text>
+          </View>
         </View>
 
         {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
         <View style={{ height: 12 }} />
-        <AppButton title={tx('সংরক্ষণ করুন', 'Save')} onPress={save} />
-        <Text style={styles.otpResend} onPress={onDone}>{tx('এখন এড়িয়ে যান', 'Skip for now')}</Text>
+        <AppButton
+          title={pending
+            ? tx('পর্যালোচনার অপেক্ষায়', 'Waiting for review')
+            : saving
+              ? tx('সংরক্ষণ হচ্ছে…', 'Saving…')
+              : firstSave ? tx('সংরক্ষণ করুন', 'Save') : tx('পরিবর্তনের অনুরোধ পাঠান', 'Send change for approval')}
+          onPress={save}
+          disabled={pending || saving}
+        />
+        {firstSave ? <Text style={styles.otpResend} onPress={onDone}>{tx('এখন এড়িয়ে যান', 'Skip for now')}</Text> : null}
+        {!firstSave ? <AppButton variant="outline" title={tx('ফিরে যান', 'Back')} onPress={onDone} /> : null}
       </RefreshScroll>
     </View>
   );
@@ -2560,10 +2686,7 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
   const home = useAppHome(user?.id);
   const users = useApiList<ApiRow>('users');
   const liveWeather = useWeatherApi();
-  const market = useApiList<ApiRow>('market-updates');
   const homeUser = user || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
-  const marketRows = shouldUseFallback(market) ? fallbackMarketUpdates : market.rows;
-  const marketWarning = fallbackWarning(market);
   const currentWeather = liveWeather.data?.current;
   const forecastDay = liveWeather.data?.forecast?.forecastday?.[0]?.day;
   const temp = currentWeather?.temp_c ?? 31;
@@ -2623,17 +2746,8 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
         </View>
         <Text style={styles.homeApaArrow}>›</Text>
       </Pressable>
-      <SectionTitle title={tx('বাজার আপডেট', 'Market Updates')} right={tx('সব দেখুন', 'See all')} warning={marketWarning} onRightPress={() => setScreen('marketUpdates')} />
-      {market.loading ? <ApiStatus state={market} empty={tx('এখন কোনো বাজার আপডেট নেই।', 'No market updates are available right now.')} /> : null}
-      {marketRows.slice(0, 3).map((item, index) => (
-        <Alert
-          key={item.id || index}
-          title={rowTitle(item, lang, tx('বাজার আপডেট', 'Market update'))}
-          sub={rowBody(item, lang, item.district || '')}
-          badge={tEnum(item.status || item.update_type || '', lang)}
-          gold={item.update_type === 'stock' || item.update_type === 'training'}
-        />
-      ))}
+      <PartnerStrip />
+      <MarketSnapshot setScreen={setScreen} />
     </>
   );
 }
@@ -2665,7 +2779,7 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const appLocation = useAppLocation();
   const liveWeather = useWeatherApi();
-  const adminWeather = useApiList<ApiRow>('weather');
+  const adminWeather = useApiList<ApiRow>(`weather?${gpsGeoQuery(useAppLocation().geo).replace(/^&/, '')}`);
   const weather = liveWeather.data;
   const current = weather?.current;
   const forecastDay = weather?.forecast?.forecastday?.[0]?.day;
@@ -2890,7 +3004,8 @@ function ApaInputBar({
 }) {
   const { tx } = useLanguage();
   const [draft, setDraft] = useState('');
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const [recording, setRecording] = useState(false);
   const displayDraft = recording ? tx('শুনছে... শেষ হলে আবার মাইকে চাপ দিন', 'Listening... tap the mic again when done') : draft;
   useEffect(() => {
     if (draftSuggestion) {
@@ -2908,7 +3023,7 @@ function ApaInputBar({
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       allowsEditing: true,
       quality: 0.72,
     });
@@ -2918,17 +3033,18 @@ function ApaInputBar({
   }
   async function toggleVoice() {
     if (recording) {
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      setRecording(null);
+      await recorder.stop();
+      const uri = recorder.uri;
+      setRecording(false);
       if (uri) onVoice(uri);
       return;
     }
-    const permission = await Audio.requestPermissionsAsync();
+    const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) return;
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-    const created = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-    setRecording(created.recording);
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await recorder.prepareToRecordAsync();
+    recorder.record();
+    setRecording(true);
   }
   return (
     <View style={styles.apaInputBar}>
@@ -2963,7 +3079,8 @@ function ApaInputBar({
 
 function ApaVoice({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const [recording, setRecording] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [answer, setAnswer] = useState('');
   const [transcript, setTranscript] = useState('');
@@ -3011,9 +3128,9 @@ function ApaVoice({ setScreen }: { setScreen: (screen: Screen) => void }) {
     if (recording) {
       setBusy(true);
       try {
-        await recording.stopAndUnloadAsync();
-        const uri = recording.getURI();
-        setRecording(null);
+        await recorder.stop();
+        const uri = recorder.uri;
+        setRecording(false);
         setIsRecording(false);
         if (uri) {
           setLiveStatus(tx('কথা বুঝে নিচ্ছে...', 'Understanding your voice...'));
@@ -3035,15 +3152,13 @@ function ApaVoice({ setScreen }: { setScreen: (screen: Screen) => void }) {
       }
       return;
     }
-    const permission = await Audio.requestPermissionsAsync();
+    const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) return;
     setTranscript(tx('শুনছে... শেষ হলে আবার মাইকে চাপ দিন', 'Listening... tap the mic again when done'));
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-    });
-    const created = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-    setRecording(created.recording);
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await recorder.prepareToRecordAsync();
+    recorder.record();
+    setRecording(true);
     setIsRecording(true);
     setLiveStatus(tx('আপনার কথা শুনছে', 'Listening to you'));
   }
@@ -3095,7 +3210,8 @@ function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const [recording, setRecording] = useState(false);
   const displayDraft = recording ? tx('শুনছে... শেষ হলে আবার মাইকে চাপ দিন', 'Listening... tap the mic again when done') : draft;
   const [analyzing, setAnalyzing] = useState(false);
   async function analyzeSelectedImage(uri: string) {
@@ -3136,9 +3252,9 @@ function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
   }
   async function toggleImageVoice() {
     if (recording) {
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      setRecording(null);
+      await recorder.stop();
+      const uri = recorder.uri;
+      setRecording(false);
       if (uri && photoUri) {
         setAnalyzing(true);
         try {
@@ -3152,11 +3268,12 @@ function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
       }
       return;
     }
-    const permission = await Audio.requestPermissionsAsync();
+    const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) return;
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-    const created = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-    setRecording(created.recording);
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await recorder.prepareToRecordAsync();
+    recorder.record();
+    setRecording(true);
   }
   async function openCamera() {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
@@ -3175,7 +3292,7 @@ function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       allowsEditing: true,
       quality: 0.72,
     });
@@ -3269,6 +3386,7 @@ function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
 
 function BrandHeader({ setScreen }: { setScreen?: (screen: Screen) => void }) {
   const { user } = useAuth();
+  const unread = useUnreadCount();
   const initial = String(user?.display_name || user?.full_name || 'S').trim().charAt(0).toUpperCase() || 'S';
   return (
     <View style={styles.brandHeader}>
@@ -3284,7 +3402,10 @@ function BrandHeader({ setScreen }: { setScreen?: (screen: Screen) => void }) {
         <Pressable onPress={() => setScreen?.('shathiApa')} style={styles.brandIconButton}>
           <Text style={styles.geminiIcon}>✦</Text>
         </Pressable>
-        <Text style={styles.brandActionIcon}>🔔</Text>
+        <Pressable onPress={() => setScreen?.('notifications')} style={ui.bellWrap} hitSlop={8} accessibilityLabel="Notifications">
+          <Text style={styles.brandActionIcon}>🔔</Text>
+          {unread > 0 ? <View style={ui.bellBadge}><Text style={ui.bellBadgeText}>{unread > 9 ? '9+' : unread}</Text></View> : null}
+        </Pressable>
         <View style={styles.userAvatarMini}>
           <Text style={styles.userAvatarText}>{initial}</Text>
         </View>
@@ -3365,7 +3486,7 @@ function Alert({ title, sub, badge, gold }: { title: string; sub: string; badge:
   );
 }
 
-function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen) => void; patchDraft: (patch: Partial<ListingDraft>) => void }) {
+function SaleCategories({ setScreen, patchDraft, onOpenListing }: { setScreen: (screen: Screen) => void; patchDraft: (patch: Partial<ListingDraft>) => void; onOpenListing: (listingId: string) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const categories = useApiList<ApiRow>('sale/categories');
@@ -3450,7 +3571,7 @@ function SaleCategories({ setScreen, patchDraft }: { setScreen: (screen: Screen)
       ) : null}
         </>
       ) : (
-        <MyListingsBody setScreen={setScreen} />
+        <MyListingsBody setScreen={setScreen} onOpenProgress={onOpenListing} />
       )}
     </>
   );
@@ -3492,99 +3613,104 @@ type CattleStepProps = {
 
 function CattleForm({ setScreen, draft, patchDraft }: CattleStepProps) {
   const { tx, lang } = useLanguage();
-  const [showInfo, setShowInfo] = useState(false);
   const animalState = useApiList<ApiRow>('sale/animals');
   const breedResource = draft.species ? `sale/breeds?species=${encodeURIComponent(draft.species)}` : 'sale/breeds';
   const breedState = useApiList<ApiRow>(breedResource);
 
   const animalItems = animalState.rows
     .filter((row) => row.is_active !== 0)
-    .map((row) => ({ id: String(row.id), label: `${row.emoji ? row.emoji + ' ' : ''}${rowTitle(row, lang, row.name_en || 'Animal')}`, raw: row }));
+    .map((row) => ({ id: String(row.id), label: rowTitle(row, lang, row.name_en || 'Animal'), icon: row.emoji ? String(row.emoji) : '🐄', raw: row }));
   const breedItems = breedState.rows
     .filter((row) => row.is_active !== 0)
     .map((row) => ({ id: String(row.id), label: rowTitle(row, lang, row.name_en || row.name_bn || 'Breed'), raw: row }));
 
-  // Default the animal to the first one (Cow) and prefill contact once.
+  // Default the animal to the first one (Cow).
   useEffect(() => {
     if (!draft.animalId && animalItems.length) {
       const first = animalItems[0];
-      patchDraft({ animalId: first.id, animalName: first.raw.name_en || first.label, species: first.raw.species || null, breedId: null, breedName: '' });
+      patchDraft({ animalId: first.id, animalName: first.raw.name_en || first.label, animalNameBn: first.raw.name_bn || '', species: first.raw.species || null, breedId: null, breedName: '', breedNameBn: '' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animalState.rows.length]);
 
   function selectAnimal(item: { id: string; raw: ApiRow }) {
-    patchDraft({ animalId: item.id, animalName: item.raw.name_en || '', species: item.raw.species || null, breedId: null, breedName: '' });
+    if (item.id === draft.animalId) return;
+    patchDraft({ animalId: item.id, animalName: item.raw.name_en || '', animalNameBn: item.raw.name_bn || '', species: item.raw.species || null, breedId: null, breedName: '', breedNameBn: '' });
   }
   function selectBreed(item: { id: string; raw: ApiRow }) {
-    patchDraft({ breedId: item.id, breedName: item.raw.name_en || item.raw.name_bn || '' });
+    patchDraft({ breedId: item.id, breedName: item.raw.name_en || item.raw.name_bn || '', breedNameBn: item.raw.name_bn || '' });
   }
 
-  const canContinue = Boolean(draft.animalId && draft.breedId && Number(draft.weightKg) > 0 && draft.images.length > 0);
-  const selectedAnimalLabel = animalItems.find((i) => i.id === draft.animalId)?.label ?? draft.animalName;
+  const locationGate = useListingLocationGate();
+  const canContinue = Boolean(draft.animalId && draft.breedId && Number(draft.weightKg) > 0 && draft.images.length > 0 && locationGate.ok);
+  const missing = [
+    !draft.breedId && tx('জাত', 'breed'),
+    !(Number(draft.weightKg) > 0) && tx('ওজন', 'weight'),
+    !draft.images.length && tx('অন্তত একটি ছবি', 'at least one photo'),
+  ].filter(Boolean).join(', ');
 
   return (
     <>
       <Header title={tx('গবাদিপশু বিক্রির তালিকা', 'List Livestock for Sale')} onBack={() => setScreen('saleCategories')} />
-      {showInfo ? (
-        <View style={styles.infoBar}>
-          <Text style={styles.infoText}>{tx('পশুর ধরন, জাত, বয়স ও ওজন দিন এবং ছবি যুক্ত করুন। মাঠ কর্মকর্তা প্রকৃত ওজন যাচাই করবেন।', 'Enter animal type, breed, age and weight, and add photos. The field officer verifies the actual weight.')}</Text>
-        </View>
-      ) : null}
+      <View style={ui.section}>
+        <Text style={ui.sectionTitle}>{tx('পশুর তথ্য', 'Animal details')}</Text>
+        <Text style={ui.sectionSub}>{tx('ধরন ও জাত বেছে নিন, তারপর আনুমানিক ওজন দিন।', 'Pick the type and breed, then the approximate weight.')}</Text>
 
-      <View style={styles.sectionHeadRow}>
-        <Text style={styles.sectionHeadTitle}>{tx('পশুর তথ্য', 'Animal details')}</Text>
-        <Pressable onPress={() => setShowInfo((v) => !v)} style={({ pressed }) => [styles.infoToggle, showInfo && styles.infoToggleActive, pressed && styles.pressed]}>
-          <Text style={[styles.infoToggleText, showInfo && styles.infoToggleTextActive]}>{showInfo ? '×' : 'i'}</Text>
-        </Pressable>
-      </View>
+        <Text style={ui.fieldLabel}>{tx('পশুর ধরন', 'Animal type')}<Text style={ui.req}> *</Text></Text>
+        {animalState.loading && !animalItems.length ? (
+          <View style={[ui.skelRow, { paddingHorizontal: 14 }]}>
+            <Skeleton width={96} height={44} radius={22} /><Skeleton width={96} height={44} radius={22} /><Skeleton width={96} height={44} radius={22} />
+          </View>
+        ) : (
+          <PillRow items={animalItems} selectedId={draft.animalId} onSelect={selectAnimal} />
+        )}
 
-      <View style={styles.twoCol}>
-        <View style={styles.flex}>
-          <FormLabel label={tx('পশুর ধরন', 'Animal type')} required />
-          <ChoiceSelect compact value={selectedAnimalLabel} placeholder={tx('ধরন', 'Type')} items={animalItems} onSelect={selectAnimal} />
-        </View>
-        <View style={styles.flex}>
-          <FormLabel label={tx('জাত', 'Breed')} required />
-          <ChoiceSelect compact value={draft.breedName} placeholder={tx('জাত', 'Breed')} items={breedItems} onSelect={selectBreed} disabled={!draft.animalId} />
-        </View>
-      </View>
+        <Text style={ui.fieldLabel}>{tx('জাত', 'Breed')}<Text style={ui.req}> *</Text></Text>
+        {breedState.loading && !breedItems.length ? (
+          <View style={[ui.skelRow, { paddingHorizontal: 14 }]}>
+            <Skeleton width={80} height={38} radius={19} /><Skeleton width={110} height={38} radius={19} /><Skeleton width={90} height={38} radius={19} />
+          </View>
+        ) : (
+          <ChipScroller items={breedItems} selectedId={draft.breedId} onSelect={selectBreed} disabled={!draft.animalId} />
+        )}
 
-      <View style={styles.twoCol}>
-        <View style={styles.flex}>
-          <FormLabel label={tx('বয়স (মাস)', 'Age (months)')} />
-          <TextInput style={[styles.input, styles.inRowInput]} value={draft.ageMonths} onChangeText={(v) => patchDraft({ ageMonths: v })} keyboardType="number-pad" />
+        <View style={[ui.row2, { marginTop: 4 }]}>
+          <View style={ui.row2Item}>
+            <Text style={[ui.fieldLabel, { paddingHorizontal: 0 }]}>{tx('বয়স (মাস)', 'Age (months)')}</Text>
+            <TextInput
+              style={ui.inputSm}
+              value={draft.ageMonths}
+              onChangeText={(v) => patchDraft({ ageMonths: v.replace(/[^0-9]/g, '') })}
+              keyboardType="number-pad"
+              placeholder={tx('যেমন ২৪', 'e.g. 24')}
+              placeholderTextColor={colors.muted}
+            />
+          </View>
+          <View style={ui.row2Item}>
+            <Text style={[ui.fieldLabel, { paddingHorizontal: 0 }]}>{tx('কয়টি পশু', 'How many')}</Text>
+            <Stepper value={draft.quantity} onChange={(v) => patchDraft({ quantity: v })} min={1} compact />
+          </View>
         </View>
-        <View style={styles.flex}>
-          <FormLabel label={tx('পশুর সংখ্যা', 'Quantity')} />
-          <Stepper value={draft.quantity} onChange={(v) => patchDraft({ quantity: v })} min={1} compact />
-        </View>
-      </View>
 
-      <View style={styles.twoCol}>
-        <View style={styles.flex}>
-          <FormLabel label={tx('আনুমানিক জীবিত ওজন (কেজি)', 'Tentative live weight (kg)')} required />
-          <TextInput style={[styles.input, styles.inRowInput]} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v, meatWeightKg: meatFromLive(v) })} keyboardType="number-pad" placeholder={tx('যেমন ২০০', 'e.g. 200')} placeholderTextColor={colors.muted} />
-        </View>
-        <View style={styles.flex}>
-          <FormLabel label={tx('আনুমানিক মাংসের ওজন (কেজি)', 'Tentative meat weight (kg)')} />
-          <TextInput style={[styles.input, styles.inRowInput]} value={draft.meatWeightKg} onChangeText={(v) => patchDraft({ meatWeightKg: v, weightKg: liveFromMeat(v) })} keyboardType="number-pad" placeholder={tx('যেমন ১০০', 'e.g. 100')} placeholderTextColor={colors.muted} />
-        </View>
+        <Text style={[ui.fieldLabel, { marginTop: 16 }]}>{tx('আনুমানিক ওজন', 'Approximate weight')}<Text style={ui.req}> *</Text></Text>
+        <LinkedWeights
+          live={draft.weightKg}
+          meat={draft.meatWeightKg}
+          onLive={(v) => patchDraft({ weightKg: v, meatWeightKg: meatFromLive(v) })}
+          onMeat={(v) => patchDraft({ meatWeightKg: v, weightKg: liveFromMeat(v) })}
+          dressingPct={DEFAULT_DRESSING_PCT}
+          onMeasure={() => setScreen('cattleMeasure')}
+        />
       </View>
-      <Pressable onPress={() => setScreen('cattleMeasure')} style={({ pressed }) => [styles.measureBtn, styles.measureBtnWide, pressed && styles.pressed]}>
-        <Text style={styles.measureBtnText}>📏 {tx('ফিতা দিয়ে মাপুন', 'Measure by tape')}</Text>
-      </Pressable>
-      <Text style={styles.fieldHint}>{tx('যেকোনো একটি ঘরে লিখুন — অন্যটি নিজে থেকেই হিসাব হবে (ড্রেসিং ৫০%, জীবিত ওজন = ২ × মাংসের ওজন)। ব্যাপারী ও ক্রেতারা জীবিত ওজনে, কৃষক ও বেপারীরা মাংসের ওজনে দর করেন।', 'Fill either box — the other is worked out for you (50% dressing, live weight = 2 × meat weight). Traders and buyers deal in live weight; farmers and beparis deal in meat weight.')}</Text>
-      <Text style={styles.fieldHint}>{tx('ফিতা পদ্ধতিতে বুকের বেড় ও দৈর্ঘ্য দিয়ে আনুমানিক ওজন বের করুন। চূড়ান্ত ওজন মাঠ কর্মকর্তা স্কেলে নেবেন।', 'Use the tape method (chest girth + body length) to estimate weight. Final weight is taken on the field officer scale.')}</Text>
 
       <MediaDescription draft={draft} patchDraft={patchDraft} kind="livestock" context={[draft.animalName && `type: ${draft.animalName}`, draft.breedName && `breed: ${draft.breedName}`, draft.ageMonths && `age ${draft.ageMonths} months`, Number(draft.weightKg) > 0 && `approx ${draft.weightKg} kg`].filter(Boolean).join(', ')} />
 
-      <ContactSection draft={draft} patchDraft={patchDraft} />
+      <ContactSection draft={draft} patchDraft={patchDraft} onUpdateLocation={() => setScreen('menuPersonal')} />
 
-      {!canContinue ? (
-        <Text style={styles.fieldHint}>{tx('পশুর ধরন, জাত, ওজন ও অন্তত একটি ছবি দিন।', 'Add animal type, breed, weight and at least one photo to continue.')}</Text>
+      {!canContinue && missing ? (
+        <Text style={styles.fieldHint}>{tx(`চালিয়ে যেতে দিন: ${missing}।`, `To continue, add: ${missing}.`)}</Text>
       ) : null}
-      <AppButton title={tx('পশুর তথ্য নিশ্চিত করুন  →', 'Confirm Cattle Details  →')} onPress={() => setScreen('cattlePrice')} disabled={!canContinue} />
+      <AppButton title={tx('দাম ও আয় দেখুন  →', 'See price & earning  →')} onPress={() => setScreen('cattlePrice')} disabled={!canContinue} />
     </>
   );
 }
@@ -3670,42 +3796,115 @@ function Stepper({ value, onChange, min = 0, max = 99999, step = 1, compact = fa
   );
 }
 
-function FakeSelect({ value, options, onChange, disabled = false }: { value: string; options?: string[]; onChange?: (value: string) => void; disabled?: boolean }) {
+type SheetItem = { id: string; label: string; sub?: string; icon?: string; raw?: any; disabled?: boolean };
+
+/**
+ * The one dropdown: a trigger that reads like an input, opening a bottom sheet
+ * of options. Lists longer than seven get a search box, because scrolling 64
+ * districts or 30 breeds to find one is where people give up.
+ */
+function SheetSelect({ value, placeholder, title, items, onSelect, disabled = false, compact = false, selectedId, icon }: {
+  value?: string;
+  placeholder: string;
+  title?: string;
+  items: SheetItem[];
+  onSelect: (item: any) => void;
+  disabled?: boolean;
+  compact?: boolean;
+  /** Match the selection by id; otherwise by label (older call sites). */
+  selectedId?: string | null;
+  icon?: string;
+}) {
+  const { tx } = useLanguage();
   const [open, setOpen] = useState(false);
-  const interactive = !disabled && !!options?.length && !!onChange;
-  // Same rule as ChoiceSelect: a handful of short options belong on the screen,
-  // not behind a sheet. Payment method (cash / bkash / nagad / bank) is the case
-  // this exists for.
-  const chipItems = (options ?? []).map((option) => ({ id: option, label: option }));
-  if (onChange && autoChips(chipItems)) {
-    return <ChipSelect value={value} items={chipItems} onSelect={(item) => onChange(item.id)} disabled={disabled} />;
-  }
+  const [query, setQuery] = useState('');
+  const interactive = !disabled && items.length > 0;
+  const searchable = items.length > 7;
+  const q = query.trim().toLowerCase();
+  const shown = q ? items.filter((i) => `${i.label} ${i.sub ?? ''}`.toLowerCase().includes(q)) : items;
+  const close = () => { setOpen(false); setQuery(''); };
+  const isSelected = (i: SheetItem) => (selectedId !== undefined && selectedId !== null ? i.id === selectedId : i.label === value);
   return (
     <>
-      <Pressable disabled={!interactive} onPress={() => setOpen(true)} style={({ pressed }) => [styles.fakeSelect, disabled && styles.inputDisabled, pressed && interactive && styles.pressed]}>
-        <Text style={styles.fakeSelectText}>{value}</Text>
-        <Text style={styles.chevron}>⌄</Text>
+      <Pressable
+        disabled={!interactive}
+        onPress={() => setOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel={title || placeholder}
+        style={({ pressed }) => [ui.selectTrigger, compact && ui.selectTriggerCompact, !interactive && ui.selectDisabled, pressed && interactive && styles.pressed]}
+      >
+        {icon ? <Text style={{ fontSize: 17 }}>{icon}</Text> : null}
+        <Text style={[ui.selectValue, !value && ui.selectPlaceholder]} numberOfLines={1}>{value || placeholder}</Text>
+        <Ionicons name="chevron-down" size={18} color={colors.muted} />
       </Pressable>
-      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
-          <Pressable style={styles.dropdownCard} onPress={() => {}}>
-            <View style={styles.dropdownHandle} />
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {(options || []).map((opt) => (
-                <Pressable key={opt} style={[styles.dropdownOption, opt === value && styles.dropdownOptionActive]} onPress={() => { onChange?.(opt); setOpen(false); }}>
-                  <Text style={[styles.dropdownOptionText, opt === value && styles.dropdownOptionTextActive]} numberOfLines={1}>{opt}</Text>
-                  {opt === value ? <Text style={styles.dropdownCheck}>✓</Text> : null}
+      <Modal visible={open} transparent animationType="slide" onRequestClose={close}>
+        <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <Pressable style={styles.dropdownBackdrop} onPress={close}>
+            <Pressable style={ui.sheet} onPress={() => {}}>
+              <View style={styles.dropdownHandle} />
+              <View style={ui.sheetHead}>
+                <Text style={ui.sheetTitle} numberOfLines={1}>{title || placeholder}</Text>
+                <Pressable onPress={close} hitSlop={10} accessibilityLabel={tx('বন্ধ করুন', 'Close')}>
+                  <Ionicons name="close" size={22} color={colors.muted} />
                 </Pressable>
-              ))}
-            </ScrollView>
+              </View>
+              {searchable ? (
+                <View style={ui.sheetSearch}>
+                  <Ionicons name="search" size={17} color={colors.muted} />
+                  <TextInput
+                    style={ui.sheetSearchInput}
+                    value={query}
+                    onChangeText={setQuery}
+                    placeholder={tx('খুঁজুন…', 'Search…')}
+                    placeholderTextColor={colors.muted}
+                    autoCorrect={false}
+                  />
+                  {query ? (
+                    <Pressable onPress={() => setQuery('')} hitSlop={8}><Ionicons name="close-circle" size={18} color={colors.muted} /></Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                {shown.map((item) => {
+                  const sel = isSelected(item);
+                  return (
+                    <Pressable
+                      key={item.id}
+                      disabled={item.disabled}
+                      onPress={() => { onSelect(item); close(); }}
+                      style={({ pressed }) => [ui.sheetRow, sel && ui.sheetRowActive, pressed && styles.pressed, item.disabled && { opacity: 0.4 }]}
+                    >
+                      {item.icon ? <Text style={ui.sheetRowIcon}>{item.icon}</Text> : null}
+                      <View style={styles.flex}>
+                        <Text style={[ui.sheetRowText, sel && ui.sheetRowTextActive]} numberOfLines={2}>{item.label}</Text>
+                        {item.sub ? <Text style={ui.sheetRowSub} numberOfLines={1}>{item.sub}</Text> : null}
+                      </View>
+                      {sel ? <Ionicons name="checkmark-circle" size={20} color={colors.maroon} /> : null}
+                    </Pressable>
+                  );
+                })}
+                {shown.length === 0 ? <Text style={ui.sheetEmpty}>{tx('কিছু মেলেনি', 'Nothing matches')}</Text> : null}
+              </ScrollView>
+            </Pressable>
           </Pressable>
-        </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
     </>
   );
 }
 
-// Generic dropdown backed by {id,label} items (animal, breed, geo).
+function FakeSelect({ value, options, onChange, disabled = false }: { value: string; options?: string[]; onChange?: (value: string) => void; disabled?: boolean }) {
+  // A handful of short options belong on the screen, not behind a sheet.
+  // Payment method (cash / bkash / nagad / bank) is the case this exists for.
+  const items = (options ?? []).map((option) => ({ id: option, label: option }));
+  if (onChange && autoChips(items)) {
+    return <ChipSelect value={value} items={items} onSelect={(item) => onChange(item.id)} disabled={disabled} />;
+  }
+  return <SheetSelect value={value} placeholder={value} items={items} selectedId={value} onSelect={(item) => onChange?.(item.id)} disabled={disabled || !onChange} />;
+}
+
+// Generic dropdown backed by {id,label} items (animal, breed, geo). Kept as a
+// name because many screens call it; it is the SheetSelect now.
 function PickerSelect({ value, placeholder, items, onSelect, disabled = false, compact = false }: {
   value?: string;
   placeholder: string;
@@ -3714,33 +3913,188 @@ function PickerSelect({ value, placeholder, items, onSelect, disabled = false, c
   disabled?: boolean;
   compact?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const interactive = !disabled && items.length > 0;
+  return <SheetSelect value={value} placeholder={placeholder} items={items} onSelect={onSelect} disabled={disabled} compact={compact} />;
+}
+
+/** Big tappable pills in one scrolling row — for a short set with icons (animal type). */
+function PillRow({ items, selectedId, onSelect, inset = 14 }: {
+  items: SheetItem[];
+  selectedId?: string | null;
+  onSelect: (item: any) => void;
+  inset?: number;
+}) {
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[ui.pillScroll, { paddingHorizontal: inset }]}>
+      {items.map((item) => {
+        const active = item.id === selectedId;
+        return (
+          <Pressable
+            key={item.id}
+            onPress={() => onSelect(item)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active }}
+            style={({ pressed }) => [ui.pill, active && ui.pillActive, pressed && styles.pressed]}
+          >
+            {item.icon ? <Text style={ui.pillIcon}>{item.icon}</Text> : null}
+            <Text style={[ui.pillText, active && ui.pillTextActive]}>{item.label}</Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+/** One-tap chips in a scrolling row — for a list too long to wrap (breeds). */
+function ChipScroller({ items, selectedId, onSelect, disabled = false, inset = 14 }: {
+  items: SheetItem[];
+  selectedId?: string | null;
+  onSelect: (item: any) => void;
+  disabled?: boolean;
+  inset?: number;
+}) {
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[ui.pillScroll, { paddingHorizontal: inset }]}>
+      {items.map((item) => {
+        const active = item.id === selectedId;
+        return (
+          <Pressable
+            key={item.id}
+            disabled={disabled}
+            onPress={() => onSelect(item)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active, disabled }}
+            style={({ pressed }) => [ui.chip, active && ui.chipActive, disabled && { opacity: 0.45 }, pressed && styles.pressed]}
+          >
+            <Text style={[ui.chipText, active && ui.chipTextActive]}>{active ? '✓ ' : ''}{item.label}</Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+/**
+ * Live and meat weight side by side with a link between them: typing either
+ * fills the other at the dressing yield. Short labels, so neither box is pushed
+ * down by a wrapping label.
+ */
+function LinkedWeights({ live, meat, onLive, onMeat, dressingPct, onMeasure }: {
+  live: string;
+  meat: string;
+  onLive: (v: string) => void;
+  onMeat: (v: string) => void;
+  dressingPct: number;
+  onMeasure?: () => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const [focus, setFocus] = useState<'live' | 'meat' | null>(null);
   return (
     <>
-      <Pressable disabled={!interactive} onPress={() => setOpen(true)} style={({ pressed }) => [styles.fakeSelect, compact && styles.fakeSelectCompact, disabled && styles.inputDisabled, pressed && interactive && styles.pressed]}>
-        <Text style={[styles.fakeSelectText, !value && styles.fakeSelectPlaceholder]} numberOfLines={1}>{value || placeholder}</Text>
-        <Text style={styles.chevron}>⌄</Text>
-      </Pressable>
-      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
-          <Pressable style={styles.dropdownCard} onPress={() => {}}>
-            <View style={styles.dropdownHandle} />
-            <Text style={styles.dropdownSheetTitle}>{placeholder}</Text>
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {items.map((item) => {
-                const sel = item.label === value;
-                return (
-                  <Pressable key={item.id} style={[styles.dropdownOption, sel && styles.dropdownOptionActive]} onPress={() => { onSelect(item); setOpen(false); }}>
-                    <Text style={[styles.dropdownOptionText, sel && styles.dropdownOptionTextActive]} numberOfLines={1}>{item.label}</Text>
-                    {sel ? <Text style={styles.dropdownCheck}>✓</Text> : null}
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-          </Pressable>
+      <View style={ui.weightLink}>
+        <View style={ui.weightBox}>
+          <Text style={ui.weightLabel}>{tx('জীবিত ওজন', 'Live weight')}</Text>
+          <View style={[ui.weightField, focus === 'live' && ui.weightFieldFocus]}>
+            <TextInput
+              style={ui.weightInput}
+              value={live}
+              onChangeText={(v) => onLive(v.replace(/[^0-9.]/g, ''))}
+              onFocus={() => setFocus('live')}
+              onBlur={() => setFocus(null)}
+              keyboardType="number-pad"
+              placeholder="0"
+              placeholderTextColor="#C9A9B8"
+            />
+            <Text style={ui.weightUnit}>{tx('কেজি', 'kg')}</Text>
+          </View>
+        </View>
+        <View style={ui.linkBadge}>
+          <View style={ui.linkBadgeIcon}><Ionicons name="link" size={16} color={colors.maroon} /></View>
+          <Text style={ui.linkPct}>{num(dressingPct, lang)}%</Text>
+        </View>
+        <View style={ui.weightBox}>
+          <Text style={ui.weightLabel}>{tx('মাংসের ওজন', 'Meat weight')}</Text>
+          <View style={[ui.weightField, focus === 'meat' && ui.weightFieldFocus]}>
+            <TextInput
+              style={ui.weightInput}
+              value={meat}
+              onChangeText={(v) => onMeat(v.replace(/[^0-9.]/g, ''))}
+              onFocus={() => setFocus('meat')}
+              onBlur={() => setFocus(null)}
+              keyboardType="number-pad"
+              placeholder="0"
+              placeholderTextColor="#C9A9B8"
+            />
+            <Text style={ui.weightUnit}>{tx('কেজি', 'kg')}</Text>
+          </View>
+        </View>
+      </View>
+      <Text style={ui.weightCaption}>
+        {tx(
+          `দুটি ঘর যুক্ত: যেকোনো একটিতে লিখুন, অন্যটি নিজে হিসাব হবে (ড্রেসিং ${num(dressingPct, 'bn')}%)। চূড়ান্ত ওজন মাঠ কর্মকর্তা স্কেলে নেবেন।`,
+          `The two are linked: type either, the other follows (${num(dressingPct, 'en')}% dressing). The field officer weighs the animal to confirm.`,
+        )}
+      </Text>
+      {onMeasure ? (
+        <Pressable onPress={onMeasure} style={({ pressed }) => [ui.measureLink, pressed && styles.pressed]} accessibilityRole="button">
+          <Text style={{ fontSize: 15 }}>📏</Text>
+          <Text style={ui.textLink}>{tx('ওজন জানা নেই? ফিতা দিয়ে মাপুন', "Don't know the weight? Measure by tape")}</Text>
         </Pressable>
-      </Modal>
+      ) : null}
+    </>
+  );
+}
+
+/** A grey block that pulses while content loads — shaped like what is coming. */
+function Skeleton({ width = '100%', height = 14, radius = 8, style }: { width?: number | `${number}%`; height?: number; radius?: number; style?: object }) {
+  const pulse = useRef(new Animated.Value(0.55)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 650, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.55, duration: 650, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+  return <Animated.View style={[ui.skel, { width, height, borderRadius: radius, opacity: pulse }, style]} />;
+}
+
+/**
+ * Placeholder for a list while its first page loads. Spinners stay for actions
+ * (a button that is saving); a list that is about to appear gets its outline.
+ */
+function ListSkeleton({ variant = 'card', count = 3 }: { variant?: 'card' | 'grid' | 'row'; count?: number }) {
+  if (variant === 'grid') {
+    return (
+      <View style={ui.skelGrid}>
+        {Array.from({ length: count }).map((_, i) => (
+          <View key={i} style={ui.skelTile}>
+            <Skeleton height={120} radius={0} />
+            <View style={{ paddingHorizontal: 10, gap: 7 }}>
+              <Skeleton width="85%" />
+              <Skeleton width="50%" height={11} />
+              <Skeleton width="60%" height={18} />
+            </View>
+          </View>
+        ))}
+      </View>
+    );
+  }
+  return (
+    <>
+      {Array.from({ length: count }).map((_, i) => (
+        <View key={i} style={ui.skelCard}>
+          <View style={ui.skelRow}>
+            <Skeleton width={variant === 'row' ? 40 : 60} height={variant === 'row' ? 40 : 60} radius={12} />
+            <View style={{ flex: 1, gap: 8 }}>
+              <Skeleton width="75%" />
+              <Skeleton width="45%" height={11} />
+            </View>
+          </View>
+          {variant === 'card' ? <Skeleton height={6} radius={3} /> : null}
+        </View>
+      ))}
     </>
   );
 }
@@ -3823,80 +4177,331 @@ function ChoiceSelect({ value, placeholder, items, onSelect, disabled = false, c
   return <PickerSelect value={value} placeholder={placeholder} items={items} onSelect={onSelect} disabled={disabled} compact={compact} />;
 }
 
-// Cascading Division -> District -> Thana picker sourced from the geo API.
-function GeoPicker({ draft, patchDraft, small = false, hideGps = false, gpsRef }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void; small?: boolean; hideGps?: boolean; gpsRef?: React.MutableRefObject<(() => void) | undefined> }) {
+// ---------------------------------------------------------------------------
+// Location: division -> district -> upazila, by id.
+//
+// One picker for every place the app asks where someone is. Three ways in, and
+// each fills what it can:
+//   - search an upazila by name (English or Bangla) -> fills all three levels;
+//   - GPS -> the deepest level the server can match; if nothing matches, Dhaka
+//     division is preselected so the district list is ready to choose from;
+//   - the cascading dropdowns, where changing a level clears the ones below.
+// Only ids are ever sent; names are for display.
+// ---------------------------------------------------------------------------
+
+const EMPTY_GEO_VALUE: GeoValue = {
+  divisionId: null, districtId: null, upazilaId: null,
+  division: '', district: '', upazila: '',
+  divisionBn: '', districtBn: '', upazilaBn: '',
+};
+
+function geoValueFromUser(u?: AuthUser | null): GeoValue {
+  return {
+    divisionId: u?.division_id ?? null,
+    districtId: u?.district_id ?? null,
+    upazilaId: u?.upazila_id ?? null,
+    division: u?.division ?? '',
+    district: u?.district ?? '',
+    upazila: u?.upazila ?? '',
+    divisionBn: u?.division_bn ?? '',
+    districtBn: u?.district_bn ?? '',
+    upazilaBn: u?.upazila_bn ?? '',
+  };
+}
+
+/** "Savar, Dhaka, Dhaka" in the reader's language, deepest level first. */
+function geoLabel(v: GeoValue, lang: string): string {
+  const pick = (en: string, bn: string) => (lang === 'bn' ? bn || en : en || bn);
+  return [pick(v.upazila, v.upazilaBn), pick(v.district, v.districtBn), pick(v.division, v.divisionBn)].filter(Boolean).join(', ');
+}
+
+/** Query-string fragment carrying the phone's resolved position. */
+function gpsGeoQuery(geo?: LocationState['geo']): string {
+  if (!geo) return '';
+  return [
+    geo.districtId ? `&gps_district_id=${encodeURIComponent(geo.districtId)}` : '',
+    geo.upazilaId ? `&gps_upazila_id=${encodeURIComponent(geo.upazilaId)}` : '',
+  ].join('');
+}
+
+function geoFromResolved(g: ApiRow): GeoValue {
+  const s = (v: unknown) => (v === null || v === undefined ? '' : String(v));
+  return {
+    divisionId: g.division_id ? String(g.division_id) : null,
+    districtId: g.district_id ? String(g.district_id) : null,
+    upazilaId: g.upazila_id ? String(g.upazila_id) : null,
+    division: s(g.division), district: s(g.district), upazila: s(g.upazila),
+    divisionBn: s(g.division_bn), districtBn: s(g.district_bn), upazilaBn: s(g.upazila_bn),
+  };
+}
+
+function GeoSelector({ value, onChange, autoGps = false, disabled = false }: {
+  value: GeoValue;
+  onChange: (next: GeoValue) => void;
+  /** Try GPS once on open when nothing is chosen yet. */
+  autoGps?: boolean;
+  disabled?: boolean;
+}) {
   const { tx, lang } = useLanguage();
   const appLocation = useAppLocation();
   const divisions = useApiList<ApiRow>('geo/divisions');
-  const districts = useApiList<ApiRow>(draft.divisionId ? `geo/districts?division_id=${draft.divisionId}` : 'geo/districts');
-  const thanas = useApiList<ApiRow>(draft.districtId ? `geo/upazilas?district_id=${draft.districtId}` : 'geo/upazilas');
-  const toItems = (rows: ApiRow[]) => rows.map((r) => ({ id: String(r.id), label: rowTitle(r, lang, r.name_en || 'N/A'), raw: r }));
-  const matchByName = (rows: ApiRow[], name?: string) => {
-    const n = String(name || '').trim().toLowerCase();
-    if (!n) return undefined;
-    return rows.find((r) => String(r.name_en).toLowerCase() === n) || rows.find((r) => String(r.name_en).toLowerCase().includes(n) || n.includes(String(r.name_en).toLowerCase()));
-  };
-  function useGps() {
-    const d = appLocation.detected;
-    if (!appLocation.granted || !d) return;
-    const dv = matchByName(divisions.rows, d.division);
-    patchDraft({
-      divisionId: dv ? String(dv.id) : draft.divisionId,
-      divisionName: dv ? String(dv.name_en) : (d.division || draft.divisionName),
-      districtId: null, districtName: d.district || '',
-      thanaId: null, thanaName: d.thana || '', thanaOther: false,
-    });
+  // An id of 0 matches nothing: an empty list until a parent is chosen, instead
+  // of the whole country's districts.
+  const districts = useApiList<ApiRow>(`geo/districts?division_id=${value.divisionId ?? 0}`);
+  const upazilas = useApiList<ApiRow>(`geo/upazilas?district_id=${value.districtId ?? 0}`);
+  const [query, setQuery] = useState('');
+  const [hits, setHits] = useState<ApiRow[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [note, setNote] = useState('');
+  const [gpsBusy, setGpsBusy] = useState(false);
+  const triedAuto = useRef(false);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) { setHits([]); setSearching(false); return; }
+    let alive = true;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      apiRequest<{ data?: ApiRow[] }>(`geo/search?q=${encodeURIComponent(q)}&limit=8`, { silent: true })
+        .then((j) => { if (alive) setHits(j.data ?? []); })
+        .catch(() => { if (alive) setHits([]); })
+        .finally(() => { if (alive) setSearching(false); });
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query]);
+
+  const label = (row: ApiRow) => rowTitle(row, lang, String(row.name_en ?? ''));
+  const item = (row: ApiRow) => ({ id: String(row.id), label: label(row), raw: row });
+
+  function pickHit(h: ApiRow) {
+    onChange(geoFromResolved(h));
+    setQuery('');
+    setHits([]);
+    setNote(tx('উপজেলা বেছে নেওয়া হয়েছে — জেলা ও বিভাগ নিজে থেকেই পূরণ হয়েছে।', 'Upazila chosen — district and division were filled in for you.'));
   }
-  if (gpsRef) gpsRef.current = useGps;
+
+  function fallbackToDhaka() {
+    const dhaka = divisions.rows.find((r) => String(r.name_en) === 'Dhaka');
+    if (dhaka) {
+      onChange({ ...EMPTY_GEO_VALUE, divisionId: String(dhaka.id), division: String(dhaka.name_en), divisionBn: String(dhaka.name_bn ?? '') });
+    }
+    setNote(tx('GPS থেকে এলাকা পাওয়া যায়নি — ঢাকা বিভাগ বেছে রাখা হয়েছে, আপনার জেলা ও উপজেলা বেছে নিন।', 'GPS could not place you — Dhaka division is preselected; choose your district and upazila.'));
+  }
+
+  async function fillFromGps() {
+    const d = appLocation.detected;
+    if (!appLocation.granted || !d) { fallbackToDhaka(); return; }
+    setGpsBusy(true);
+    try {
+      const qs = new URLSearchParams({ division: d.division ?? '', district: d.district ?? '', upazila: d.upazila ?? '' }).toString();
+      const res = await apiRequest<{ data?: ApiRow }>(`geo/resolve?${qs}`, { silent: true });
+      const g = res.data;
+      if (g?.upazila_id) {
+        onChange(geoFromResolved(g));
+        setNote(tx('GPS থেকে আপনার উপজেলা পূরণ হয়েছে — প্রয়োজনে বদলান।', 'Your upazila was filled from GPS — change it if needed.'));
+      } else if (g?.district_id) {
+        onChange(geoFromResolved(g));
+        setNote(tx('GPS থেকে জেলা পাওয়া গেছে — এবার আপনার উপজেলা বেছে নিন।', 'GPS found your district — now choose your upazila.'));
+      } else if (g?.division_id) {
+        onChange(geoFromResolved(g));
+        setNote(tx('GPS থেকে বিভাগ পাওয়া গেছে — জেলা ও উপজেলা বেছে নিন।', 'GPS found your division — choose your district and upazila.'));
+      } else {
+        fallbackToDhaka();
+      }
+    } catch {
+      fallbackToDhaka();
+    } finally {
+      setGpsBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!autoGps || triedAuto.current || value.divisionId || !divisions.rows.length) return;
+    triedAuto.current = true;
+    void fillFromGps();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoGps, divisions.rows.length, value.divisionId]);
+
+  const pickName = (en: string, bn: string) => (lang === 'bn' ? bn || en : en || bn);
+
   return (
-    <>
-      {!hideGps ? (
-        <View style={styles.gpsPillRow}>
-          <Pressable onPress={useGps} style={({ pressed }) => [styles.gpsPill, pressed && styles.pressed]}>
-            <Text style={styles.gpsPillText}>⌖ {tx('GPS দিয়ে পূরণ', 'Use GPS')}</Text>
-          </Pressable>
+    <View pointerEvents={disabled ? 'none' : 'auto'} style={disabled ? { opacity: 0.55 } : null}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 6 }}>
+        <TextInput
+          style={[styles.input, { flex: 1, marginHorizontal: 0 }]}
+          value={query}
+          onChangeText={setQuery}
+          placeholder={tx('🔍 উপজেলা খুঁজুন (যেমন সাভার)', '🔍 Search your upazila (e.g. Savar)')}
+          placeholderTextColor={colors.muted}
+          autoCorrect={false}
+        />
+        <Pressable onPress={fillFromGps} disabled={gpsBusy} style={({ pressed }) => [styles.gpsBtn, pressed && styles.pressed]}>
+          <Text style={styles.gpsBtnText}>{gpsBusy ? '…' : '⌖'} {tx('GPS', 'GPS')}</Text>
+        </Pressable>
+      </View>
+      {searching ? <Text style={[styles.fieldHint, { marginTop: 6 }]}>{tx('খোঁজা হচ্ছে…', 'Searching…')}</Text> : null}
+      {hits.length ? (
+        <View style={{ marginHorizontal: 16, marginTop: 6, backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.line, overflow: 'hidden' }}>
+          {hits.map((h, i) => (
+            <Pressable
+              key={String(h.upazila_id)}
+              onPress={() => pickHit(h)}
+              style={({ pressed }) => [{ paddingHorizontal: 14, paddingVertical: 11, borderTopWidth: i ? 1 : 0, borderTopColor: colors.line }, pressed && styles.pressed]}
+            >
+              <Text style={{ color: colors.ink, fontSize: 14.5, fontWeight: '700' }}>{pickName(String(h.upazila), String(h.upazila_bn ?? ''))}</Text>
+              <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>
+                {pickName(String(h.district), String(h.district_bn ?? ''))} · {pickName(String(h.division), String(h.division_bn ?? ''))}
+              </Text>
+            </Pressable>
+          ))}
         </View>
+      ) : query.trim().length >= 2 && !searching ? (
+        <Text style={[styles.fieldHint, { marginTop: 6 }]}>{tx('কোনো উপজেলা মেলেনি — নিচ থেকে বেছে নিন।', 'No upazila matched — choose from the lists below.')}</Text>
       ) : null}
-      {!small ? <FormLabel required label={tx('বিভাগ', 'Division')} /> : null}
-      {small ? <View style={{ height: 2 }} /> : null}
+
+      <FormLabel label={tx('বিভাগ', 'Division')} required />
       <PickerSelect
-        value={draft.divisionName}
+        value={pickName(value.division, value.divisionBn)}
         placeholder={tx('বিভাগ বেছে নিন', 'Select division')}
-        items={toItems(divisions.rows)}
-        compact={small}
-        onSelect={(item) => patchDraft({ divisionId: item.id, divisionName: item.raw.name_en || '', districtId: null, districtName: '', thanaId: null, thanaName: '' })}
+        items={divisions.rows.map(item)}
+        onSelect={(it) => onChange({ ...EMPTY_GEO_VALUE, divisionId: it.id, division: String(it.raw.name_en ?? ''), divisionBn: String(it.raw.name_bn ?? '') })}
       />
-      <View style={small ? styles.geoRow : styles.twoCol}>
+      <View style={styles.twoCol}>
         <View style={styles.flex}>
-          {!small ? <FormLabel label={tx('জেলা', 'District')} /> : null}
+          <FormLabel label={tx('জেলা', 'District')} />
           <PickerSelect
-            value={draft.districtName}
-            placeholder={tx('জেলা বেছে নিন', 'Select district')}
-            items={toItems(districts.rows)}
-            disabled={!draft.divisionId}
-            compact={small}
-            onSelect={(item) => patchDraft({ districtId: item.id, districtName: item.raw.name_en || '', thanaId: null, thanaName: '' })}
+            value={pickName(value.district, value.districtBn)}
+            placeholder={value.divisionId ? tx('জেলা বেছে নিন', 'Select district') : tx('আগে বিভাগ', 'Division first')}
+            items={districts.rows.map(item)}
+            disabled={!value.divisionId}
+            compact
+            onSelect={(it) => onChange({ ...value, districtId: it.id, district: String(it.raw.name_en ?? ''), districtBn: String(it.raw.name_bn ?? ''), upazilaId: null, upazila: '', upazilaBn: '' })}
           />
         </View>
         <View style={styles.flex}>
-          {!small ? <FormLabel label={tx('থানা / উপজেলা', 'Thana / Upazila')} /> : null}
+          <FormLabel label={tx('উপজেলা', 'Upazila')} />
           <PickerSelect
-            value={draft.thanaOther ? tx('অন্যান্য', 'Other') : draft.thanaName}
-            placeholder={tx('থানা বেছে নিন', 'Select thana')}
-            items={[...toItems(thanas.rows), { id: '__other__', label: tx('অন্যান্য (নিজে লিখুন)', 'Other (type manually)'), raw: {} as ApiRow }]}
-            disabled={!draft.districtId}
-            compact={small}
-            onSelect={(item) => item.id === '__other__'
-              ? patchDraft({ thanaOther: true, thanaId: null, thanaName: '' })
-              : patchDraft({ thanaOther: false, thanaId: item.id, thanaName: item.raw.name_en || '' })}
+            value={pickName(value.upazila, value.upazilaBn)}
+            placeholder={value.districtId ? tx('উপজেলা বেছে নিন', 'Select upazila') : tx('আগে জেলা', 'District first')}
+            items={upazilas.rows.map(item)}
+            disabled={!value.districtId}
+            compact
+            onSelect={(it) => onChange({ ...value, upazilaId: it.id, upazila: String(it.raw.name_en ?? ''), upazilaBn: String(it.raw.name_bn ?? '') })}
           />
         </View>
       </View>
-      {draft.thanaOther ? (
-        <TextInput style={small ? styles.inputSm : styles.input} value={draft.thanaName} onChangeText={(v) => patchDraft({ thanaName: v })} placeholder={tx('থানার নাম লিখুন', 'Type thana name')} placeholderTextColor={colors.muted} />
-      ) : null}
+      {note ? <Text style={styles.regionGpsNote}>{note}</Text> : null}
+    </View>
+  );
+}
+
+const LEVEL_WORD: Record<string, [string, string]> = {
+  upazila: ['উপজেলা', 'upazila'],
+  district: ['জেলা', 'district'],
+  division: ['বিভাগ', 'division'],
+};
+
+/**
+ * Whether the farmer's approved profile reaches the level sale listings are
+ * locked at. A listing inherits that location, so without it there is nobody
+ * the listing could be shown to.
+ */
+type OperationalFeature = 'loan_applications' | 'orders' | 'sale_listings' | 'partner_projects';
+type OperationalState = { feature: OperationalFeature; state: 'ok' | 'needs_location' | 'zone_inactive'; level: string; officer: ApiRow | null };
+
+/**
+ * Offerings that need people on the ground — loans, orders, listings, project
+ * places — open only inside an operational zone (an area a field officer
+ * covers), at the level each is set to. Outside one, the farmer is told why
+ * and pointed at what they can still use; weather, training and the loan
+ * readiness check are never gated. The server enforces the same rule.
+ */
+function OperationalGate({ feature, setScreen, children }: {
+  feature: OperationalFeature;
+  setScreen: (screen: Screen) => void;
+  children: React.ReactNode;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user } = useAuth();
+  const status = useApiObject<Record<string, OperationalState>>('app/operational-status');
+  if (status.loading) {
+    return <View style={{ padding: 28 }}><ActivityIndicator color={colors.maroon} /></View>;
+  }
+  const s = status.data?.[feature];
+  // A loan also needs an address on the profile. Asking here, at the start,
+  // beats refusing the farmer at step four.
+  if (feature === 'loan_applications' && (!s || s.state === 'ok') && !String(user?.village ?? '').trim()) {
+    return (
+      <>
+        <Header title={tx('ঋণের আবেদন', 'Loan application')} onBack={() => setScreen('home')} />
+        <View style={styles.projEmpty}>
+          <Text style={styles.projEmptyIcon}>🏠</Text>
+          <Text style={styles.projEmptyTitle}>{tx('প্রোফাইল সম্পূর্ণ করুন', 'Complete your profile')}</Text>
+          <Text style={styles.projEmptyText}>
+            {tx('ঋণের আবেদনের আগে প্রোফাইলে আপনার গ্রাম বা ঠিকানা দরকার। আবেদন জমার সময় ফোনের লোকেশন দিয়ে চেক-ইনও করতে হবে।',
+                'A loan application needs your village or address on your profile first. You will also check in with your phone\'s location when you submit.')}
+          </Text>
+          <AppButton title={tx('ঠিকানা যোগ করুন', 'Add my address')} onPress={() => setScreen('menuPersonal')} />
+          <AppButton variant="outline" title={tx('মাঠ কর্মকর্তার সাহায্য নিন', 'Ask a field officer')} onPress={() => setScreen('officers')} />
+        </View>
+      </>
+    );
+  }
+  // No answer (offline, older server) falls through: the server still refuses
+  // an out-of-zone submission, with the same message.
+  if (!s || s.state === 'ok') return <>{children}</>;
+
+  const needs = s.state === 'needs_location';
+  const word = (LEVEL_WORD[s.level] ?? LEVEL_WORD.upazila)[lang === 'bn' ? 0 : 1];
+  const area = geoLabel(geoValueFromUser(user), lang);
+  const name = {
+    loan_applications: tx('ঋণের আবেদন', 'Loan application'),
+    orders: tx('অর্ডার', 'Ordering'),
+    sale_listings: tx('বিক্রির তালিকা', 'Listing for sale'),
+    partner_projects: tx('প্রকল্পে যোগ দেওয়া', 'Joining a project'),
+  }[feature];
+
+  return (
+    <>
+      <Header title={name} onBack={() => setScreen('home')} />
+      <View style={styles.projEmpty}>
+        <Text style={styles.projEmptyIcon}>{needs ? '📍' : '🗺️'}</Text>
+        <Text style={styles.projEmptyTitle}>
+          {needs ? tx(`প্রোফাইলে আপনার ${word} যোগ করুন`, `Add your ${word} to your profile`) : tx('আপনার এলাকায় এখনো চালু হয়নি', 'Not active in your zone yet')}
+        </Text>
+        <Text style={styles.projEmptyText}>
+          {needs
+            ? tx(`${name} ব্যবহার করতে প্রোফাইলে আপনার ${word} দরকার। নিজে যোগ করুন, অথবা মাঠ কর্মকর্তার সাহায্য নিন।`,
+                 `${name} needs your ${word} on your profile. Add it yourself, or ask a field officer to help.`)
+            : tx(`শাথী সেবার এই সেবা এখনো ${area || 'আপনার এলাকায়'} চালু হয়নি। আবহাওয়া, প্রশিক্ষণ ও ঋণ-প্রস্তুতি যাচাই আপনি এখনই ব্যবহার করতে পারবেন।`,
+                 `This service isn't running in ${area || 'your area'} yet. Weather, training and the loan readiness check are open to you now.`)}
+        </Text>
+        {needs ? (
+          <>
+            <AppButton title={tx('এলাকা যোগ করুন', 'Add my location')} onPress={() => setScreen('menuPersonal')} />
+            <AppButton variant="outline" title={tx('মাঠ কর্মকর্তার সাহায্য নিন', 'Ask a field officer')} onPress={() => setScreen('officers')} />
+          </>
+        ) : (
+          <>
+            <AppButton title={tx('আবহাওয়া', 'Weather')} onPress={() => setScreen('weather')} />
+            <AppButton variant="outline" title={tx('প্রশিক্ষণ', 'Training')} onPress={() => setScreen('training')} />
+            <AppButton variant="outline" title={tx('ঋণ-প্রস্তুতি যাচাই', 'Loan readiness check')} onPress={() => setScreen('financeReadinessIntro')} />
+          </>
+        )}
+      </View>
     </>
   );
+}
+
+function useListingLocationGate() {
+  const { user } = useAuth();
+  const { lang } = useLanguage();
+  const scopes = useApiObject<Record<string, string>>('app/geo/scopes');
+  const level = String(scopes.data?.sale_listings ?? 'upazila');
+  const key = level === 'upazila' ? 'upazila_id' : level === 'district' ? 'district_id' : level === 'division' ? 'division_id' : null;
+  const ok = !key || Boolean(user?.[key as 'upazila_id' | 'district_id' | 'division_id']);
+  const word = LEVEL_WORD[level] ?? LEVEL_WORD.upazila;
+  return { ok, level, levelWord: lang === 'bn' ? word[0] : word[1], label: geoLabel(geoValueFromUser(user), lang) };
 }
 
 // KYC status pill colour by status string.
@@ -3906,11 +4511,11 @@ function kycTone(s?: string): 'green' | 'gold' | 'rose' | 'muted' {
 
 // Compact, reusable contact + address block for every listing type.
 // Radio: "Me" (prefilled + KYC status chips) vs "Someone else" (manual incl NID).
-function ContactSection({ draft, patchDraft }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void }) {
+function ContactSection({ draft, patchDraft, onUpdateLocation }: { draft: ListingDraft; patchDraft: (patch: Partial<ListingDraft>) => void; onUpdateLocation?: () => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const kyc = user?.kyc || {};
-  const gpsRef = useRef<(() => void) | undefined>(undefined);
+  const gate = useListingLocationGate();
 
   useEffect(() => {
     if (draft.contactSelf && !draft.contactName && user) {
@@ -3918,8 +4523,6 @@ function ContactSection({ draft, patchDraft }: { draft: ListingDraft; patchDraft
         contactName: user.display_name || user.full_name || '',
         contactPhone: user.phone || '',
         contactNid: user.nid_number || '',
-        districtName: draft.districtName || user.district || '',
-        thanaName: draft.thanaName || user.upazila || '',
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3943,9 +4546,6 @@ function ContactSection({ draft, patchDraft }: { draft: ListingDraft; patchDraft
     <View style={styles.formCard}>
       <View style={styles.formCardTitleRow}>
         <Text style={styles.formCardTitle}>{tx('যোগাযোগের ব্যক্তি', 'Contact person')}</Text>
-        <Pressable onPress={() => gpsRef.current?.()} style={({ pressed }) => [styles.gpsPill, pressed && styles.pressed]}>
-          <Text style={styles.gpsPillText}>⌖ {tx('GPS', 'Use GPS')}</Text>
-        </Pressable>
       </View>
       <View style={styles.radioRow}>
         {([[true, tx('আমি', 'Me')], [false, tx('অন্য কেউ', 'Someone else')]] as Array<[boolean, string]>).map(([val, label]) => {
@@ -3995,7 +4595,23 @@ function ContactSection({ draft, patchDraft }: { draft: ListingDraft; patchDraft
           <TextInput style={styles.inputSm} value={draft.contactNid} onChangeText={(v) => patchDraft({ contactNid: v })} keyboardType="number-pad" placeholder={tx('১০ বা ১৭ সংখ্যা', '10 or 17 digits')} placeholderTextColor={colors.muted} />
         </>
       ) : null}
-      <GeoPicker draft={draft} patchDraft={patchDraft} small hideGps gpsRef={gpsRef} />
+      {/* The listing's location is the seller's approved profile location —
+          not chosen here, so a seller cannot list into an area they are not
+          in. It decides who can see the listing. */}
+      <View style={{ marginTop: 12, backgroundColor: gate.ok ? colors.bluePale : '#F8EAE9', borderRadius: 10, borderWidth: 1, borderColor: gate.ok ? '#BBD3FB' : '#E5B5B1', padding: 12 }}>
+        <Text style={{ color: colors.ink, fontSize: 13, fontWeight: '800' }}>📍 {tx('তালিকার এলাকা', 'Listing location')}</Text>
+        <Text style={{ color: colors.ink, fontSize: 14, marginTop: 4 }}>{gate.label || tx('প্রোফাইলে এলাকা নেই', 'No area on your profile')}</Text>
+        <Text style={{ color: gate.ok ? colors.muted : '#8A2F28', fontSize: 12, lineHeight: 17, marginTop: 6 }}>
+          {gate.ok
+            ? tx(`এই তালিকা শুধু আপনার ${gate.levelWord}-র কৃষকরা দেখবেন। এলাকা আপনার প্রোফাইল থেকে নেওয়া।`, `Only farmers in your ${gate.levelWord} will see this listing. The area comes from your profile.`)
+            : tx(`তালিকা দিতে আগে প্রোফাইলে আপনার ${gate.levelWord} যোগ করুন।`, `Add your ${gate.levelWord} to your profile before listing.`)}
+        </Text>
+        {onUpdateLocation ? (
+          <Pressable onPress={onUpdateLocation} style={({ pressed }) => [{ marginTop: 8 }, pressed && styles.pressed]}>
+            <Text style={{ color: colors.maroon, fontSize: 13, fontWeight: '800' }}>{tx('প্রোফাইলের এলাকা বদলান →', 'Change profile area →')}</Text>
+          </Pressable>
+        ) : null}
+      </View>
       <FormLabel small label={tx('বিস্তারিত ঠিকানা (গ্রাম)', 'Address (village)')} />
       <TextInput style={styles.inputSm} value={draft.addressText} onChangeText={(v) => patchDraft({ addressText: v })} placeholder={tx('গ্রাম / বাড়ি', 'Village / house')} placeholderTextColor={colors.muted} />
     </View>
@@ -4012,7 +4628,7 @@ function MediaDescription({ draft, patchDraft, kind, context }: { draft: Listing
   async function pickImages() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsMultipleSelection: true, selectionLimit: 6, quality: 0.72 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: 6, quality: 0.72 });
     if (!result.canceled) patchDraft({ images: [...draft.images, ...result.assets.map((a) => a.uri)].slice(0, 6) });
   }
   function removeImage(uri: string) { patchDraft({ images: draft.images.filter((u) => u !== uri) }); }
@@ -4086,6 +4702,7 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
   const [submitError, setSubmitError] = useState('');
 
   const district = draft.districtName || user?.district || '';
+  const districtLabel = lang === 'bn' ? String(user?.district_bn || district) : district;
   const w = Number(draft.weightKg) || 0;
 
   useEffect(() => {
@@ -4104,25 +4721,26 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
     return () => { alive = false; };
   }, [draft.animalId, draft.breedId, district, w, draft.meatWeightKg]);
 
-  // Every figure below is per kg of LIVE weight — that is the basis the rule is
-  // written on. The meat rate beside it is the same money restated at the
-  // dressing yield, for farmers who only ever think in meat weight.
+  // Every figure is per kg of LIVE weight — the basis the rule is written on.
+  // The meat rate is the same money restated at the dressing yield, for
+  // farmers who only ever think in meat weight.
   const b2bRate = Number(quote?.b2b_market_rate ?? 0) || 400;
   const dressingPct = Number(quote?.dressing_pct ?? 0) || DEFAULT_DRESSING_PCT;
   const b2bMeatRate = Number(quote?.b2b_meat_rate ?? 0) || (b2bRate * 100) / dressingPct;
+  const pctOrNull = (v: unknown) => (v === null || v === undefined ? null : Number(v));
   const platformFee = Number(quote?.platform_fee ?? 0);
-  const platformPct = quote?.platform_fee_pct === null || quote?.platform_fee_pct === undefined ? null : Number(quote.platform_fee_pct);
   const logisticsFee = Number(quote?.logistics_fee ?? 0);
   const vetFee = Number(quote?.warehouse_vet_fee ?? 0);
   const farmerRate = Number(quote?.net_farmer_rate ?? 0) || b2bRate - platformFee - logisticsFee - vetFee;
   const farmerMeatRate = (farmerRate * 100) / dressingPct;
   const meatW = Number(draft.meatWeightKg) || (w * dressingPct) / 100;
-  const rows: Array<[string, string, number, boolean]> = [
-    [tx('B2B বাজার দর', 'B2B market rate'), tx(`মাংসের দরে ৳${num(b2bMeatRate, 'bn')}/কেজি`, `৳${num(b2bMeatRate, 'en')}/kg on meat weight`), b2bRate, false],
-    [tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), platformPct ? tx(`জীবিত ওজনের দামের ${num(platformPct, 'bn')}%`, `${num(platformPct, 'en')}% of the live weight amount`) : '', -platformFee, false],
-    [tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), tx('প্রতি কেজি জীবিত ওজনে', 'Per kg live weight'), -logisticsFee, false],
-    [tx('গুদাম ও পশু চিকিৎসা', 'Warehouse & vet care'), tx('প্রতি কেজি জীবিত ওজনে', 'Per kg live weight'), -vetFee, false],
-    [tx('নিট কৃষক মূল্য', 'Net farmer rate'), tx(`আপনি পাবেন — মাংসের দরে ৳${num(farmerMeatRate, 'bn')}/কেজি`, `Your selling rate — ৳${num(farmerMeatRate, 'en')}/kg on meat weight`), farmerRate, true],
+  const perKg = tx('প্রতি কেজি জীবিত ওজনে', 'Per kg live weight');
+  const pctOf = (p: number | null) => (p ? tx(`জীবিত দামের ${num(p, 'bn')}%`, `${num(p, 'en')}% of the live price`) : perKg);
+  const rows = [
+    { key: 'b2b', title: tx('B2B বাজার দর', 'B2B market rate'), sub: tx(`মাংসের দরে ৳${num(b2bMeatRate, 'bn')}/কেজি`, `৳${num(b2bMeatRate, 'en')}/kg on meat weight`), rate: b2bRate, neg: false },
+    { key: 'platform', title: tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), sub: pctOf(pctOrNull(quote?.platform_fee_pct)), rate: platformFee, neg: true },
+    { key: 'logistics', title: tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), sub: pctOf(pctOrNull(quote?.logistics_fee_pct)), rate: logisticsFee, neg: true },
+    { key: 'care', title: tx('গুদাম ও পশু চিকিৎসা', 'Warehousing & care'), sub: pctOf(pctOrNull(quote?.warehouse_vet_fee_pct)), rate: vetFee, neg: true },
   ];
 
   async function submitListing() {
@@ -4142,8 +4760,8 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         sale_item_id: 1,
         animal_id: draft.animalId ? Number(draft.animalId) : undefined,
         breed_id: draft.breedId ? Number(draft.breedId) : undefined,
-        title_en: `${draft.animalName || 'Livestock'} listing from mobile app`,
-        title_bn: 'মোবাইল অ্যাপ থেকে পশুর তালিকা',
+        title_en: `${draft.animalName || 'Livestock'}${draft.breedName ? ` · ${draft.breedName}` : ''}`,
+        title_bn: `${draft.animalNameBn || 'পশু'}${draft.breedNameBn ? ` · ${draft.breedNameBn}` : ''}`,
         description: draft.description || undefined,
         age_months: Number(draft.ageMonths) || undefined,
         weight_kg: w,
@@ -4157,10 +4775,9 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         contact_name: draft.contactName || undefined,
         contact_nid: draft.contactNid || undefined,
         contact_is_self: draft.contactSelf ? 1 : 0,
-        division: draft.divisionName || undefined,
-        district: draft.districtName || user?.district || undefined,
-        upazila: draft.thanaName || user?.upazila || undefined,
-        address_text: [draft.addressText, draft.thanaName, draft.districtName, draft.divisionName].filter(Boolean).join(', '),
+        // No location fields: the listing inherits the seller's approved
+        // profile location on the server, which is what decides who sees it.
+        address_text: [draft.addressText, user?.upazila, user?.district, user?.division].filter(Boolean).join(', '),
         media_json: mediaUrls,
         ai_analysis_json: { source: 'mobile_app', measure: draft.measure },
         status: 'submitted',
@@ -4174,77 +4791,90 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
     }
   }
 
+  const animalLabel = lang === 'bn' ? draft.animalNameBn || draft.animalName : draft.animalName;
+  const breedLabel = lang === 'bn' ? draft.breedNameBn || draft.breedName : draft.breedName;
+
   return (
     <>
       <Header title={tx('মূল্য ও আয়ের বিবরণ', 'Price & Earning')} onBack={() => setScreen('cattleForm')} />
-      <Card style={styles.weightCard}>
-        <Text style={styles.weightIcon}>⚖</Text>
-        <View style={styles.flex}>
-          <Text style={styles.smallUpper}>{tx('জীবিত ওজন', 'Live weight')}</Text>
-          <View style={styles.weightInputRow}>
-            <TextInput style={styles.weightInput} value={draft.weightKg} onChangeText={(v) => patchDraft({ weightKg: v, meatWeightKg: meatFromLive(v, dressingPct) })} keyboardType="number-pad" />
-            <Text style={styles.kgText}>{tx('কেজি', 'kg')}</Text>
-          </View>
-        </View>
-        <View style={styles.flex}>
-          <Text style={styles.smallUpper}>{tx('মাংসের ওজন', 'Meat weight')}</Text>
-          <View style={styles.weightInputRow}>
-            <TextInput style={styles.weightInput} value={draft.meatWeightKg} onChangeText={(v) => patchDraft({ meatWeightKg: v, weightKg: liveFromMeat(v, dressingPct) })} keyboardType="number-pad" />
-            <Text style={styles.kgText}>{tx('কেজি', 'kg')}</Text>
-          </View>
-        </View>
-        <View>
-          <Text style={styles.miniMuted}>{tx('সম্ভাব্য আয়', 'Earning')}</Text>
-          <Text style={styles.quickEarn}>{amount(w * farmerRate, lang)}</Text>
-        </View>
-      </Card>
-
-      <View style={styles.summaryChips}>
-        <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{draft.animalName || tx('পশু', 'Animal')}</Text></View>
-        {draft.breedName ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{draft.breedName}</Text></View> : null}
-        {district ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⌖ {district}</Text></View> : null}
-      </View>
-
-      {quoteLoading ? <Text style={styles.fieldHint}>{tx('অনুমোদিত B2B দর আনা হচ্ছে...', 'Fetching approved B2B rate...')}</Text> : null}
-      {!quoteLoading && !quote ? <Text style={styles.fieldHint}>{tx('এই অঞ্চলে অনুমোদিত দর নেই — ডিফল্ট দর দেখানো হচ্ছে।', 'No approved rate for this region — showing default rate.')}</Text> : null}
-
-      <View style={styles.priceTable}>
-        <View style={styles.priceHead}>
-          <Text style={styles.priceHeadTitle}>{tx('মূল্য বিবরণী', 'Price Breakdown')}</Text>
-          <Text style={styles.priceHeadSub}>{tx(`সব দর প্রতি কেজি জীবিত ওজনে · ড্রেসিং ${num(dressingPct, 'bn')}%`, `All rates per kg live weight · ${num(dressingPct, 'en')}% dressing`)}</Text>
-        </View>
-        <View style={styles.priceColumns}>
-          <Text style={[styles.colLabel, styles.flex]}>{tx('বিবরণ', 'Item')}</Text>
-          <Text style={styles.colLabel}>{tx('/কেজি', '/kg')}</Text>
-          <Text style={styles.colLabel}>{tx('মোট', 'Total')} ({num(w, lang)} {tx('কেজি', 'kg')})</Text>
-        </View>
-        {rows.map(([title, sub, rate, highlight]) => (
-          <View key={title} style={[styles.priceRow, highlight && styles.priceRowHighlight]}>
-            <View style={styles.flex}>
-              <Text style={[styles.priceTitle, highlight && styles.priceTitleStrong]}>{title}</Text>
-              {sub ? <Text style={styles.priceSub}>{sub}</Text> : null}
-            </View>
-            <Text style={styles.rateText}>৳{num(Math.abs(rate), lang)}</Text>
-            <Text style={styles.totalText}>{amount(rate * w, lang)}</Text>
-          </View>
-        ))}
-        <View style={styles.finalRow}>
+      <View style={ui.section}>
+        <Text style={ui.sectionTitle}>{tx('ওজন', 'Weight')}</Text>
+        <View style={{ height: 8 }} />
+        <LinkedWeights
+          live={draft.weightKg}
+          meat={draft.meatWeightKg}
+          onLive={(v) => patchDraft({ weightKg: v, meatWeightKg: meatFromLive(v, dressingPct) })}
+          onMeat={(v) => patchDraft({ meatWeightKg: v, weightKg: liveFromMeat(v, dressingPct) })}
+          dressingPct={dressingPct}
+        />
+        <View style={ui.earnBanner}>
+          <Ionicons name="wallet-outline" size={24} color={colors.maroon} />
           <View style={styles.flex}>
-            <Text style={styles.finalLabel}>{tx('আপনার আনুমানিক আয়', 'Your estimated earning')}</Text>
-            <Text style={styles.finalSub}>৳{num(farmerRate, lang)} × {num(w, lang)} {tx('কেজি জীবিত ওজন', 'kg live')} · {tx('বা', 'or')} ৳{num(farmerMeatRate, lang)} × {num(meatW, lang)} {tx('কেজি মাংস', 'kg meat')}</Text>
+            <Text style={ui.earnLabel}>{tx('আপনার সম্ভাব্য আয়', 'Your estimated earning')}</Text>
+            <Text style={ui.earnValue}>{amount(w * farmerRate, lang)}</Text>
           </View>
-          <Text style={styles.finalValue}>{amount(w * farmerRate, lang)}</Text>
         </View>
       </View>
-      <View style={styles.noteBlue}>
-        <Text style={styles.noteText}>{tx('মাঠ কর্মকর্তার পোর্টেবল স্কেলে যাচাইকৃত প্রকৃত ওজন অনুযায়ী চূড়ান্ত পেমেন্ট নির্ধারিত হবে।', "Final payment is set based on actual weight verified by the field officer's portable scale.")}</Text>
+
+      <View style={ui.tagRow}>
+        {animalLabel ? <View style={ui.tag}><Text style={ui.tagText}>{animalLabel}</Text></View> : null}
+        {breedLabel ? <View style={ui.tag}><Text style={ui.tagText}>{breedLabel}</Text></View> : null}
+        {districtLabel ? <View style={ui.tag}><Text style={ui.tagText}>📍 {districtLabel}</Text></View> : null}
       </View>
-      <View style={styles.noteGold}>
-        <Text style={styles.noteText}>{tx('৩ কর্মদিনের মধ্যে মাঠ কর্মকর্তা আসবেন। সম্মতিতে ওজন নিশ্চিত হলে নগদ বা চেকে পেমেন্ট।', 'Field officer arrives within 3 working days. Cash or cheque payment after weight confirmation.')}</Text>
+
+      {quoteLoading ? (
+        <View style={ui.bdCard}>
+          <View style={ui.bdHead}><Skeleton width="45%" height={16} style={{ backgroundColor: 'rgba(255,255,255,0.25)' }} /></View>
+          {[0, 1, 2, 3].map((i) => (
+            <View key={i} style={ui.bdRow}>
+              <View style={{ flex: 1, gap: 6 }}><Skeleton width="60%" /><Skeleton width="40%" height={10} /></View>
+              <Skeleton width={70} height={16} />
+            </View>
+          ))}
+        </View>
+      ) : (
+        <>
+          {!quote ? <Text style={styles.fieldHint}>{tx('এই অঞ্চলে অনুমোদিত দর নেই — আনুমানিক দর দেখানো হচ্ছে।', 'No approved rate for this area — showing an indicative rate.')}</Text> : null}
+          <View style={ui.bdCard}>
+            <View style={ui.bdHead}>
+              <Text style={ui.bdHeadTitle}>{tx('মূল্য বিবরণী', 'Price breakdown')}</Text>
+              <Text style={ui.bdHeadSub}>{tx(`প্রতি কেজি জীবিত ওজনে · মোট ${num(w, 'bn')} কেজি`, `Per kg live weight · total for ${num(w, 'en')} kg`)}</Text>
+            </View>
+            {rows.map((r) => (
+              <View key={r.key} style={ui.bdRow}>
+                <View style={styles.flex}>
+                  <Text style={ui.bdTitle}>{r.title}</Text>
+                  <Text style={ui.bdSub}>{r.sub}</Text>
+                </View>
+                <View style={ui.bdRight}>
+                  <Text style={[ui.bdTotal, r.neg && ui.bdTotalNeg]}>{r.neg ? '− ' : ''}{amount(r.rate * w, lang)}</Text>
+                  <Text style={ui.bdRate}>৳{num(r.rate, lang)} / {tx('কেজি', 'kg')}</Text>
+                </View>
+              </View>
+            ))}
+            <View style={[ui.bdRow, ui.bdNet]}>
+              <View style={styles.flex}>
+                <Text style={[ui.bdTitle, { color: colors.maroon }]}>{tx('নিট কৃষক মূল্য', 'Net farmer rate')}</Text>
+                <Text style={ui.bdSub}>{tx(`মাংসের দরে ৳${num(farmerMeatRate, 'bn')}/কেজি`, `৳${num(farmerMeatRate, 'en')}/kg on meat weight`)}</Text>
+              </View>
+              <Text style={[ui.bdTotal, { color: colors.maroon, fontSize: 17 }]}>৳{num(farmerRate, lang)} / {tx('কেজি', 'kg')}</Text>
+            </View>
+            <View style={ui.bdFinal}>
+              <Text style={ui.bdFinalLabel}>{tx('আপনার আনুমানিক আয়', 'Your estimated earning')}</Text>
+              <Text style={ui.bdFinalValue}>{amount(w * farmerRate, lang)}</Text>
+              <Text style={ui.bdFinalSub}>
+                ৳{num(farmerRate, lang)} × {num(w, lang)} {tx('কেজি জীবিত', 'kg live')}  ·  {tx('বা', 'or')} ৳{num(farmerMeatRate, lang)} × {num(Math.round(meatW), lang)} {tx('কেজি মাংস', 'kg meat')}
+              </Text>
+            </View>
+          </View>
+        </>
+      )}
+      <View style={styles.noteBlue}>
+        <Text style={styles.noteText}>{tx('মাঠ কর্মকর্তা ৩ কর্মদিনের মধ্যে এসে পোর্টেবল স্কেলে ওজন যাচাই করবেন; চূড়ান্ত পেমেন্ট সেই ওজনে।', 'A field officer visits within 3 working days and weighs the animal on a portable scale; the final payment is set on that weight.')}</Text>
       </View>
       {submitError ? <Text style={styles.apiNotice}>{submitError}</Text> : null}
-      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('অর্ডার যাচাইয়ের জন্য নিশ্চিত করুন ✓', 'Confirm for Order Validation ✓')} onPress={submitListing} disabled={submitting} />
-      <AppButton title={tx('তথ্য পরিবর্তন করুন', 'Edit Details')} variant="outline" onPress={() => setScreen('cattleForm')} />
+      <AppButton title={submitting ? tx('জমা হচ্ছে...', 'Submitting...') : tx('তালিকা জমা দিন ✓', 'Submit listing ✓')} onPress={submitListing} disabled={submitting || !(w > 0)} />
+      <AppButton title={tx('তথ্য পরিবর্তন করুন', 'Edit details')} variant="outline" onPress={() => setScreen('cattleForm')} />
     </>
   );
 }
@@ -4286,7 +4916,8 @@ function InputsForm({ setScreen, draft, patchDraft }: CattleStepProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemsState.rows.length]);
 
-  const canContinue = Boolean(draft.saleItemId && Number(draft.weightKg) > 0 && draft.images.length > 0);
+  const locationGate = useListingLocationGate();
+  const canContinue = Boolean(draft.saleItemId && Number(draft.weightKg) > 0 && draft.images.length > 0 && locationGate.ok);
   const selectedLabel = inputItems.find((i) => i.id === draft.saleItemId)?.label ?? draft.saleItemName;
 
   return (
@@ -4322,7 +4953,7 @@ function InputsForm({ setScreen, draft, patchDraft }: CattleStepProps) {
 
       <MediaDescription draft={draft} patchDraft={patchDraft} kind="inputs" context={[draft.saleItemName && `type: ${draft.saleItemName}`, draft.variety && `name: ${draft.variety}`, Number(draft.weightKg) > 0 && `quantity ${draft.weightKg} kg`].filter(Boolean).join(', ')} />
 
-      <ContactSection draft={draft} patchDraft={patchDraft} />
+      <ContactSection draft={draft} patchDraft={patchDraft} onUpdateLocation={() => setScreen('menuPersonal')} />
 
       {!canContinue ? (
         <Text style={styles.fieldHint}>{tx('উপকরণের ধরন, পরিমাণ ও অন্তত একটি ছবি দিন।', 'Add input type, quantity and at least one photo to continue.')}</Text>
@@ -4394,10 +5025,9 @@ function InputsPrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
         contact_name: draft.contactName || undefined,
         contact_nid: draft.contactNid || undefined,
         contact_is_self: draft.contactSelf ? 1 : 0,
-        division: draft.divisionName || undefined,
-        district: draft.districtName || user?.district || undefined,
-        upazila: draft.thanaName || user?.upazila || undefined,
-        address_text: [draft.addressText, draft.thanaName, draft.districtName, draft.divisionName].filter(Boolean).join(', '),
+        // No location fields: the listing inherits the seller's approved
+        // profile location on the server, which is what decides who sees it.
+        address_text: [draft.addressText, user?.upazila, user?.district, user?.division].filter(Boolean).join(', '),
         media_json: mediaUrls,
         ai_analysis_json: { source: 'mobile_app', category: 'inputs' },
         status: 'submitted',
@@ -4512,7 +5142,95 @@ function OrderProgress({ status }: { status: string }) {
   );
 }
 
-function BuyCategories({ setScreen, onSelectCategory, initialTab = 'shop' }: { setScreen: (screen: Screen) => void; onSelectCategory: (category: ApiRow) => void; initialTab?: 'shop' | 'orders' }) {
+/** The first-purchase offer, while it is still this buyer's to use. */
+/** The first-purchase offer, while it is still this buyer's to use. */
+function useFirstPurchaseOffer(): { amount: number; min: number } | null {
+  const { user } = useAuth();
+  const state = useApiObject<ApiRow>(user?.id ? 'app/promotions/status' : null);
+  const fp = (state.data?.first_purchase ?? null) as ApiRow | null;
+  return fp && fp.eligible ? { amount: Number(fp.amount || 0), min: Number(fp.min_order_amount || 0) } : null;
+}
+
+function FirstPurchaseStrip({ offer }: { offer: { amount: number; min: number } }) {
+  const { tx, lang } = useLanguage();
+  return (
+    <View style={ui.fpBanner}>
+      <View style={ui.fpIcon}><Ionicons name="gift" size={20} color="white" /></View>
+      <View style={styles.flex}>
+        <Text style={ui.fpTitle}>{tx(`প্রথম কেনাকাটায় ফ্ল্যাট ${money(offer.amount)} ছাড়`, `Flat ${amount(offer.amount, lang)} off your first purchase`)}</Text>
+        <Text style={ui.fpSub}>{tx(`${money(offer.min)}-এর বেশি অর্ডারে নিজে থেকেই যোগ হবে`, `Applied automatically on orders over ${amount(offer.min, lang)}`)}</Text>
+      </View>
+    </View>
+  );
+}
+
+const UNIT_BN: Record<string, string> = {
+  kg: 'কেজি', head: 'টি', piece: 'টি', pcs: 'টি', sack: 'বস্তা', bag: 'ব্যাগ', pack: 'প্যাক', packet: 'প্যাকেট',
+  litre: 'লিটার', liter: 'লিটার', dozen: 'ডজন', ton: 'টন', unit: 'একক',
+};
+
+/** A product's unit in the reader's language ("head" -> "টি"). */
+function unitLabel(unit: unknown, lang: string): string {
+  const raw = String(unit || '').trim();
+  if (lang !== 'bn') return raw || 'unit';
+  return UNIT_BN[raw.toLowerCase()] ?? (raw || 'একক');
+}
+
+function orderTone(tone: 'green' | 'gold' | 'rose' | 'blue'): [string, string] {
+  return tone === 'green' ? [colors.greenPale, colors.green] : tone === 'gold' ? ['#FEF3C7', '#92400E'] : tone === 'blue' ? [colors.bluePale, colors.blue] : ['#FDE8E8', '#B4443C'];
+}
+
+/** The step an order is standing on: placed = confirming, delivered = all done. */
+function orderStage(status: string): number {
+  return status === 'placed' ? 1 : status === 'confirmed' ? 2 : status === 'assigned' || status === 'in_transit' ? 3 : status === 'delivered' ? 4 : 0;
+}
+
+function OrderListCard({ order, onOpen }: { order: ApiRow; onOpen: () => void }) {
+  const { tx, lang } = useLanguage();
+  const status = String(order.fulfillment_status || 'placed');
+  const badge = orderStatusBadge(status, tx);
+  const [bg, fg] = orderTone(badge.tone);
+  const stage = orderStage(status);
+  const title = String((lang === 'bn' ? order.items_summary_bn || order.items_summary : order.items_summary) || '');
+  const area = (lang === 'bn' ? [order.upazila_bn || order.upazila, order.district_bn || order.district] : [order.upazila, order.district]).filter(Boolean).join(', ');
+  const who = String((lang === 'bn' ? order.distributor_name_bn || order.distributor_name : order.distributor_name) || '');
+  const discount = Number(order.discount_amount || 0);
+  return (
+    <Pressable onPress={onOpen} style={({ pressed }) => [ui.oCard, pressed && styles.pressed]} accessibilityRole="button">
+      <View style={ui.oTop}>
+        {order.image_url ? <Image source={{ uri: String(order.image_url) }} style={ui.oThumb} /> : <View style={ui.oThumbPh}><Text style={{ fontSize: 26 }}>🛒</Text></View>}
+        <View style={styles.flex}>
+          <Text style={ui.oCode}>{String(order.order_code)} · {formatDate(String(order.created_at), lang)}</Text>
+          <Text style={ui.oTitle} numberOfLines={2}>{title}</Text>
+          {area || who ? <Text style={ui.oMeta} numberOfLines={1}>{area ? `📍 ${area}` : ''}{who ? `${area ? '  ·  ' : ''}🚚 ${who}` : ''}</Text> : null}
+          <View style={[ui.statusPill, { backgroundColor: bg }]}><Text style={[ui.statusPillText, { color: fg }]}>{badge.label}</Text></View>
+        </View>
+      </View>
+      {status !== 'cancelled' ? (
+        <View style={ui.miniSteps}>
+          {[0, 1, 2, 3].map((i) => <View key={i} style={[ui.miniStep, i < stage && ui.miniStepDone, i === stage && ui.miniStepCurrent]} />)}
+        </View>
+      ) : null}
+      <View style={ui.oFoot}>
+        <View>
+          <Text style={ui.oAmount}>{amount(Number(order.payable_amount || 0), lang)}</Text>
+          {discount > 0 ? <Text style={ui.oDiscount}>🎁 {tx('ছাড়', 'Saved')} {amount(discount, lang)}{order.promo_status === 'released' ? tx(' · ফেরত দেওয়া হয়েছে', ' · returned to you') : ''}</Text> : null}
+        </View>
+        <View style={ui.oLink}>
+          <Text style={ui.oLinkText}>{tx('বিস্তারিত', 'Details')}</Text>
+          <Ionicons name="chevron-forward" size={16} color={colors.maroon} />
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function BuyCategories({ setScreen, onSelectCategory, onOpenOrder, initialTab = 'shop' }: {
+  setScreen: (screen: Screen) => void;
+  onSelectCategory: (category: ApiRow) => void;
+  onOpenOrder: (orderId: string) => void;
+  initialTab?: 'shop' | 'orders';
+}) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const [tab, setTab] = useState<'shop' | 'orders'>(initialTab);
@@ -4521,8 +5239,10 @@ function BuyCategories({ setScreen, onSelectCategory, initialTab = 'shop' }: { s
   const buyCats = useApiList<ApiRow>('buy/categories');
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
   const myOrders = useApiList<ApiRow>(`app/orders/mine${uid}`);
+  const fpOffer = useFirstPurchaseOffer();
 
-  // Availability: which preference (interest) categories actually have products.
+  // Availability: which preference (interest) categories actually have products
+  // this buyer can get (the server already applies distributor areas).
   const countByInterest: Record<string, number> = {};
   for (const c of buyCats.rows) {
     const key = String(c.interest_slug || '');
@@ -4534,6 +5254,8 @@ function BuyCategories({ setScreen, onSelectCategory, initialTab = 'shop' }: { s
     return { cat: c, key, count: countByInterest[key] || 0 };
   });
   const availableFirst = [...withAvail].sort((a, b) => (b.count > 0 ? 1 : 0) - (a.count > 0 ? 1 : 0));
+  const active = myOrders.rows.filter((o) => !['delivered', 'cancelled'].includes(String(o.fulfillment_status)));
+  const past = myOrders.rows.filter((o) => ['delivered', 'cancelled'].includes(String(o.fulfillment_status)));
 
   return (
     <>
@@ -4543,120 +5265,159 @@ function BuyCategories({ setScreen, onSelectCategory, initialTab = 'shop' }: { s
           <Text style={[styles.projTabText, tab === 'shop' && styles.projTabTextActive]}>{tx('কিনুন', 'Shop')}</Text>
         </Pressable>
         <Pressable onPress={() => setTab('orders')} style={[styles.projTab, tab === 'orders' && styles.projTabActive]}>
-          <Text style={[styles.projTabText, tab === 'orders' && styles.projTabTextActive]}>{tx('আমার অর্ডার', 'My Orders')}</Text>
+          <Text style={[styles.projTabText, tab === 'orders' && styles.projTabTextActive]}>
+            {tx('আমার অর্ডার', 'My Orders')}{myOrders.rows.length ? ` (${num(myOrders.rows.length, lang)})` : ''}
+          </Text>
         </Pressable>
       </View>
 
       {tab === 'shop' ? (
         <>
+          {fpOffer ? <FirstPurchaseStrip offer={fpOffer} /> : null}
           <View style={styles.deliveryBanner}>
-            <Text style={styles.deliveryText}>{tx('🚚 দ্রুত ডেলিভারি ১-৩ দিন · ৳৫০০+ অর্ডারে বিনামূল্যে', '🚚 Fast delivery 1-3 days · Free over ৳500')}</Text>
+            <Text style={styles.deliveryText}>{tx('🚚 আপনার এলাকার পরিবেশক পাঠাবে · ডেলিভারি ফ্রি', '🚚 Delivered by your local distributor · free delivery')}</Text>
           </View>
           <SectionTitle title={tx('বিভাগ অনুযায়ী কিনুন', 'Shop by category')} warning={fallbackWarning(mainCats)} />
-          {mainCats.loading || buyCats.loading ? <ApiStatus state={mainCats.loading ? mainCats : buyCats} /> : null}
-          <View style={styles.grid}>
-            {availableFirst.map(({ cat, key, count }) => {
-              const active = count > 0;
-              const emoji = String(cat.emoji || '') || buyCategoryIcon(key);
-              return (
-                <Pressable
-                  key={String(cat.id || cat.slug)}
-                  disabled={!active}
-                  onPress={() => onSelectCategory({ ...cat, interest_slug: key })}
-                  style={({ pressed }) => [styles.catCard, !active && styles.catCardInactive, pressed && styles.pressed]}
-                >
-                  <Text style={styles.catCardIcon}>{emoji}</Text>
-                  <Text style={styles.catCardTitle} numberOfLines={1}>{rowTitle(cat, lang, tx('বিভাগ', 'Category'))}</Text>
-                  {active
-                    ? <Text style={styles.catCardCount}>{num(count, lang)} {tx('পণ্য', 'items')}</Text>
-                    : <Text style={styles.catCardCountMuted}>{tx('এখন কোনো পণ্য নেই', 'No items right now')}</Text>}
-                </Pressable>
-              );
-            })}
-          </View>
+          {mainCats.loading || buyCats.loading ? (
+            <View style={ui.skelGrid}>
+              {[0, 1, 2, 3].map((i) => <Skeleton key={i} width="47.5%" height={96} radius={14} />)}
+            </View>
+          ) : (
+            <View style={styles.grid}>
+              {availableFirst.map(({ cat, key, count }) => {
+                const isActive = count > 0;
+                const emoji = String(cat.emoji || '') || buyCategoryIcon(key);
+                return (
+                  <Pressable
+                    key={String(cat.id || cat.slug)}
+                    disabled={!isActive}
+                    onPress={() => onSelectCategory({ ...cat, interest_slug: key })}
+                    style={({ pressed }) => [styles.catCard, !isActive && styles.catCardInactive, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.catCardIcon}>{emoji}</Text>
+                    <Text style={styles.catCardTitle} numberOfLines={1}>{rowTitle(cat, lang, tx('বিভাগ', 'Category'))}</Text>
+                    {isActive
+                      ? <Text style={styles.catCardCount}>{num(count, lang)} {tx('পণ্য', 'items')}</Text>
+                      : <Text style={styles.catCardCountMuted}>{tx('এখন কোনো পণ্য নেই', 'No items right now')}</Text>}
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
         </>
       ) : (
         <>
-          {myOrders.loading ? <ApiStatus state={myOrders} /> : null}
+          {myOrders.loading && !myOrders.rows.length ? <ListSkeleton variant="card" count={3} /> : null}
           {!myOrders.loading && myOrders.rows.length === 0 ? (
-            <View style={styles.projEmpty}>
-              <Text style={styles.projEmptyIcon}>🛒</Text>
-              <Text style={styles.projEmptyTitle}>{tx('এখনো কোনো অর্ডার নেই', 'No orders yet')}</Text>
-              <Text style={styles.projEmptyText}>{tx('পছন্দের পণ্য অর্ডার করুন — অনুমোদনের পর ডেলিভারি হবে।', 'Order products you need — delivery follows confirmation.')}</Text>
+            <View style={ui.emptyBox}>
+              <Text style={ui.emptyIcon}>🛒</Text>
+              <Text style={ui.emptyTitle}>{tx('এখনো কোনো অর্ডার নেই', 'No orders yet')}</Text>
+              <Text style={ui.emptyText}>{tx('পছন্দের পণ্য অর্ডার করুন — স্টক যাচাইয়ের পর ডেলিভারি হবে।', 'Order what you need — delivery follows a quick stock check.')}</Text>
+              <AppButton title={tx('কেনাকাটা শুরু করুন', 'Start shopping')} onPress={() => setTab('shop')} />
             </View>
           ) : null}
-          {myOrders.rows.map((o) => {
-            const badge = orderStatusBadge(String(o.fulfillment_status || 'placed'), tx);
-            return (
-              <View key={String(o.id)} style={styles.orderCard}>
-                <View style={styles.orderCardTop}>
-                  <Text style={styles.orderCardCode}>{String(o.order_code)}</Text>
-                  <Badge label={badge.label} tone={badge.tone} />
-                </View>
-                <Text style={styles.orderCardItems} numberOfLines={2}>{String(o.items_summary || '')}</Text>
-                <OrderProgress status={String(o.fulfillment_status || 'placed')} />
-                <View style={styles.orderCardFoot}>
-                  <Text style={styles.orderCardDate}>{new Date(String(o.created_at)).toLocaleDateString()}</Text>
-                  <Text style={styles.orderCardTotal}>{amount(Number(o.payable_amount || 0), lang)}</Text>
-                </View>
-                {String(o.fulfillment_status) === 'placed' ? (
-                  <Text style={styles.orderCardHint}>{tx('ⓘ স্টক যাচাইয়ের পর অর্ডার নিশ্চিত করা হবে।', 'ⓘ Your order will be confirmed after our stock check.')}</Text>
-                ) : null}
-              </View>
-            );
-          })}
+          {active.length ? <SectionTitle title={tx('চলমান অর্ডার', 'In progress')} /> : null}
+          {active.map((o) => <OrderListCard key={String(o.id)} order={o} onOpen={() => onOpenOrder(String(o.id))} />)}
+          {past.length ? <SectionTitle title={tx('আগের অর্ডার', 'Past orders')} /> : null}
+          {past.map((o) => <OrderListCard key={String(o.id)} order={o} onOpen={() => onOpenOrder(String(o.id))} />)}
         </>
       )}
     </>
   );
 }
 
-function BuyProducts({ setScreen, category, onSelectProduct }: { setScreen: (screen: Screen) => void; category: ApiRow | null; onSelectProduct: (product: ApiRow) => void }) {
+function ProductTile({ product, offer, onPress }: { product: ApiRow; offer: { amount: number; min: number } | null; onPress: () => void }) {
+  const { tx, lang } = useLanguage();
+  const available = product.status === 'active';
+  const low = Number(product.stock_qty || 0) <= Number(product.low_stock_threshold || -1);
+  const img = product.image_url ? String(product.image_url) : '';
+  const pack = String((lang === 'bn' ? product.package_size_bn || product.package_size : product.package_size) || '');
+  const who = product.distributor_id
+    ? String((lang === 'bn' ? product.distributor_name_bn || product.distributor_name : product.distributor_name) || '')
+    : String((lang === 'bn' ? product.manufacturer_short_bn || product.manufacturer_short : product.manufacturer_short) || '');
+  const stockColor = !available ? colors.danger : low ? '#B45309' : colors.green;
+  return (
+    <Pressable disabled={!available} onPress={onPress} style={({ pressed }) => [ui.tile, !available && ui.tileOff, pressed && styles.pressed]}>
+      {img
+        ? <Image source={{ uri: img }} style={ui.tileImage} resizeMode="cover" />
+        : <View style={ui.tileImagePh}><Text style={{ fontSize: 34 }}>{buyCategoryIcon(String(product.category_slug || ''))}</Text></View>}
+      {offer && available ? (
+        <View style={ui.fpRibbon} pointerEvents="none">
+          <Text style={ui.fpRibbonText}>🎁 {tx(`১ম অর্ডারে ${money(offer.amount)} ছাড়`, `${amount(offer.amount, lang)} off 1st order`)}</Text>
+        </View>
+      ) : null}
+      <View style={ui.tileBody}>
+        <Text style={ui.tileName} numberOfLines={2}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
+        {pack ? <Text style={ui.tilePack} numberOfLines={1}>{pack}</Text> : null}
+        <Text style={ui.tilePrice}>{amount(Number(product.price || 0), lang)}<Text style={ui.tileUnit}> / {unitLabel(product.unit, lang)}</Text></Text>
+        <View style={ui.tileFoot}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            <View style={[ui.stockDot, { backgroundColor: stockColor }]} />
+            <Text style={[ui.stockText, { color: stockColor }]}>{!available ? tx('মজুদ নেই', 'Out of stock') : low ? tx('কম মজুদ', 'Low stock') : tx('মজুদ আছে', 'In stock')}</Text>
+          </View>
+        </View>
+        {who ? <Text style={ui.tileWho} numberOfLines={1}>{product.distributor_id ? '🚚 ' : '🏭 '}{who}</Text> : null}
+      </View>
+    </Pressable>
+  );
+}
+
+function BuyProducts({ setScreen, category, manufacturer, onClearManufacturer, onSelectProduct }: {
+  setScreen: (screen: Screen) => void;
+  category: ApiRow | null;
+  manufacturer: { id: string; name: string } | null;
+  onClearManufacturer: () => void;
+  onSelectProduct: (product: ApiRow) => void;
+}) {
   const { tx, lang } = useLanguage();
   const interest = category?.interest_slug ? String(category.interest_slug) : '';
   const slug = !interest && category?.slug ? String(category.slug) : '';
-  const products = useApiList<ApiRow>(interest ? `buy/products?interest=${interest}` : slug ? `buy/products?category=${slug}` : 'buy/products');
+  const resource = manufacturer
+    ? `buy/products?manufacturer_id=${encodeURIComponent(manufacturer.id)}`
+    : interest ? `buy/products?interest=${interest}` : slug ? `buy/products?category=${slug}` : 'buy/products';
+  const products = useApiList<ApiRow>(resource);
+  const fpOffer = useFirstPurchaseOffer();
   const [query, setQuery] = useState('');
   const productRows = shouldUseFallback(products) ? fallbackBuyProducts : products.rows;
   const q = query.trim().toLowerCase();
   const filtered = q ? productRows.filter((p) => `${p.name_en || ''} ${p.name_bn || ''} ${p.short_description_en || ''}`.toLowerCase().includes(q)) : productRows;
-  const title = category ? rowTitle(category, lang, tx('পণ্য', 'Products')) : tx('সব পণ্য', 'All products');
+  const title = manufacturer ? manufacturer.name : category ? rowTitle(category, lang, tx('পণ্য', 'Products')) : tx('সব পণ্য', 'All products');
   return (
     <>
-      <Header title={title} onBack={() => setScreen('buyCategories')} />
-      <View style={styles.buySearch}>
-        <Text style={styles.buySearchIcon}>🔍</Text>
-        <TextInput style={styles.buySearchInput} value={query} onChangeText={setQuery} placeholder={tx('পণ্য খুঁজুন', 'Search products')} placeholderTextColor={colors.muted} />
-        {query ? <Pressable onPress={() => setQuery('')} hitSlop={8}><Text style={styles.buySearchClear}>×</Text></Pressable> : null}
+      <Header title={title} onBack={() => { if (manufacturer) { onClearManufacturer(); setScreen('buyOrder'); } else setScreen('buyCategories'); }} />
+      <View style={ui.searchBar}>
+        <Ionicons name="search" size={18} color={colors.muted} />
+        <TextInput style={ui.searchInput} value={query} onChangeText={setQuery} placeholder={tx('পণ্য খুঁজুন', 'Search products')} placeholderTextColor={colors.muted} />
+        {query ? <Pressable onPress={() => setQuery('')} hitSlop={8}><Ionicons name="close-circle" size={18} color={colors.muted} /></Pressable> : null}
       </View>
-      {products.loading ? <ApiStatus state={products} empty={tx('কোনো পণ্য পাওয়া যায়নি।', 'No products are available.')} /> : null}
-      {!products.loading && filtered.length === 0 ? <Text style={styles.buyEmpty}>{tx('কোনো পণ্য মেলেনি।', 'No products match your search.')}</Text> : null}
-      {filtered.map((product) => {
-        const available = product.status === 'active';
-        const lowStock = Number(product.stock_qty || 0) <= Number(product.low_stock_threshold || -1);
-        const img = product.image_url ? String(product.image_url) : '';
-        return (
-          <Pressable
-            key={product.id || product.sku}
-            disabled={!available}
-            onPress={() => { onSelectProduct(product); setScreen('buyOrder'); }}
-            style={[styles.buyCard, !available && styles.disabledCard]}
-          >
-            {img
-              ? <Image source={{ uri: img }} style={styles.buyCardImage} />
-              : <View style={styles.buyCardImagePh}><Text style={styles.buyCardImagePhText}>{buyCategoryIcon(slug || interest)}</Text></View>}
-            <View style={styles.buyCardBody}>
-              <Text style={styles.productTitle} numberOfLines={1}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
-              {rowBody(product, lang, '') ? <Text style={styles.productSub} numberOfLines={2}>{rowBody(product, lang, '')}</Text> : null}
-              {product.package_size ? <Text style={styles.buyCardPack}>{String(product.package_size)}</Text> : null}
-              <View style={styles.buyCardFoot}>
-                <Text style={[styles.productPrice, !available && styles.mutedPrice]}>{amount(Number(product.price || 0), lang)}<Text style={styles.unit}> /{product.unit || tx('একক', 'unit')}</Text></Text>
-                <Badge label={!available ? tx('মজুদ নেই', 'Out of stock') : lowStock ? tx('কম মজুদ', 'Low stock') : tx('মজুদ আছে', 'In stock')} tone={available ? 'green' : 'rose'} />
-              </View>
-            </View>
+      {manufacturer ? (
+        <View style={ui.filterChipRow}>
+          <Pressable style={({ pressed }) => [ui.filterChip, pressed && styles.pressed]} onPress={() => { onClearManufacturer(); setScreen('buyCategories'); }}>
+            <Text style={ui.filterChipText}>🏭 {manufacturer.name}</Text>
+            <Ionicons name="close" size={14} color="white" />
           </Pressable>
-        );
-      })}
+          {!products.loading ? <Text style={ui.tilePack}>{num(filtered.length, lang)} {tx('টি পণ্য', 'products')}</Text> : null}
+        </View>
+      ) : null}
+      {fpOffer ? <FirstPurchaseStrip offer={fpOffer} /> : null}
+      {products.loading ? <ListSkeleton variant="grid" count={4} /> : null}
+      {!products.loading && filtered.length === 0 ? (
+        <View style={ui.emptyBox}>
+          <Text style={ui.emptyIcon}>🔍</Text>
+          <Text style={ui.emptyTitle}>{q ? tx('কোনো পণ্য মেলেনি', 'No products match') : tx('আপনার এলাকায় এখন কোনো পণ্য নেই', 'Nothing available in your area yet')}</Text>
+          <Text style={ui.emptyText}>{q ? tx('অন্য শব্দে খুঁজে দেখুন।', 'Try another word.') : tx('এই বিভাগের পণ্য আপনার এলাকার পরিবেশক এখনো দেয় না।', "No distributor serving your area carries this category yet.")}</Text>
+        </View>
+      ) : null}
+      <View style={ui.grid}>
+        {filtered.map((product) => (
+          <ProductTile
+            key={String(product.id || product.sku)}
+            product={product}
+            offer={fpOffer}
+            onPress={() => { onSelectProduct(product); setScreen('buyOrder'); }}
+          />
+        ))}
+      </View>
     </>
   );
 }
@@ -4717,69 +5478,416 @@ function VaccinationChart({ rows }: { rows: VaccinationRow[] }) {
  * detail for feed. Rendered from `metadata`, so a product without them simply
  * shows nothing rather than an empty frame.
  */
-function ProductDetailBlocks({ product }: { product: ApiRow | null }) {
+/**
+ * Everything the product carries beyond name and price — nutrition,
+ * ingredients, benefits, animal details, vaccinations — as tabs in one card,
+ * so the page is not a tall stack of boxes. Only tabs with content appear.
+ */
+function ProductDetailTabs({ product }: { product: ApiRow | null }) {
   const { tx, lang } = useLanguage();
-  if (!product) return null;
-  const metadata = parseMaybeJson(product.metadata);
+  const metadata = parseMaybeJson(product?.metadata);
   const specs = (Array.isArray(metadata.specs) ? metadata.specs : []) as SpecRow[];
   const nutrition = (Array.isArray(metadata.nutrition) ? metadata.nutrition : []) as SpecRow[];
   const vaccinations = (Array.isArray(metadata.vaccinations) ? metadata.vaccinations : []) as VaccinationRow[];
-  const digitalPrefix = metadata.digital_id_prefix ? String(metadata.digital_id_prefix) : '';
   const purpose = pickLang(lang, metadata.purpose_bn as string, metadata.purpose_en as string);
   const ingredients = pickLang(lang, metadata.ingredients_bn as string, metadata.ingredients_en as string);
   const benefits = pickLang(lang, metadata.benefits_bn as string, metadata.benefits_en as string);
-  const mrpPerKg = Number(metadata.mrp_per_kg || 0);
+  const digitalPrefix = metadata.digital_id_prefix ? String(metadata.digital_id_prefix) : '';
+  const specLines = (rows: SpecRow[]) => rows.map((row, i) => (
+    <View key={`${row.label_en || i}`} style={[ui.specLine, i === rows.length - 1 && { borderBottomWidth: 0 }]}>
+      <Text style={ui.specKey}>{pickLang(lang, row.label_bn, row.label_en)}</Text>
+      <Text style={ui.specVal}>{row.value !== undefined ? String(row.value) : pickLang(lang, row.value_bn, row.value_en)}</Text>
+    </View>
+  ));
+  const tabs = [
+    specs.length || digitalPrefix ? {
+      key: 'specs', label: tx('বিবরণ', 'Details'), body: (
+        <>
+          {digitalPrefix ? <Text style={[ui.bodyText, { marginBottom: 6 }]}>🏷️ {tx(`ডিজিটাল ট্যাগ সিরিজ ${digitalPrefix}-•••• (সরবরাহের সময় প্রতিটি পশুর নম্বর দেওয়া হয়)`, `Digital ear-tag series ${digitalPrefix}-•••• (each animal's number is issued on dispatch)`)}</Text> : null}
+          {specLines(specs)}
+        </>
+      ),
+    } : null,
+    nutrition.length ? { key: 'nutrition', label: tx('পুষ্টিমান', 'Nutrition'), body: <>{specLines(nutrition)}</> } : null,
+    ingredients ? { key: 'ingredients', label: tx('উপাদান', 'Ingredients'), body: <Text style={ui.bodyText}>{ingredients}</Text> } : null,
+    benefits || purpose ? { key: 'benefits', label: tx('উপকারিতা', 'Benefits'), body: <Text style={ui.bodyText}>{[purpose, benefits].filter(Boolean).join('\n\n')}</Text> } : null,
+    vaccinations.length ? {
+      key: 'vaccine', label: tx('টিকা', 'Vaccines'), body: (
+        <>
+          {vaccinations.map((row, i) => {
+            const done = String(row.status || 'done') === 'done';
+            return (
+              <View key={`${row.name_en || i}`} style={[ui.specLine, i === vaccinations.length - 1 && { borderBottomWidth: 0 }]}>
+                <Text style={ui.specKey}>{pickLang(lang, row.name_bn, row.name_en)}</Text>
+                <Text style={[ui.specVal, { color: done ? colors.green : '#B45309' }]}>
+                  {done ? tx('দেওয়া হয়েছে', 'Given') : tx('বাকি', 'Due')}{row.given_on ? ` · ${formatDate(row.given_on, lang)}` : ''}
+                </Text>
+              </View>
+            );
+          })}
+        </>
+      ),
+    } : null,
+  ].filter(Boolean) as Array<{ key: string; label: string; body: React.ReactNode }>;
+  const [active, setActive] = useState<string | null>(null);
+  if (!tabs.length) return null;
+  const current = tabs.find((t) => t.key === active) ?? tabs[0];
+  return (
+    <View style={ui.tabsCard}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={ui.tabsBar}>
+        {tabs.map((t) => (
+          <Pressable key={t.key} onPress={() => setActive(t.key)} style={[ui.tabBtn, current.key === t.key && ui.tabBtnActive]}>
+            <Text style={[ui.tabBtnText, current.key === t.key && ui.tabBtnTextActive]}>{t.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      <View style={ui.tabBody}>{current.body}</View>
+    </View>
+  );
+}
+
+function BrandRow({ kicker, name, sub, logo, icon, onPress, border }: {
+  kicker: string; name: string; sub?: string; logo?: string | null; icon: string; onPress?: () => void; border?: boolean;
+}) {
+  return (
+    <Pressable disabled={!onPress} onPress={onPress} style={({ pressed }) => [ui.brandRow, border && ui.brandRowBorder, pressed && !!onPress && styles.pressed]} accessibilityRole={onPress ? 'button' : undefined}>
+      {logo ? <Image source={{ uri: logo }} style={ui.brandLogo} resizeMode="contain" /> : <View style={ui.brandLogoPh}><Text style={{ fontSize: 18 }}>{icon}</Text></View>}
+      <View style={styles.flex}>
+        <Text style={ui.brandKicker}>{kicker}</Text>
+        <Text style={ui.brandName} numberOfLines={1}>{name}</Text>
+        {sub ? <Text style={ui.brandSub} numberOfLines={1}>{sub}</Text> : null}
+      </View>
+      {onPress ? <Ionicons name="chevron-forward" size={18} color={colors.muted} /> : null}
+    </Pressable>
+  );
+}
+
+/** A manufacturer's or distributor's profile, opened from the product page. */
+function BrandSheet({ brand, onClose, onViewProducts }: {
+  brand: { kind: 'manufacturer' | 'distributor'; id: string } | null;
+  onClose: () => void;
+  onViewProducts: (m: { id: string; name: string }) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const resource = brand
+    ? brand.kind === 'manufacturer'
+      ? `app/brands/manufacturer?manufacturer_id=${encodeURIComponent(brand.id)}`
+      : `app/brands/distributor?distributor_id=${encodeURIComponent(brand.id)}`
+    : null;
+  const state = useApiObject<ApiRow>(resource);
+  const d = state.data;
+  const pick = (bn: unknown, en: unknown) => String((lang === 'bn' ? bn || en : en || bn) || '');
+  const name = d ? pick(d.name_bn, d.name_en) : '';
+  const lines: Array<{ icon: string; key: string; text: string; onPress?: () => void }> = d ? [
+    pick(d.address_bn, d.address_en) ? { icon: '📍', key: tx('ঠিকানা', 'Address'), text: pick(d.address_bn, d.address_en) } : null,
+    pick(d.factory_address_bn, d.factory_address_en) ? { icon: '🏭', key: tx('কারখানা', 'Factory'), text: pick(d.factory_address_bn, d.factory_address_en) } : null,
+    d.kind === 'distributor' ? { icon: '🗺️', key: tx('সেবার এলাকা', 'Service area'), text: pick(d.area_bn, d.area_en) } : null,
+    pick(d.services_bn, d.services_en) ? { icon: '✅', key: tx('সেবাসমূহ', 'Services'), text: pick(d.services_bn, d.services_en) } : null,
+    d.phone ? { icon: '📞', key: tx('ফোন', 'Phone'), text: String(d.phone), onPress: () => Linking.openURL(`tel:${String(d.phone).replace(/[^0-9+]/g, '')}`) } : null,
+    d.email ? { icon: '✉️', key: tx('ইমেইল', 'Email'), text: String(d.email), onPress: () => Linking.openURL(`mailto:${String(d.email)}`) } : null,
+    d.website ? { icon: '🌐', key: tx('ওয়েবসাইট', 'Website'), text: String(d.website), onPress: () => Linking.openURL(String(d.website)) } : null,
+    d.contact_person ? { icon: '👤', key: tx('যোগাযোগ', 'Contact'), text: String(d.contact_person) } : null,
+    d.registration_no ? { icon: '📄', key: tx('রেজি. নং', 'Reg. no.'), text: String(d.registration_no) } : null,
+  ].filter(Boolean) as Array<{ icon: string; key: string; text: string; onPress?: () => void }> : [];
+  const kindLabel = brand?.kind === 'manufacturer' ? tx('প্রস্তুতকারক', 'Manufacturer') : tx('পরিবেশক', 'Distributor');
+  const est = d?.established_year ? tx(`স্থাপিত ${num(Number(d.established_year), 'bn')}`, `Est. ${d.established_year}`) : '';
+  return (
+    <Modal visible={!!brand} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.dropdownBackdrop} onPress={onClose}>
+        <Pressable style={[ui.sheet, { maxHeight: '86%' }]} onPress={() => {}}>
+          <View style={styles.dropdownHandle} />
+          <View style={ui.sheetHead}>
+            <Text style={ui.sheetTitle}>{kindLabel}</Text>
+            <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={22} color={colors.muted} /></Pressable>
+          </View>
+          {state.loading ? (
+            <View style={{ alignItems: 'center', gap: 10, padding: 20 }}>
+              <Skeleton width={84} height={84} radius={18} /><Skeleton width="60%" height={18} /><Skeleton width="80%" /><Skeleton width="70%" />
+            </View>
+          ) : d ? (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <View style={ui.brandHead}>
+                {d.logo_url ? <Image source={{ uri: String(d.logo_url) }} style={ui.brandBigLogo} resizeMode="contain" /> : <View style={[ui.brandBigLogo, { alignItems: 'center', justifyContent: 'center' }]}><Text style={{ fontSize: 34 }}>{brand?.kind === 'manufacturer' ? '🏭' : '🚚'}</Text></View>}
+                <Text style={ui.brandBigName}>{name}</Text>
+                <Text style={ui.brandBigSub}>{[kindLabel, est, d.product_count ? tx(`${num(Number(d.product_count), 'bn')}টি পণ্য`, `${d.product_count} products`) : ''].filter(Boolean).join(' · ')}</Text>
+              </View>
+              {pick(d.description_bn, d.description_en) ? <Text style={ui.brandAbout}>{pick(d.description_bn, d.description_en)}</Text> : null}
+              <View style={{ marginTop: 12 }}>
+                {lines.map((l) => (
+                  <Pressable key={l.key} disabled={!l.onPress} onPress={l.onPress} style={({ pressed }) => [ui.infoLine, pressed && !!l.onPress && styles.pressed]}>
+                    <Text style={{ fontSize: 16 }}>{l.icon}</Text>
+                    <View style={styles.flex}>
+                      <Text style={ui.infoKey}>{l.key}</Text>
+                      <Text style={[ui.infoText, l.onPress && { color: colors.maroon, fontWeight: '700' }]}>{l.text}</Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+              {brand?.kind === 'manufacturer' ? (
+                <Pressable style={({ pressed }) => [ui.sheetBtn, pressed && styles.pressed]} onPress={() => onViewProducts({ id: String(d.id), name })}>
+                  <Ionicons name="grid-outline" size={18} color="white" />
+                  <Text style={ui.sheetBtnText}>{tx('এই প্রস্তুতকারকের সব পণ্য', 'All products by this maker')}</Text>
+                </Pressable>
+              ) : null}
+            </ScrollView>
+          ) : (
+            <Text style={ui.sheetEmpty}>{state.error || tx('তথ্য পাওয়া যায়নি', 'Details not available')}</Text>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/** Where a distributor delivers, as one sentence for the product and checkout pages. */
+function deliveryScopeText(lock: string, who: string, area: string, tx: (bn: string, en: string) => string, areaBn: string): string {
+  if (lock === 'upazila') return tx(`${who} শুধু ${areaBn}-এ ডেলিভারি দেয় — ঠিকানায় শুধু গ্রাম/বাড়ি লিখবেন।`, `${who} delivers only in ${area} — you'll just add your village/house.`);
+  if (lock === 'district') return tx(`${who} ${areaBn}-এর মধ্যে ডেলিভারি দেয় — উপজেলা বেছে নেবেন।`, `${who} delivers within ${area} — you'll pick the upazila.`);
+  if (lock === 'division') return tx(`${who} ${areaBn}-এর মধ্যে ডেলিভারি দেয়।`, `${who} delivers within ${area}.`);
+  return tx('সারা দেশে ডেলিভারি — প্রস্তুতকারক সরাসরি পাঠায়।', 'Delivered anywhere in the country, straight from the maker.');
+}
+
+/** Order screens ask the server for the total; the app never adds it up itself. */
+function useOrderQuote(product: ApiRow | null, qty: number, extra: string) {
+  const [quote, setQuote] = useState<ApiRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    if (!product?.id) return;
+    let alive = true;
+    setLoading(true);
+    const timer = setTimeout(() => {
+      apiRequest<{ data?: ApiRow }>(`app/orders/quote?product_id=${encodeURIComponent(String(product.id))}&quantity=${qty}${extra}`, { silent: true })
+        .then((json) => { if (alive) setQuote(json.data ?? null); })
+        .catch(() => { if (alive) setQuote(null); })
+        .finally(() => { if (alive) setLoading(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [product?.id, qty, extra]);
+  return { quote, loading };
+}
+
+function BuyOrder({ setScreen, qty, setQty, product, onViewManufacturer }: {
+  setScreen: (screen: Screen) => void;
+  qty: number;
+  setQty: (qty: number) => void;
+  product: ApiRow | null;
+  onViewManufacturer: (m: { id: string; name: string }) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const [brand, setBrand] = useState<{ kind: 'manufacturer' | 'distributor'; id: string } | null>(null);
+  const { quote } = useOrderQuote(product, qty, '');
+  const unitPrice = Number(product?.price || 0);
+  const subtotal = qty * unitPrice;
+  const discount = Number(quote?.discount || 0);
+  const payable = quote ? Number(quote.payable ?? subtotal) : subtotal;
+  const firstPurchase = (quote?.first_purchase ?? null) as ApiRow | null;
+  const promo = (quote?.promotion ?? null) as ApiRow | null;
+  const metadata = parseMaybeJson(product?.metadata);
+  const features = Array.isArray(metadata.features) ? (metadata.features as string[]) : [];
+  const img = String(product?.image_url || metadata.image_url || '');
+  const available = product?.status === 'active';
+  const unit = unitLabel(product?.unit, lang);
+  const pack = String((lang === 'bn' ? product?.package_size_bn || product?.package_size : product?.package_size) || '');
+  const deliveryWindow = String((lang === 'bn' ? product?.delivery_window_bn || product?.delivery_window : product?.delivery_window) || '');
+  const pick = (bn: unknown, en: unknown) => String((lang === 'bn' ? bn || en : en || bn) || '');
+  const makerName = pick(product?.manufacturer_name_bn, product?.manufacturer_name);
+  const distName = pick(product?.distributor_name_bn, product?.distributor_name);
+  const lock = String(product?.distributor_lock || 'none');
+  const scope = deliveryScopeText(lock, distName || makerName, String(product?.distributor_area || ''), tx, String(product?.distributor_area_bn || ''));
+
+  useScreenAccessory(
+    product ? (
+      <View style={ui.bar}>
+        <View>
+          <Text style={ui.barKey}>{tx('মোট', 'Total')} · {num(qty, lang)} {unit}</Text>
+          {discount > 0 ? <Text style={ui.barStrike}>{amount(subtotal, lang)}</Text> : null}
+          <Text style={ui.barTotal}>{amount(payable, lang)}</Text>
+        </View>
+        <Pressable disabled={!available} onPress={() => setScreen('buyCheckout')} style={({ pressed }) => [ui.barBtn, !available && ui.barBtnDisabled, pressed && styles.pressed]}>
+          <Text style={ui.barBtnText}>{tx('ডেলিভারির তথ্য দিন', 'Delivery details')}</Text>
+          <Ionicons name="arrow-forward" size={18} color="#3D2600" />
+        </Pressable>
+      </View>
+    ) : null,
+    [product?.id, qty, payable, subtotal, discount, lang, available],
+  );
+
+  if (!product) {
+    return (
+      <>
+        <Header title={tx('পণ্য', 'Product')} onBack={() => setScreen('buyCategories')} />
+        <View style={ui.emptyBox}><Text style={ui.emptyIcon}>🛒</Text><Text style={ui.emptyTitle}>{tx('একটি পণ্য বেছে নিন', 'Choose a product first')}</Text></View>
+      </>
+    );
+  }
 
   return (
     <>
-      {digitalPrefix ? (
-        <Card style={styles.digitalIdCard}>
-          <View style={styles.flex}>
-            <Text style={styles.smallUpper}>{tx('ডিজিটাল পরিচিতি', 'Digital identification')}</Text>
-            {/* The ear tag is issued per animal at dispatch; the listing can only
-                honestly show the series it comes from. */}
-            <Text style={styles.digitalIdCode}>{digitalPrefix}-••••</Text>
-            <Text style={styles.digitalIdHint}>{tx('প্রতিটি পশুর কানের ট্যাগ নম্বর সরবরাহের সময় দেওয়া হয়।', 'Each animal’s ear-tag number is issued on dispatch.')}</Text>
+      <Header title={tx('পণ্যের বিবরণ', 'Product')} onBack={() => setScreen('buyProducts')} />
+      <View style={ui.pHero}>
+        {img
+          ? <Image source={{ uri: img }} style={ui.pHeroImage} resizeMode="cover" />
+          : <View style={[ui.pHeroImage, { alignItems: 'center', justifyContent: 'center', backgroundColor: colors.rose }]}><Text style={{ fontSize: 56 }}>{buyCategoryIcon(String(product.category_slug || ''))}</Text></View>}
+        <View style={ui.pHeroBody}>
+          <Badge label={available ? tx('মজুদ আছে', 'In stock') : tx('মজুদ নেই', 'Out of stock')} tone={available ? 'green' : 'rose'} />
+          <Text style={ui.pTitle}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
+          <View style={ui.pPriceRow}>
+            <Text style={ui.pPrice}>{amount(unitPrice, lang)}</Text>
+            <Text style={ui.pPriceUnit}>/ {unit}</Text>
+            {pack ? <Text style={ui.pPack} numberOfLines={1}>{pack}</Text> : null}
           </View>
-          <Text style={styles.digitalIdIcon}>🏷️</Text>
-        </Card>
-      ) : null}
-      {purpose ? (
-        <View style={[styles.noteBlue, styles.noteSpaced]}>
-          <Text style={styles.noteText}>{purpose}</Text>
+          {rowBody(product, lang, '') ? <Text style={ui.pDesc}>{rowBody(product, lang, '')}</Text> : null}
         </View>
-      ) : null}
-      {mrpPerKg > 0 ? (
-        <View style={[styles.noteGold, styles.noteSpaced]}>
-          <Text style={styles.noteText}>{tx(`এমআরপি ৳${num(mrpPerKg, 'bn')}/কেজি`, `MRP ৳${num(mrpPerKg, 'en')}/kg`)}</Text>
+      </View>
+
+      <View style={ui.brandCard}>
+        {product.manufacturer_id ? (
+          <BrandRow
+            kicker={tx('প্রস্তুত ও বাজারজাতকারী', 'Made & marketed by')}
+            name={makerName}
+            logo={product.manufacturer_logo ? String(product.manufacturer_logo) : null}
+            icon="🏭"
+            onPress={() => setBrand({ kind: 'manufacturer', id: String(product.manufacturer_id) })}
+          />
+        ) : null}
+        {product.distributor_id ? (
+          <BrandRow
+            border={Boolean(product.manufacturer_id)}
+            kicker={tx('পরিবেশক', 'Distributed by')}
+            name={distName}
+            sub={pick(product.distributor_area_bn, product.distributor_area)}
+            logo={product.distributor_logo ? String(product.distributor_logo) : null}
+            icon="🚚"
+            onPress={() => setBrand({ kind: 'distributor', id: String(product.distributor_id) })}
+          />
+        ) : null}
+        <View style={ui.scopeNote}>
+          <Ionicons name="location-outline" size={16} color="#1E3A6E" />
+          <Text style={ui.scopeText}>{scope}</Text>
         </View>
-      ) : null}
-      <SpecTable title={tx('পশুর বিবরণ', 'Animal details')} rows={specs} />
-      <SpecTable title={tx('পুষ্টিমান', 'Nutrition')} rows={nutrition} />
-      <VaccinationChart rows={vaccinations} />
-      {ingredients ? (
-        <Card style={styles.orderInfoCard}>
-          <Text style={styles.orderSectionTitle}>{tx('উপাদান', 'Ingredients')}</Text>
-          <Text style={styles.orderDescription}>{ingredients}</Text>
-        </Card>
-      ) : null}
-      {benefits ? (
-        <Card style={styles.orderInfoCard}>
-          <Text style={styles.orderSectionTitle}>{tx('উপকারিতা', 'Benefits')}</Text>
-          <Text style={styles.orderDescription}>{benefits}</Text>
-        </Card>
-      ) : null}
+      </View>
+
+      <View style={ui.factRow}>
+        {pack ? <View style={ui.fact}><Text style={ui.factIcon}>📦</Text><Text style={ui.factValue} numberOfLines={2}>{pack}</Text><Text style={ui.factLabel}>{tx('প্যাক', 'Pack')}</Text></View> : null}
+        {deliveryWindow ? <View style={ui.fact}><Text style={ui.factIcon}>🚚</Text><Text style={ui.factValue} numberOfLines={2}>{deliveryWindow}</Text><Text style={ui.factLabel}>{tx('ডেলিভারি', 'Delivery')}</Text></View> : null}
+        {features[0] ? <View style={ui.fact}><Text style={ui.factIcon}>✨</Text><Text style={ui.factValue} numberOfLines={2}>{features[0]}</Text><Text style={ui.factLabel}>{tx('বৈশিষ্ট্য', 'Feature')}</Text></View> : null}
+      </View>
+
+      <ProductDetailTabs product={product} />
+
+      <View style={ui.qtyCard}>
+        <View style={ui.qtyHead}>
+          <View>
+            <Text style={ui.brandKicker}>{tx('পরিমাণ', 'Quantity')}</Text>
+            <Text style={ui.lineMeta}>{amount(unitPrice, lang)} / {unit}</Text>
+          </View>
+          <View style={ui.qtyControls}>
+            <Pressable style={({ pressed }) => [ui.qtyBtn, pressed && styles.pressed]} onPress={() => setQty(Math.max(1, qty - 1))} accessibilityLabel={tx('কমান', 'Less')}>
+              <Ionicons name="remove" size={20} color={colors.maroon} />
+            </Pressable>
+            <View style={ui.qtyValue}><Text style={ui.qtyNumber}>{num(qty, lang)}</Text><Text style={ui.qtyUnit}>{unit}</Text></View>
+            <Pressable style={({ pressed }) => [ui.qtyBtn, pressed && styles.pressed]} onPress={() => setQty(qty + 1)} accessibilityLabel={tx('বাড়ান', 'More')}>
+              <Ionicons name="add" size={20} color={colors.maroon} />
+            </Pressable>
+          </View>
+        </View>
+        <View style={ui.divider} />
+        <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পণ্যের দাম', 'Product price')} ({num(qty, lang)} × {amount(unitPrice, lang)})</Text><Text style={ui.sumVal}>{amount(subtotal, lang)}</Text></View>
+        {discount > 0 ? (
+          <View style={ui.sumLine}>
+            <Text style={[ui.sumKey, ui.sumGreen]}>{promo ? tx(String(promo.label_bn || promo.label_en || ''), String(promo.label_en || '')) : tx('ছাড়', 'Discount')}</Text>
+            <Text style={[ui.sumVal, ui.sumGreen]}>− {amount(discount, lang)}</Text>
+          </View>
+        ) : null}
+        <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('ডেলিভারি', 'Delivery')}</Text><Text style={[ui.sumVal, ui.sumGreen]}>{tx('ফ্রি', 'Free')}</Text></View>
+        {!discount && firstPurchase?.active && quote?.is_first_purchase && firstPurchase.reason === 'below_minimum' ? (
+          <Text style={[ui.lineMeta, { color: '#8F6412', marginTop: 4 }]}>
+            🎁 {tx(`${money(Number(firstPurchase.min_order_amount || 0))}-এর বেশি অর্ডারে প্রথম কেনাকাটায় ${money(Number(firstPurchase.amount || 0))} ছাড়`, `Order over ${amount(Number(firstPurchase.min_order_amount || 0), lang)} for ${amount(Number(firstPurchase.amount || 0), lang)} off your first purchase`)}
+          </Text>
+        ) : null}
+      </View>
+
+      <BrandSheet
+        brand={brand}
+        onClose={() => setBrand(null)}
+        onViewProducts={(m) => { setBrand(null); onViewManufacturer(m); }}
+      />
     </>
   );
 }
 
-function BuyOrder({
-  setScreen,
-  qty,
-  setQty,
-  product,
-  onOrdered,
-}: {
+/** Division / district / upazila as compact dropdowns, with any levels above the free one fixed. */
+function AreaSelects({ value, onChange, fixed }: { value: GeoValue; onChange: (v: GeoValue) => void; fixed: 'none' | 'division' | 'district' }) {
+  const { tx, lang } = useLanguage();
+  const divisions = useApiList<ApiRow>('geo/divisions');
+  const districts = useApiList<ApiRow>(`geo/districts?division_id=${value.divisionId ?? 0}`);
+  const upazilas = useApiList<ApiRow>(`geo/upazilas?district_id=${value.districtId ?? 0}`);
+  const nm = (r: ApiRow) => String((lang === 'bn' ? r.name_bn || r.name_en : r.name_en || r.name_bn) || '');
+  const items = (rows: ApiRow[]) => rows.map((r) => ({ id: String(r.id), label: nm(r), raw: r }));
+  const label = (en: string, bn: string) => (lang === 'bn' ? bn || en : en || bn);
+  const upazilaSelect = (
+    <SheetSelect
+      compact
+      placeholder={tx('উপজেলা', 'Upazila')}
+      title={tx('উপজেলা বেছে নিন', 'Choose upazila')}
+      value={label(value.upazila, value.upazilaBn)}
+      selectedId={value.upazilaId}
+      items={items(upazilas.rows)}
+      disabled={!value.districtId}
+      onSelect={(i) => onChange({ ...value, upazilaId: i.id, upazila: String(i.raw.name_en || ''), upazilaBn: String(i.raw.name_bn || '') })}
+    />
+  );
+  const districtSelect = (
+    <SheetSelect
+      compact
+      placeholder={tx('জেলা', 'District')}
+      title={tx('জেলা বেছে নিন', 'Choose district')}
+      value={label(value.district, value.districtBn)}
+      selectedId={value.districtId}
+      items={items(districts.rows)}
+      disabled={!value.divisionId}
+      onSelect={(i) => onChange({ ...value, districtId: i.id, district: String(i.raw.name_en || ''), districtBn: String(i.raw.name_bn || ''), upazilaId: null, upazila: '', upazilaBn: '' })}
+    />
+  );
+  if (fixed === 'district') return <View style={{ paddingHorizontal: 14, marginTop: 8 }}>{upazilaSelect}</View>;
+  return (
+    <>
+      <View style={[ui.row2, { marginTop: 8 }]}>
+        {fixed === 'none' ? (
+          <View style={ui.row2Item}>
+            <SheetSelect
+              compact
+              placeholder={tx('বিভাগ', 'Division')}
+              title={tx('বিভাগ বেছে নিন', 'Choose division')}
+              value={label(value.division, value.divisionBn)}
+              selectedId={value.divisionId}
+              items={items(divisions.rows)}
+              onSelect={(i) => onChange({ ...EMPTY_GEO_VALUE, divisionId: i.id, division: String(i.raw.name_en || ''), divisionBn: String(i.raw.name_bn || '') })}
+            />
+          </View>
+        ) : null}
+        <View style={ui.row2Item}>{districtSelect}</View>
+        {fixed === 'division' ? <View style={ui.row2Item}>{upazilaSelect}</View> : null}
+      </View>
+      {fixed === 'none' ? <View style={{ paddingHorizontal: 14, marginTop: 8 }}>{upazilaSelect}</View> : null}
+    </>
+  );
+}
+
+const PAY_METHODS: Array<{ id: string; bn: string; en: string }> = [
+  { id: 'cash', bn: 'ক্যাশ', en: 'Cash' },
+  { id: 'bkash', bn: 'বিকাশ', en: 'bKash' },
+  { id: 'nagad', bn: 'নগদ', en: 'Nagad' },
+  { id: 'bank', bn: 'ব্যাংক', en: 'Bank' },
+];
+
+/**
+ * Step two: where it goes and how it's paid, on one screen. The distributor's
+ * area decides how much of the address can change: an upazila distributor
+ * fixes it (only the village/house is typed), a district one fixes the
+ * district, a nationwide or direct order is free.
+ */
+function BuyCheckout({ setScreen, qty, product, onOrdered }: {
   setScreen: (screen: Screen) => void;
   qty: number;
   setQty: (qty: number) => void;
@@ -4788,47 +5896,86 @@ function BuyOrder({
 }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
-  const [address, setAddress] = useState(tx('চর নিলক্ষ্মিয়া, ময়মনসিংহ সদর', 'Char Nilakkhmiya, Mymensingh Sadar'));
-  const [paymentMethod, setPaymentMethod] = useState('bkash');
+  const [delivery, setDelivery] = useState<GeoValue>(() => geoValueFromUser(user));
+  const [address, setAddress] = useState(String(user?.village || ''));
+  const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [codeInput, setCodeInput] = useState('');
+  const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
-  const unitPrice = Number(product?.price || 0);
-  const total = qty * unitPrice;
-  const metadata = parseMaybeJson(product?.metadata);
-  const features = Array.isArray(metadata.features) ? metadata.features : [];
-  const productImage = String(product?.image_url || metadata.image_url || '');
-  async function submitOrder() {
-    if (!product) {
-      setSubmitError(tx('অর্ডারের জন্য আগে একটি পণ্য নির্বাচন করুন।', 'Please select a product before placing an order.'));
-      return;
+  const lockHint = String(product?.distributor_lock || 'none');
+  const geoParams = lockHint === 'upazila' ? '' : [
+    delivery.divisionId ? `&division_id=${encodeURIComponent(delivery.divisionId)}` : '',
+    delivery.districtId ? `&district_id=${encodeURIComponent(delivery.districtId)}` : '',
+    delivery.upazilaId ? `&upazila_id=${encodeURIComponent(delivery.upazilaId)}` : '',
+  ].join('');
+  const { quote, loading } = useOrderQuote(product, qty, `${geoParams}${code ? `&code=${encodeURIComponent(code)}` : ''}`);
+  const lock = String(quote?.delivery_lock || lockHint);
+  const dist = (quote?.distributor ?? null) as ApiRow | null;
+  const qd = (quote?.delivery ?? null) as ApiRow | null;
+
+  // A district / division distributor fixes the levels above what the buyer
+  // picks: start the picker from the distributor's area.
+  useEffect(() => {
+    if (!dist) return;
+    if ((lock === 'district' && String(delivery.districtId) !== String(dist.district_id)) || (lock === 'division' && String(delivery.divisionId) !== String(dist.division_id))) {
+      setDelivery({
+        ...EMPTY_GEO_VALUE,
+        divisionId: dist.division_id ? String(dist.division_id) : null, division: String(dist.division || ''), divisionBn: String(dist.division_bn || ''),
+        districtId: lock === 'district' && dist.district_id ? String(dist.district_id) : null,
+        district: lock === 'district' ? String(dist.district || '') : '', districtBn: lock === 'district' ? String(dist.district_bn || '') : '',
+      });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dist?.id, lock]);
+
+  const unitPrice = Number(product?.price || 0);
+  const subtotal = Number(quote?.subtotal ?? qty * unitPrice);
+  const discount = Number(quote?.discount || 0);
+  const payable = quote ? Number(quote.payable ?? subtotal) : subtotal;
+  const promo = (quote?.promotion ?? null) as ApiRow | null;
+  const deliverable = quote ? quote.deliverable !== false : true;
+  const codeStatus = quote ? String(quote.code_status || '') : '';
+  const codesAllowed = quote ? !quote.is_first_purchase : false;
+  const unit = unitLabel(product?.unit, lang);
+  const pick = (bn: unknown, en: unknown) => String((lang === 'bn' ? bn || en : en || bn) || '');
+  const who = dist ? pick(dist.short_name_bn || dist.name_bn, dist.short_name_en || dist.name_en) : '';
+  const fixedArea = lock === 'upazila' && qd
+    ? [pick(qd.upazila_bn, qd.upazila), pick(qd.district_bn, qd.district), pick(qd.division_bn, qd.division)].filter(Boolean).join(', ')
+    : lock === 'district' && dist ? `${pick(dist.district_bn, dist.district)}${lang === 'bn' ? ' জেলা' : ' district'}, ${pick(dist.division_bn, dist.division)}`
+    : lock === 'division' && dist ? `${pick(dist.division_bn, dist.division)}${lang === 'bn' ? ' বিভাগ' : ' division'}`
+    : '';
+  const needsUpazila = lock !== 'upazila' && !delivery.upazilaId;
+  const canPlace = Boolean(product) && deliverable && !needsUpazila && address.trim().length > 1 && !submitting;
+
+  async function placeOrder() {
+    if (!product) return;
+    if (needsUpazila) { setSubmitError(tx('ডেলিভারির উপজেলা বেছে নিন।', 'Choose the delivery upazila.')); return; }
+    if (address.trim().length < 2) { setSubmitError(tx('গ্রাম / বাড়ির ঠিকানা লিখুন।', 'Add your village / house.')); return; }
     setSubmitting(true);
     setSubmitError('');
     try {
-      // One call, one transaction. This used to create the order header and its
-      // line item as two independent requests: a failure between them left an
-      // order with nothing in it, which the buyer could neither see nor cancel.
-      const orderResponse = await apiCreate('app/orders', {
+      const area = lock === 'upazila' && qd ? [qd.upazila, qd.district].filter(Boolean).join(', ') : geoLabel(delivery, 'en');
+      const res = await apiCreate('app/orders', {
         user_id: Number(user?.id) || undefined,
-        delivery_fee: 0,
         payment_method: paymentMethod,
-        delivery_address: address,
-        district: user?.district || null,
-        upazila: user?.upazila || null,
+        delivery_address: [address.trim(), area].filter(Boolean).join(', '),
+        delivery_division_id: lock === 'upazila' ? undefined : delivery.divisionId,
+        delivery_district_id: lock === 'upazila' ? undefined : delivery.districtId,
+        delivery_upazila_id: lock === 'upazila' ? undefined : delivery.upazilaId,
+        // Only a code the quote accepted; automatic discounts need nothing sent.
+        promo_code: codeStatus === 'applied' ? code : undefined,
         notes: 'Placed from mobile app.',
-        items: [
-          {
-            product_id: Number(product.id),
-            quantity: qty,
-            unit_price: unitPrice,
-          },
-        ],
+        items: [{ product_id: Number(product.id), quantity: qty }],
       });
-      const placed = (orderResponse as any).result ?? {};
+      const placed = (res as any).result ?? {};
       onOrdered({
         id: placed.order_id,
         order_code: placed.order_code,
-        payable_amount: placed.payable_amount ?? total,
+        total_amount: placed.total_amount ?? subtotal,
+        discount_amount: placed.discount_amount ?? 0,
+        payable_amount: placed.payable_amount ?? payable,
+        promotion: placed.promotion ?? null,
       });
       setScreen('buyDone');
     } catch (error) {
@@ -4837,98 +5984,263 @@ function BuyOrder({
       setSubmitting(false);
     }
   }
+
+  useScreenAccessory(
+    product ? (
+      <View style={ui.bar}>
+        <View>
+          <Text style={ui.barKey}>{tx('পরিশোধযোগ্য', 'To pay')}</Text>
+          {discount > 0 ? <Text style={ui.barStrike}>{amount(subtotal, lang)}</Text> : null}
+          <Text style={ui.barTotal}>{amount(payable, lang)}</Text>
+        </View>
+        <Pressable disabled={!canPlace} onPress={placeOrder} style={({ pressed }) => [ui.barBtn, !canPlace && ui.barBtnDisabled, pressed && styles.pressed]}>
+          {submitting ? <ActivityIndicator color="#3D2600" /> : <Ionicons name="checkmark-circle" size={19} color="#3D2600" />}
+          <Text style={ui.barBtnText}>{submitting ? tx('জমা হচ্ছে…', 'Placing…') : tx('অর্ডার করুন', 'Place order')}</Text>
+        </Pressable>
+      </View>
+    ) : null,
+    [product?.id, payable, subtotal, discount, canPlace, submitting, lang, paymentMethod, address, code, codeStatus, delivery.upazilaId, lock],
+  );
+
+  if (!product) {
+    return (
+      <>
+        <Header title={tx('ডেলিভারি ও পেমেন্ট', 'Delivery & payment')} onBack={() => setScreen('buyCategories')} />
+        <View style={ui.emptyBox}><Text style={ui.emptyTitle}>{tx('একটি পণ্য বেছে নিন', 'Choose a product first')}</Text></View>
+      </>
+    );
+  }
+
+  const img = String(product.image_url || '');
   return (
     <>
-      <Header title={tx('অর্ডার দিন', 'Place Order')} onBack={() => setScreen('buyProducts')} />
-      {/* With a photo the card stacks: a full-width image cannot share a row
-          with the copy, and putting it there collapsed the copy column to zero
-          width, wrapping its text one character per line and stretching the
-          card to a screen and a half of cream. Without a photo the original
-          side-by-side tile is still right. */}
-      <Card style={[styles.orderHeroCard, productImage ? styles.orderHeroCardStacked : null]}>
-        {productImage ? (
-          <Image source={{ uri: productImage }} style={styles.orderProductPhoto} resizeMode="cover" />
-        ) : (
-          <View style={styles.orderProductVisual}>
-            <Text style={styles.orderProductEmoji}>🐄</Text>
-            <Text style={styles.orderSackText}>{rowTitle(product || undefined, lang, tx('পণ্য', 'Product'))}</Text>
-            <Text style={styles.orderSackWeight}>{product?.package_size || product?.unit || ''}</Text>
+      <Header title={tx('ডেলিভারি ও পেমেন্ট', 'Delivery & payment')} onBack={() => setScreen('buyOrder')} />
+      <View style={ui.lineItem}>
+        {img ? <Image source={{ uri: img }} style={ui.lineThumb} /> : <View style={[ui.lineThumb, { alignItems: 'center', justifyContent: 'center' }]}><Text style={{ fontSize: 22 }}>🛒</Text></View>}
+        <View style={styles.flex}>
+          <Text style={ui.lineName} numberOfLines={1}>{rowTitle(product, lang, tx('পণ্য', 'Product'))}</Text>
+          <Text style={ui.lineMeta}>{num(qty, lang)} {unit} × {amount(unitPrice, lang)}</Text>
+        </View>
+        <Text style={ui.sumVal}>{amount(subtotal, lang)}</Text>
+      </View>
+
+      <View style={ui.section}>
+        <Text style={ui.sectionTitle}>{tx('ডেলিভারির ঠিকানা', 'Delivery address')}</Text>
+        <Text style={ui.sectionSub}>{dist ? `🚚 ${who} · ${pick(dist.area_bn, dist.area_en)}` : tx('🏭 প্রস্তুতকারক সরাসরি পাঠাবে', '🏭 Shipped direct by the maker')}</Text>
+        {fixedArea ? (
+          <View style={ui.lockRow}>
+            <Ionicons name="lock-closed" size={16} color={colors.maroon} />
+            <Text style={ui.lockText}>{fixedArea}</Text>
           </View>
+        ) : null}
+        {lock === 'upazila' ? (
+          <Text style={ui.lockNote}>{tx(`${who} শুধু এই এলাকায় ডেলিভারি দেয়, তাই এলাকা বদলানো যাবে না।`, `${who} delivers only here, so the area can't be changed.`)}</Text>
+        ) : (
+          <AreaSelects value={delivery} onChange={(v) => { setSubmitError(''); setDelivery(v); }} fixed={lock === 'district' ? 'district' : lock === 'division' ? 'division' : 'none'} />
         )}
-        <View style={styles.orderHeroCopy}>
-          <Badge label={tx('মজুদ আছে', 'In stock')} tone="green" />
-          <Text style={styles.orderHeroTitle}>{rowTitle(product || undefined, lang, tx('পণ্য নির্বাচন করুন', 'Select a product'))}</Text>
-          <Text style={styles.orderHeroSub}>{rowBody(product || undefined, lang, '')}</Text>
-          <Text style={styles.productPrice}>{amount(unitPrice, lang)}<Text style={styles.unit}> /{product?.unit || tx('বস্তা', 'sack')}</Text></Text>
+        <Text style={ui.fieldLabel}>{tx('গ্রাম / বাড়ি / রাস্তা', 'Village / house / road')}<Text style={ui.req}> *</Text></Text>
+        <TextInput
+          style={[ui.inputSm, { marginHorizontal: 14 }]}
+          value={address}
+          onChangeText={setAddress}
+          placeholder={tx('যেমন: কানাইখালী, বাড়ি ১২', 'e.g. Kanaikhali, house 12')}
+          placeholderTextColor={colors.muted}
+        />
+        {!deliverable && quote?.delivery_error ? <Text style={ui.errorText}>{String(quote.delivery_error)}</Text> : null}
+      </View>
+
+      <View style={ui.section}>
+        <Text style={ui.sectionTitle}>{tx('পেমেন্ট', 'Payment')}</Text>
+        <View style={[ui.payRow, { marginTop: 8 }]}>
+          {PAY_METHODS.map((m) => {
+            const on = paymentMethod === m.id;
+            return (
+              <Pressable key={m.id} onPress={() => setPaymentMethod(m.id)} style={[ui.payChip, on && ui.payChipActive]} accessibilityState={{ selected: on }}>
+                <Text style={[ui.payChipText, on && ui.payChipTextActive]}>{tx(m.bn, m.en)}</Text>
+              </Pressable>
+            );
+          })}
         </View>
-      </Card>
-      <Card style={styles.orderInfoCard}>
-        <Text style={styles.orderSectionTitle}>{tx('পণ্যের বিবরণ', 'Product Description')}</Text>
-        <Text style={styles.orderDescription}>
-          {tx(
-            rowBody(product || undefined, 'bn', 'পণ্যের বিবরণ সার্ভার থেকে পাওয়া যায়নি।'),
-            rowBody(product || undefined, 'en', 'Product description is not available from the server.'),
-          )}
-        </Text>
-        <View style={styles.orderFeatureRow}>
-          <OrderFeature icon="⚖" title={product?.package_size || tx('প্যাকেজ', 'Package')} sub={product?.unit || tx('ইউনিট', 'unit')} />
-          <OrderFeature icon="✨" title={features[0] || tx('মানসম্মত', 'Quality')} sub={features[1] || tx('সার্ভার ডাটা', 'server data')} />
-          <OrderFeature icon="🚚" title={product?.delivery_window || tx('ডেলিভারি', 'Delivery')} sub={tx('সময়', 'window')} />
-        </View>
-      </Card>
-      <ProductDetailBlocks product={product} />
-      <Card style={styles.orderInfoCard}>
-        <Text style={styles.label}>{tx('পরিমাণ', 'Quantity')}</Text>
-        <View style={styles.qtyRow}>
-          <Pressable style={styles.qtyBtn} onPress={() => setQty(Math.max(1, qty - 1))}>
-            <Text style={styles.qtyText}>−</Text>
-          </Pressable>
-          <Text style={styles.qtyNumber}>{num(qty, lang)}</Text>
-          <Pressable style={styles.qtyBtn} onPress={() => setQty(qty + 1)}>
-            <Text style={styles.qtyText}>+</Text>
-          </Pressable>
-          <Text style={styles.qtyTotal}>{tx('মোট', 'Total')}: {amount(total, lang)}</Text>
-        </View>
-      </Card>
-      <View style={styles.orderSummaryCard}>
-        <Text style={styles.orderSectionTitle}>{tx('অর্ডার সারাংশ', 'Order Summary')}</Text>
-        <View style={styles.orderSummaryRow}>
-          <Text style={styles.orderSummaryLabel}>{tx('পণ্য মূল্য', 'Product price')}</Text>
-          <Text style={styles.orderSummaryValue}>{amount(total, lang)}</Text>
-        </View>
-        <View style={styles.orderSummaryRow}>
-          <Text style={styles.orderSummaryLabel}>{tx('ডেলিভারি', 'Delivery')}</Text>
-          <Text style={styles.orderSummaryValue}>{tx('ফ্রি', 'Free')}</Text>
-        </View>
-        <View style={[styles.orderSummaryRow, styles.orderSummaryTotal]}>
-          <Text style={styles.orderSummaryTotalText}>{tx('পরিশোধযোগ্য', 'Payable')}</Text>
-          <Text style={styles.orderSummaryTotalText}>{amount(total, lang)}</Text>
+        {codesAllowed ? (
+          <>
+            <View style={[ui.promoInline, { marginTop: 12 }]}>
+              <TextInput
+                style={ui.promoInput}
+                value={codeInput}
+                onChangeText={(t) => setCodeInput(t.toUpperCase())}
+                autoCapitalize="characters"
+                placeholder={tx('প্রোমো কোড', 'Promo code')}
+                placeholderTextColor={colors.muted}
+              />
+              {code ? (
+                <Pressable style={[ui.promoBtn, ui.promoBtnGhost]} onPress={() => { setCode(''); setCodeInput(''); }}><Text style={[ui.promoBtnText, { color: colors.maroon }]}>{tx('সরান', 'Remove')}</Text></Pressable>
+              ) : (
+                <Pressable style={[ui.promoBtn, !codeInput.trim() && { opacity: 0.5 }]} disabled={!codeInput.trim()} onPress={() => setCode(codeInput.trim())}><Text style={ui.promoBtnText}>{tx('প্রয়োগ', 'Apply')}</Text></Pressable>
+              )}
+            </View>
+            {code && codeStatus === 'applied' ? <Text style={[ui.promoMsg, { color: colors.green }]}>✓ {tx(`কোড প্রয়োগ হয়েছে: ${money(discount)} ছাড়`, `Code applied: ${amount(discount, lang)} off`)}</Text> : null}
+            {code && quote?.code_error ? <Text style={[ui.promoMsg, { color: '#B45309' }]}>{String(quote.code_error)}</Text> : null}
+          </>
+        ) : null}
+        <View style={{ paddingHorizontal: 14, marginTop: 12 }}>
+          <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পণ্যের দাম', 'Product price')}</Text><Text style={ui.sumVal}>{amount(subtotal, lang)}</Text></View>
+          {discount > 0 ? (
+            <View style={ui.sumLine}>
+              <Text style={[ui.sumKey, ui.sumGreen]}>{promo ? tx(String(promo.label_bn || promo.label_en || ''), String(promo.label_en || '')) : tx('ছাড়', 'Discount')}</Text>
+              <Text style={[ui.sumVal, ui.sumGreen]}>− {amount(discount, lang)}</Text>
+            </View>
+          ) : null}
+          <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('ডেলিভারি', 'Delivery')}</Text><Text style={[ui.sumVal, ui.sumGreen]}>{tx('ফ্রি', 'Free')}</Text></View>
+          <View style={ui.divider} />
+          <View style={ui.sumLine}>
+            <Text style={ui.sumTotalKey}>{tx('পরিশোধযোগ্য', 'To pay')}</Text>
+            {loading && !quote ? <ActivityIndicator color={colors.maroon} /> : <Text style={ui.sumTotalVal}>{amount(payable, lang)}</Text>}
+          </View>
         </View>
       </View>
-      <FormLabel label={tx('ডেলিভারির ঠিকানা', 'Delivery address')} />
-      <TextInput style={styles.input} value={address} onChangeText={setAddress} />
-      <FormLabel label={tx('পেমেন্ট পদ্ধতি', 'Payment method')} />
-      <FakeSelect value={paymentMethod} options={['cash', 'bkash', 'nagad', 'bank']} onChange={setPaymentMethod} />
-      <View style={styles.noteGreen}>
-        <Text style={styles.noteText}>{tx('✓ মজুদ নিশ্চিত · ডেলিভারি ২-৩ কর্মদিন', '✓ Stock confirmed · Delivery in 2-3 working days')}</Text>
-      </View>
-      {submitError ? <Text style={styles.apiNotice}>{submitError}</Text> : null}
-      <AppButton title={submitting ? tx('অর্ডার জমা হচ্ছে...', 'Placing order...') : tx(`অর্ডার করুন ${money(total)}`, `Place Order ${amount(total, lang)}`)} variant="gold" onPress={submitOrder} disabled={submitting || !product} />
+      {submitError ? <Text style={[ui.errorText, { marginHorizontal: 16 }]}>{submitError}</Text> : null}
     </>
   );
 }
 
-function BuyDone({ setScreen, qty, product, order }: { setScreen: (screen: Screen) => void; qty: number; product: ApiRow | null; order: ApiRow | null }) {
+function BuyDone({ setScreen, qty, product, order, onOpenOrder }: {
+  setScreen: (screen: Screen) => void;
+  qty: number;
+  product: ApiRow | null;
+  order: ApiRow | null;
+  onOpenOrder: (orderId: string) => void;
+}) {
   const { tx, lang } = useLanguage();
+  const discount = Number(order?.discount_amount || 0);
+  const payable = Number(order?.payable_amount || 0);
+  const saved = discount > 0
+    ? tx(` ${money(discount)} ছাড় পেয়েছেন — পরিশোধ করবেন ${money(payable)}।`, ` You saved ${amount(discount, lang)} — you pay ${amount(payable, lang)}.`)
+    : '';
   return (
     <SuccessScreen
       icon="🎉"
-      title={tx('অর্ডার সম্পন্ন!', 'Order Complete!')}
+      title={tx('অর্ডার সম্পন্ন!', 'Order placed!')}
       refNo={order?.order_code || 'ORD-APP'}
-      desc={tx(`${bn(qty)} × ${rowTitle(product || undefined, 'bn', 'পণ্য')} অর্ডার গৃহীত হয়েছে। স্টক যাচাইয়ের পর নিশ্চিত করা হবে — 'আমার অর্ডার'-এ অবস্থা দেখুন।`, `${num(qty, lang)} × ${rowTitle(product || undefined, 'en', 'Product')} order placed. We will confirm it after a quick stock check — track it in My Orders.`)}
+      desc={tx(
+        `${bn(qty)} ${unitLabel(product?.unit, 'bn')} ${rowTitle(product || undefined, 'bn', 'পণ্য')} অর্ডার গৃহীত হয়েছে। স্টক যাচাইয়ের পর নিশ্চিত করা হবে।${saved}`,
+        `${num(qty, lang)} ${unitLabel(product?.unit, 'en')} of ${rowTitle(product || undefined, 'en', 'Product')} ordered. We will confirm it after a quick stock check.${saved}`,
+      )}
       action={() => setScreen('home')}
+      primary={order?.id ? { title: tx('অর্ডারের বিবরণ দেখুন', 'View order details'), onPress: () => onOpenOrder(String(order.id)) } : undefined}
       gold
     />
+  );
+}
+
+const PAY_STATUS: Record<string, [string, string]> = {
+  pending: ['পেমেন্ট বাকি', 'Payment pending'],
+  paid: ['পরিশোধিত', 'Paid'],
+  failed: ['পেমেন্ট ব্যর্থ', 'Payment failed'],
+  refunded: ['ফেরত দেওয়া হয়েছে', 'Refunded'],
+};
+
+function OrderDetail({ setScreen, orderId, onBack }: { setScreen: (screen: Screen) => void; orderId: string | null; onBack: () => void }) {
+  const { tx, lang } = useLanguage();
+  const state = useApiObject<ApiRow>(orderId ? `app/orders/detail?order_id=${encodeURIComponent(orderId)}` : null);
+  const d = state.data;
+  const o = (d?.order ?? null) as ApiRow | null;
+  const items = (Array.isArray(d?.items) ? d.items : []) as ApiRow[];
+  const promo = (d?.promotion ?? null) as ApiRow | null;
+  const dist = (d?.distributor ?? null) as ApiRow | null;
+  const pick = (bn: unknown, en: unknown) => String((lang === 'bn' ? bn || en : en || bn) || '');
+  const status = String(o?.fulfillment_status || 'placed');
+  const badge = orderStatusBadge(status, tx);
+  const pay = PAY_STATUS[String(o?.payment_status || 'pending')] ?? PAY_STATUS.pending;
+  const method = PAY_METHODS.find((m) => m.id === String(o?.payment_method)) ?? null;
+  const area = o ? [pick(o.upazila_bn, o.upazila), pick(o.district_bn, o.district), pick(o.division_bn, o.division)].filter(Boolean).join(', ') : '';
+
+  return (
+    <>
+      <Header title={tx('অর্ডারের বিবরণ', 'Order details')} onBack={onBack} />
+      {state.loading ? (
+        <>
+          <View style={[ui.dHero, { gap: 10 }]}><Skeleton width="40%" style={{ backgroundColor: 'rgba(255,255,255,0.25)' }} /><Skeleton width="60%" height={20} style={{ backgroundColor: 'rgba(255,255,255,0.25)' }} /></View>
+          <ListSkeleton variant="row" count={3} />
+        </>
+      ) : null}
+      {!state.loading && !o ? (
+        <View style={ui.emptyBox}>
+          <Text style={ui.emptyIcon}>🧾</Text>
+          <Text style={ui.emptyTitle}>{tx('অর্ডারটি পাওয়া যায়নি', 'Order not found')}</Text>
+          <Text style={ui.emptyText}>{state.error || tx('এটি সরানো হয়েছে অথবা আপনার নয়।', 'It may have been removed, or it is not yours.')}</Text>
+        </View>
+      ) : null}
+      {o ? (
+        <>
+          <View style={ui.dHero}>
+            <Text style={ui.dHeroKicker}>{String(o.order_code)} · {formatDate(String(o.created_at), lang)}</Text>
+            <Text style={ui.dHeroTitle}>{badge.label}</Text>
+            <Text style={ui.dHeroSub}>{status === 'placed' ? tx('স্টক যাচাই চলছে — নিশ্চিত হলে জানাবো।', "We're checking stock — you'll hear once it's confirmed.") : status === 'cancelled' ? tx('অর্ডারটি বাতিল হয়েছে।', 'This order was cancelled.') : tx('অর্ডারের অবস্থা নিচে দেখুন।', 'Follow its progress below.')}</Text>
+            <View style={ui.dHeroRow}>
+              <Text style={ui.dHeroAmount}>{amount(Number(o.payable_amount || 0), lang)}</Text>
+              <View style={ui.dHeroBadge}><Text style={ui.dHeroBadgeText}>{tx(pay[0], pay[1])}</Text></View>
+            </View>
+          </View>
+
+          {d?.cancelled ? (
+            <View style={styles.infoBar}><Text style={styles.infoText}>{tx('অর্ডারটি বাতিল হয়েছে। কোনো ছাড় থাকলে তা পরের অর্ডারে পাবেন।', 'This order was cancelled. Any discount on it is kept for your next order.')}</Text></View>
+          ) : (
+            <>
+              <SectionTitle title={tx('অর্ডারের অবস্থা', 'Order timeline')} />
+              <ProgressTrail steps={(d?.steps as ProgressStep[]) || []} />
+            </>
+          )}
+
+          <View style={ui.dCard}>
+            <Text style={ui.dCardTitle}>{tx('পণ্য', 'Items')}</Text>
+            {items.map((it, i) => (
+              <View key={`${it.product_id}-${i}`} style={[ui.dItem, i > 0 && { borderTopWidth: 1, borderColor: '#F3E8EE' }]}>
+                {it.image_url ? <Image source={{ uri: String(it.image_url) }} style={ui.lineThumb} /> : <View style={[ui.lineThumb, { alignItems: 'center', justifyContent: 'center' }]}><Text>🛒</Text></View>}
+                <View style={styles.flex}>
+                  <Text style={ui.lineName} numberOfLines={2}>{pick(it.name_bn, it.name_en)}</Text>
+                  <Text style={ui.lineMeta}>{num(Number(it.quantity || 0), lang)} {unitLabel(it.unit, lang)} × {amount(Number(it.unit_price || 0), lang)}</Text>
+                  {it.manufacturer_name ? <Text style={ui.lineMeta}>🏭 {pick(it.manufacturer_name_bn, it.manufacturer_name)}</Text> : null}
+                </View>
+                <Text style={ui.sumVal}>{amount(Number(it.line_total || 0), lang)}</Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={ui.dCard}>
+            <Text style={ui.dCardTitle}>{tx('ডেলিভারি', 'Delivery')}</Text>
+            <View style={ui.sumLine}><Text style={ui.sumKey}>📍 {tx('ঠিকানা', 'Address')}</Text></View>
+            <Text style={[ui.bodyText, { marginBottom: 6 }]}>{[String(o.delivery_address || '').split(',')[0], area].filter(Boolean).join(', ')}</Text>
+            {dist ? (
+              <BrandRow
+                kicker={tx('পরিবেশক', 'Delivered by')}
+                name={pick(dist.name_bn, dist.name_en)}
+                sub={dist.phone ? `📞 ${dist.phone}` : pick(dist.area_bn, dist.area_en)}
+                logo={dist.logo_url ? String(dist.logo_url) : null}
+                icon="🚚"
+                border
+                onPress={dist.phone ? () => Linking.openURL(`tel:${String(dist.phone).replace(/[^0-9+]/g, '')}`) : undefined}
+              />
+            ) : <Text style={ui.lineMeta}>🏭 {tx('প্রস্তুতকারক সরাসরি পাঠাবে', 'Shipped direct by the maker')}</Text>}
+          </View>
+
+          <View style={ui.dCard}>
+            <Text style={ui.dCardTitle}>{tx('পেমেন্ট', 'Payment')}</Text>
+            <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পণ্যের দাম', 'Product price')}</Text><Text style={ui.sumVal}>{amount(Number(o.total_amount || 0), lang)}</Text></View>
+            {Number(o.discount_amount || 0) > 0 ? (
+              <View style={ui.sumLine}>
+                <Text style={[ui.sumKey, ui.sumGreen]}>{promo?.source === 'first_purchase' ? tx('প্রথম কেনাকাটার ছাড়', 'First purchase discount') : promo?.source === 'voucher' ? tx('ভাউচার', 'Voucher') : tx(`প্রোমো ${promo?.code ?? ''}`, `Promo ${promo?.code ?? ''}`)}</Text>
+                <Text style={[ui.sumVal, ui.sumGreen]}>− {amount(Number(o.discount_amount), lang)}</Text>
+              </View>
+            ) : null}
+            <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('ডেলিভারি', 'Delivery')}</Text><Text style={[ui.sumVal, ui.sumGreen]}>{Number(o.delivery_fee || 0) > 0 ? amount(Number(o.delivery_fee), lang) : tx('ফ্রি', 'Free')}</Text></View>
+            <View style={ui.divider} />
+            <View style={ui.sumLine}><Text style={ui.sumTotalKey}>{tx('মোট পরিশোধযোগ্য', 'Total to pay')}</Text><Text style={ui.sumTotalVal}>{amount(Number(o.payable_amount || 0), lang)}</Text></View>
+            <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পদ্ধতি', 'Method')}</Text><Text style={ui.sumVal}>{method ? tx(method.bn, method.en) : String(o.payment_method || '')} · {tx(pay[0], pay[1])}</Text></View>
+            {promo?.status === 'released' ? <Text style={[ui.lineMeta, { color: colors.green }]}>{tx('এই অর্ডারের ছাড় আপনাকে ফেরত দেওয়া হয়েছে।', 'The discount on this order was returned to you.')}</Text> : null}
+          </View>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -5410,11 +6722,11 @@ function PartnerRegister({ setScreen }: { setScreen: (screen: Screen) => void })
             <Text style={styles.projectProgress}>{num(project.capacity || 0, lang)} {tx('জন', 'farmers')}</Text>
           </View>
           <Text style={styles.projectName}>{rowTitle(project, lang, tx('প্রকল্প', 'Project'))}</Text>
-          <Text style={styles.productSub}>⌖ {project.district || ''} · {project.upazila || ''}</Text>
+          <Text style={styles.productSub}>📍 {[lang === 'bn' ? project.district_bn || project.district : project.district, lang === 'bn' ? project.upazila_bn || project.upazila : project.upazila].filter(Boolean).join(' · ')}</Text>
           <View style={styles.progressBar}>
             <View style={styles.progressFill} />
           </View>
-          <Text style={styles.productSub}>{tx('ঋণ সহায়তা', 'Lender')}: {project.lender_name || 'N/A'} · {tx('সর্বোচ্চ', 'Up to')} {amount(Number(project.max_credit_amount || 0), lang)}</Text>
+          <Text style={styles.productSub}>{tx('ঋণ সহায়তা', 'Lender')}: {project.lender_name || tx('নেই', 'N/A')} · {tx('সর্বোচ্চ', 'Up to')} {amount(Number(project.max_credit_amount || 0), lang)}</Text>
           {project.status === 'open' ? <AppButton title={tx('এই প্রকল্পে আবেদন করুন  →', 'Apply for this project  →')} onPress={() => setScreen('kyc')} /> : null}
         </Card>
       ))}
@@ -5490,6 +6802,7 @@ function Kyc({ setScreen, projectId, onSubmitted }: { setScreen: (screen: Screen
       onSubmitted({ application_code: result.application_code, id: result.application_id });
       setScreen('regDone');
     } catch (error) {
+      if (apiErrorCode(error) === 'geo_locked') { setScreen('geoLocked'); return; }
       setSubmitError(naturalApiError(error, lang));
     } finally {
       setSubmitting(false);
@@ -5607,7 +6920,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   async function pickPostImage() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
     if (!result.canceled) setPostImage(result.assets[0].uri);
   }
 
@@ -5625,8 +6938,6 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
         post_type: 'general',
         body,
         image_url: imageUrl,
-        district: user?.district || 'Mymensingh',
-        upazila: user?.upazila || 'Mymensingh Sadar',
         status: 'visible',
       });
       setLocalPosts((current) => [{ farmer_name: user?.display_name || user?.full_name, body, image_url: imageUrl, post_type: 'general', like_count: 0, comment_count: 0, created_at: new Date().toISOString() }, ...current]);
@@ -5794,30 +7105,86 @@ const PROJECT_CAT_EMOJI: Record<string, string> = {
   'livestock-poultry': '🐄', crops: '🌾', fishery: '🐟', vegetables: '🥬', fruits: '🥭', inputs: '🌱', machinery: '🚜',
 };
 
+/** Loan partner logos stored on the project: [{ name, logo_url }]. */
+function partnerLogos(value: unknown): Array<{ name: string; logo_url: string }> {
+  let list: unknown = value;
+  if (typeof value === 'string') {
+    try { list = JSON.parse(value); } catch { list = []; }
+  }
+  return (Array.isArray(list) ? list : [])
+    .filter((l): l is { name: string; logo_url: string } => Boolean(l) && typeof (l as { logo_url?: unknown }).logo_url === 'string')
+    .slice(0, 4);
+}
+
+/**
+ * A lender's logo at a fixed height, as wide as its own proportions need.
+ * Fixed width + "contain" made a wide logo (BRAC Bank, 8:1) come out half the
+ * height of a squarer one (DigiGram, 4:1) beside it.
+ */
+function PartnerLogo({ uri, name, height = 16 }: { uri: string; name: string; height?: number }) {
+  const [aspect, setAspect] = useState(4);
+  return (
+    <Image
+      source={{ uri }}
+      accessibilityLabel={name}
+      resizeMode="contain"
+      style={{ height, width: Math.round(height * aspect) }}
+      onLoad={(e) => {
+        const s = (e.nativeEvent as { source?: { width?: number; height?: number } }).source;
+        if (s?.width && s?.height) setAspect(s.width / s.height);
+      }}
+    />
+  );
+}
+
+/** A project's timeframe in the reader's language. */
+function durationText(row: ApiRow, lang: string): string {
+  return String((lang === 'bn' ? row.duration_label_bn || row.duration_label : row.duration_label) || '');
+}
+
 function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () => void }) {
   const { tx, lang } = useLanguage();
   const emoji = PROJECT_CAT_EMOJI[String(project.interest_slug)] || '📦';
-  const region = [project.upazila, project.district, project.division].filter(Boolean).join(', ');
+  const region = (lang === 'bn'
+    ? [project.upazila_bn || project.upazila, project.district_bn || project.district, project.division_bn || project.division]
+    : [project.upazila, project.district, project.division]).filter(Boolean).join(', ');
   // A project can be withdrawn from the market while the farmers already in it
   // carry on. `is_active = 0` closes new applications; it does not close the
   // project.
   const acceptingApplications = Number(project.is_active ?? 1) === 1 && project.status === 'open';
-  const open = acceptingApplications;
   const modelLine = lang === 'bn' ? String(project.model_bn || project.model_en || '') : String(project.model_en || '');
   const incomeLabel = lang === 'bn' ? String(project.income_label_bn || '') : String(project.income_label_en || '');
   const capacityLabel = lang === 'bn' ? String(project.capacity_label_bn || '') : String(project.capacity_label_en || '');
   const loanPartners = lang === 'bn' ? String(project.loan_partners_bn || project.loan_partners_en || '') : String(project.loan_partners_en || '');
   const matches = Number(project.matches_interest) === 1;
+  const logos = partnerLogos(project.loan_partner_logos);
+  const duration = durationText(project, lang);
+  // Income where the project pays the farmer, investment where the farmer pays
+  // in. A buy-back project has no investment at all, and a blank or zero there
+  // read as "costs nothing yet".
+  const stats = [
+    duration ? { icon: '⏱', label: tx('মেয়াদ', 'Duration'), value: duration } : null,
+    Number(project.income_amount) > 0
+      ? { icon: '💰', label: tx('আয়', 'Income'), value: incomeLabel || amount(Number(project.income_amount), lang) }
+      : Number(project.investment_amount) > 0
+        ? { icon: '💼', label: tx('বিনিয়োগ', 'Investment'), value: amount(Number(project.investment_amount), lang) }
+        : null,
+    capacityLabel
+      ? { icon: '👥', label: tx('অংশগ্রহণ', 'Capacity'), value: capacityLabel }
+      : Number(project.capacity) > 0
+        ? { icon: '👥', label: tx('আসন', 'Seats'), value: `${num(Number(project.enrolled || 0), lang)}/${num(Number(project.capacity), lang)}` }
+        : null,
+  ].filter(Boolean) as Array<{ icon: string; label: string; value: string }>;
   return (
     <Card style={styles.projCard}>
       <View style={styles.projImageWrap}>
         {project.image_url ? <Image source={{ uri: String(project.image_url) }} style={styles.projImage} /> : <View style={[styles.projImage, styles.projImagePlaceholder]}><Text style={styles.projImageEmoji}>{emoji}</Text></View>}
         {matches ? <View style={styles.projTag}><Text style={styles.projTagText}>{tx('আপনার আগ্রহ', 'Your interest')}</Text></View> : null}
-        <View style={[styles.projStatusPill, open ? styles.projStatusOpen : styles.projStatusSoon]}>
-          <Text style={styles.projStatusText}>{open ? tx('নিবন্ধন চলছে', 'Open') : tx('শীঘ্রই', 'Soon')}</Text>
+        <View style={[styles.projStatusPill, acceptingApplications ? styles.projStatusOpen : styles.projStatusSoon]}>
+          <Text style={styles.projStatusText}>{acceptingApplications ? tx('নিবন্ধন চলছে', 'Open') : tx('শীঘ্রই', 'Soon')}</Text>
         </View>
         {region ? (
-          <View style={styles.projRegionTag}><Text style={styles.projRegionTagText} numberOfLines={1}>⌖ {region}</Text></View>
+          <View style={styles.projRegionTag}><Text style={styles.projRegionTagText} numberOfLines={1}>📍 {region}</Text></View>
         ) : null}
       </View>
       <View style={styles.projBody}>
@@ -5825,23 +7192,37 @@ function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () =>
         {modelLine ? <Text style={styles.projModel}>{modelLine}</Text> : null}
         {Number(project.region_based) === 0 ? <Text style={styles.projMeta}>🌐 {tx('সব অঞ্চলের জন্য উন্মুক্ত', 'Open to all regions')}</Text> : null}
         {project.summary_en || project.summary_bn ? <Text style={styles.projSummary} numberOfLines={2}>{rowBody(project, lang, '')}</Text> : null}
-        <View style={styles.projStatsRow}>
-          {project.duration_label ? <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('মেয়াদ', 'Duration')}</Text><Text style={styles.projStatValue}>{String(project.duration_label)}</Text></View> : null}
-          {/* Income where the project pays the farmer, investment where the
-              farmer pays in. A buy-back project has no investment at all, and
-              showing a blank or zero there read as "costs nothing yet". */}
-          {Number(project.income_amount) > 0 ? (
-            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('আয়', 'Income')}</Text><Text style={styles.projStatValue}>{incomeLabel || amount(Number(project.income_amount), lang)}</Text></View>
-          ) : Number(project.investment_amount) > 0 ? (
-            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('বিনিয়োগ', 'Investment')}</Text><Text style={styles.projStatValue}>{amount(Number(project.investment_amount), lang)}</Text></View>
-          ) : null}
-          {capacityLabel ? (
-            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('অংশগ্রহণ', 'Capacity')}</Text><Text style={styles.projStatValue}>{capacityLabel}</Text></View>
-          ) : Number(project.capacity) > 0 ? (
-            <View style={styles.projStat}><Text style={styles.projStatLabel}>{tx('আসন', 'Seats')}</Text><Text style={styles.projStatValue}>{num(Number(project.enrolled || 0), lang)}/{num(Number(project.capacity), lang)}</Text></View>
-          ) : null}
-        </View>
-        {loanPartners ? <View style={styles.projPartner}><Text style={styles.projPartnerText}>🏦 {loanPartners}</Text></View> : null}
+        {stats.length ? (
+          <View style={ui.projStats}>
+            {stats.map((s, i) => (
+              <View key={s.label} style={{ flex: 1, flexDirection: 'row' }}>
+                {i > 0 ? <View style={ui.projStatDivider} /> : null}
+                <View style={ui.projStat}>
+                  <Text style={ui.projStatIcon}>{s.icon}</Text>
+                  <Text style={ui.projStatLabel}>{s.label}</Text>
+                  <Text style={ui.projStatValue} numberOfLines={2}>{s.value}</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        ) : null}
+        {loanPartners || logos.length ? (
+          <View style={ui.partnerStrip}>
+            {loanPartners ? <Text style={ui.partnerText}>🏦 {loanPartners}</Text> : null}
+            {/* Small and quiet: the lenders' marks under their names, joined
+                by a collaboration "×", all at one height. */}
+            {logos.length ? (
+              <View style={ui.partnerLogos}>
+                {logos.map((logo, i) => (
+                  <View key={logo.logo_url} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    {i > 0 ? <Text style={ui.partnerX}>×</Text> : null}
+                    <PartnerLogo uri={logo.logo_url} name={logo.name} />
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
         {project.market_overview_en || project.market_overview_bn ? (
           <View style={styles.projOverview}><Text style={styles.projOverviewText}>📈 {lang === 'bn' ? (project.market_overview_bn || project.market_overview_en) : (project.market_overview_en || project.market_overview_bn)}</Text></View>
         ) : null}
@@ -5891,7 +7272,7 @@ function ProjectMineCard({ project, onOpen }: { project: ApiRow; onOpen?: () => 
           {!project.image_url ? <Badge label={approved ? tx('সক্রিয়', 'Active') : tEnum(project.application_status, lang)} tone={approved ? 'green' : 'gold'} /> : null}
         </View>
         {region ? <Text style={styles.projMeta}>⌖ {region}</Text> : null}
-        {dates ? <Text style={styles.projMeta}>🗓 {dates}{project.duration_label ? ` · ${project.duration_label}` : ''}</Text> : null}
+        {dates ? <Text style={styles.projMeta}>🗓 {dates}{durationText(project, lang) ? ` · ${durationText(project, lang)}` : ''}</Text> : null}
         {project.application_code ? <Text style={styles.projMeta}>{tx('আবেদন', 'Application')}: {String(project.application_code)}</Text> : null}
 
         <Text style={styles.projTimelineTitle}>{tx('আবেদন অগ্রগতি', 'Application progress')}</Text>
@@ -6033,70 +7414,126 @@ function listingStatusTone(s: string): 'green' | 'gold' | 'rose' | 'blue' {
   return s === 'active' ? 'green' : s === 'rejected' || s === 'cancelled' ? 'rose' : s === 'sold' ? 'blue' : 'gold';
 }
 
+// The step a listing stands on, as on the server (lib/endpoints/progress.ts).
+const LISTING_STAGE: Record<string, number> = {
+  draft: 0, submitted: 1, field_verification: 1, verified: 2, active: 3, contracted: 4, sold: 4, shipped: 5, paid: 6, rejected: -1, cancelled: -1,
+};
+
+const LISTING_STATUS: Record<string, { bn: string; en: string; tone: 'green' | 'gold' | 'rose' | 'blue' }> = {
+  draft: { bn: 'খসড়া', en: 'Draft', tone: 'gold' },
+  submitted: { bn: 'জমা হয়েছে · মাঠ যাচাইয়ের অপেক্ষায়', en: 'Submitted · awaiting field visit', tone: 'gold' },
+  field_verification: { bn: 'মাঠ যাচাই চলছে', en: 'Field verification', tone: 'gold' },
+  verified: { bn: 'যাচাই সম্পন্ন · অনুমোদনের অপেক্ষায়', en: 'Verified · awaiting approval', tone: 'blue' },
+  active: { bn: 'অনুমোদিত · ক্রেতা খোঁজা হচ্ছে', en: 'Approved · finding a buyer', tone: 'blue' },
+  contracted: { bn: 'ক্রয় চুক্তি হয়েছে', en: 'Purchase contract accepted', tone: 'blue' },
+  sold: { bn: 'ক্রয় চুক্তি হয়েছে', en: 'Purchase contract accepted', tone: 'blue' },
+  shipped: { bn: 'পাঠানো হয়েছে · পেমেন্টের অপেক্ষায়', en: 'Shipped · payment next', tone: 'blue' },
+  paid: { bn: 'পরিশোধিত', en: 'Paid', tone: 'green' },
+  rejected: { bn: 'বাতিল হয়েছে', en: 'Rejected', tone: 'rose' },
+  cancelled: { bn: 'বাতিল হয়েছে', en: 'Cancelled', tone: 'rose' },
+};
+
+function listingTitle(l: ApiRow, lang: string): string {
+  const names = lang === 'bn'
+    ? [l.animal_name_bn || l.animal_name, l.breed_name_bn || l.breed_name]
+    : [l.animal_name, l.breed_name];
+  const joined = names.filter(Boolean).join(' · ');
+  return joined || rowTitle(l, lang as Lang, String(l.item_name || 'Listing'));
+}
+
+function listingPhotos(l: ApiRow): string[] {
+  const raw = l.media_json;
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? (() => { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; } })() : [];
+  return list.map(String).filter((u) => /^https?:\/\//.test(u));
+}
+
+function ListingCard({ listing, onOpen }: { listing: ApiRow; onOpen?: () => void }) {
+  const { tx, lang } = useLanguage();
+  const status = String(listing.status || 'submitted');
+  const meta = LISTING_STATUS[status] ?? LISTING_STATUS.submitted;
+  const [bg, fg] = orderTone(meta.tone);
+  const stage = LISTING_STAGE[status] ?? 1;
+  const photo = listingPhotos(listing)[0];
+  const live = Number(listing.verified_weight_kg || listing.weight_kg || 0);
+  const meat = Number(listing.meat_weight_kg || 0);
+  const paid = Number(listing.paid_amount || 0);
+  return (
+    <Pressable disabled={!onOpen} onPress={onOpen} style={({ pressed }) => [ui.oCard, pressed && !!onOpen && styles.pressed]} accessibilityRole="button">
+      <View style={ui.oTop}>
+        {photo ? <Image source={{ uri: photo }} style={ui.oThumb} /> : <View style={ui.oThumbPh}><Text style={{ fontSize: 26 }}>🐄</Text></View>}
+        <View style={styles.flex}>
+          <Text style={ui.oCode}>{String(listing.listing_code || '')} · {formatDate(String(listing.created_at), lang)}</Text>
+          <Text style={ui.oTitle} numberOfLines={2}>{listingTitle(listing, lang)}</Text>
+          <Text style={ui.oMeta} numberOfLines={1}>
+            {[
+              live > 0 ? `${Number(listing.verified_weight_kg || 0) > 0 ? '✓ ' : ''}${tx('জীবিত', 'Live')} ${num(live, lang)} ${tx('কেজি', 'kg')}` : '',
+              meat > 0 ? `${tx('মাংস', 'Meat')} ${num(Math.round(meat), lang)} ${tx('কেজি', 'kg')}` : '',
+              Number(listing.quantity || 1) > 1 ? `${num(Number(listing.quantity), lang)} ${tx('টি', 'head')}` : '',
+            ].filter(Boolean).join('  ·  ')}
+          </Text>
+          <View style={[ui.statusPill, { backgroundColor: bg }]}><Text style={[ui.statusPillText, { color: fg }]}>{tx(meta.bn, meta.en)}</Text></View>
+        </View>
+      </View>
+      {stage >= 0 ? (
+        <View style={ui.miniSteps}>
+          {[0, 1, 2, 3, 4, 5].map((i) => <View key={i} style={[ui.miniStep, i < stage && ui.miniStepDone, i === stage && ui.miniStepCurrent]} />)}
+        </View>
+      ) : null}
+      <View style={ui.oFoot}>
+        <View>
+          <Text style={ui.barKey}>{paid > 0 ? tx('পরিশোধিত', 'Paid') : tx('আনুমানিক আয়', 'Estimated earning')}</Text>
+          <Text style={ui.oAmount}>{amount(paid || Number(listing.estimated_earning || 0), lang)}</Text>
+        </View>
+        {onOpen ? (
+          <View style={ui.oLink}>
+            <Text style={ui.oLinkText}>{tx('বিস্তারিত', 'Details')}</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.maroon} />
+          </View>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
 function MyListingsBody({ setScreen, onOpenProgress }: { setScreen: (screen: Screen) => void; onOpenProgress?: (listingId: string) => void }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
   const listings = useApiList<ApiRow>(`app/sale/my-listings${uid}`);
   const rows = listings.rows;
-  const pendingCount = rows.filter((l) => l.status === 'submitted' || l.status === 'field_verification').length;
+  const open = rows.filter((l) => !['paid', 'rejected', 'cancelled'].includes(String(l.status)));
+  const closed = rows.filter((l) => ['paid', 'rejected', 'cancelled'].includes(String(l.status)));
+  const earned = rows.reduce((s, l) => s + Number(l.paid_amount || 0), 0);
   return (
     <>
-      {/* header rendered by wrapper */}
-      {pendingCount > 0 ? (
-        <View style={styles.infoBar}>
-          <Text style={styles.infoText}>{tx(`ⓘ ${num(pendingCount, lang)}টি তালিকা অনুমোদনের অপেক্ষায়। অনুমোদনের পর "শাথী থেকে কিনুন"-এ দেখা যাবে।`, `ⓘ ${pendingCount} listing(s) awaiting approval. Once approved they appear in Buy from Shathi.`)}</Text>
+      {rows.length ? (
+        <View style={ui.projStats}>
+          <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('চলমান', 'Active')}</Text><Text style={[ui.projStatValue, { fontSize: 18 }]}>{num(open.length, lang)}</Text></View>
+          <View style={ui.projStatDivider} />
+          <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('সম্পন্ন', 'Completed')}</Text><Text style={[ui.projStatValue, { fontSize: 18 }]}>{num(closed.filter((l) => l.status === 'paid').length, lang)}</Text></View>
+          <View style={ui.projStatDivider} />
+          <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('মোট আয়', 'Earned')}</Text><Text style={[ui.projStatValue, { fontSize: 15 }]}>{amount(earned, lang)}</Text></View>
         </View>
       ) : null}
-      {listings.loading ? <ApiStatus state={listings} /> : null}
+      {listings.loading && !rows.length ? <ListSkeleton variant="card" count={3} /> : null}
       {!listings.loading && rows.length === 0 ? (
-        <View style={styles.projEmpty}>
-          <Text style={styles.projEmptyIcon}>🏷️</Text>
-          <Text style={styles.projEmptyTitle}>{tx('এখনো কোনো তালিকা নেই', 'No listings yet')}</Text>
-          <Text style={styles.projEmptyText}>{tx('পশু বা কৃষি উপকরণ ন্যায্য দরে বিক্রি করতে তালিকা দিন।', 'List livestock or farm inputs to sell at a fair rate.')}</Text>
+        <View style={ui.emptyBox}>
+          <Text style={ui.emptyIcon}>🏷️</Text>
+          <Text style={ui.emptyTitle}>{tx('এখনো কোনো তালিকা নেই', 'No listings yet')}</Text>
+          <Text style={ui.emptyText}>{tx('পশু বা কৃষি উপকরণ ন্যায্য দরে বিক্রি করতে তালিকা দিন।', 'List livestock or farm inputs to sell at a fair rate.')}</Text>
           <AppButton title={tx('বিক্রির তালিকা দিন', 'List for sale')} onPress={() => setScreen('saleCategories')} />
         </View>
       ) : null}
-      {rows.map((l) => {
-        const media = Array.isArray(l.media_json) ? (l.media_json as unknown[]) : [];
-        const img = media.length ? String(media[0]) : '';
-        const status = String(l.status || 'submitted');
-        const isPending = status === 'submitted' || status === 'field_verification';
-        const visitDate = l.field_visit_date ? formatDate(l.field_visit_date, lang) : '';
-        // The whole card opens the progress trail — a status badge alone never
-        // answered "and what happens next?".
-        const open = onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined;
-        return (
-          <Pressable key={String(l.id)} onPress={open} disabled={!open} style={({ pressed }) => [styles.listingCard, pressed && open ? styles.pressed : null]}>
-            {img
-              ? <Image source={{ uri: img }} style={styles.listingCardImage} resizeMode="cover" />
-              : <View style={styles.listingCardImagePh}><Text style={styles.buyCardImagePhText}>🏷️</Text></View>}
-            <View style={styles.listingCardBody}>
-              <Text style={styles.productTitle} numberOfLines={1}>{rowTitle(l, lang, String(l.item_name || 'Listing'))}</Text>
-              <Text style={styles.productSub} numberOfLines={1}>
-                {[l.item_name ? tEnum(l.category_slug, lang) || String(l.item_name) : '', `${num(Number(l.quantity || 1), lang)} ${l.unit || ''}`].filter(Boolean).join(' · ')}
-              </Text>
-              <Text style={styles.buyCardPack}>{new Date(String(l.created_at)).toLocaleDateString()}</Text>
-              <View style={styles.buyCardFoot}>
-                <Text style={styles.productPrice}>{amount(Number(l.farmer_expected_price || 0), lang)}<Text style={styles.unit}> /{l.unit || ''}</Text></Text>
-                <Badge label={isPending ? tx('অনুমোদনের অপেক্ষায়', 'Pending approval') : tEnum(status, lang)} tone={listingStatusTone(status)} />
-              </View>
-              <Text style={styles.trailDesc}>
-                {status === 'paid' && l.paid_at
-                  ? tx(`পরিশোধিত · ${formatDate(l.paid_at, lang)}`, `Paid · ${formatDate(l.paid_at, lang)}`)
-                  : visitDate
-                    ? tx(`মাঠ পরিদর্শন · ${visitDate}`, `Field visit · ${visitDate}`)
-                    : tx('অগ্রগতি দেখতে ট্যাপ করুন →', 'Tap to see progress →')}
-              </Text>
-            </View>
-          </Pressable>
-        );
-      })}
+      {open.length ? <SectionTitle title={tx('চলমান তালিকা', 'In progress')} /> : null}
+      {open.map((l) => <ListingCard key={String(l.id)} listing={l} onOpen={onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined} />)}
+      {closed.length ? <SectionTitle title={tx('আগের তালিকা', 'Past listings')} /> : null}
+      {closed.map((l) => <ListingCard key={String(l.id)} listing={l} onOpen={onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined} />)}
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
+
 // Progress trails
 // ---------------------------------------------------------------------------
 
@@ -6110,6 +7547,7 @@ type ProgressStep = {
   state: 'done' | 'current' | 'upcoming';
   date: string | null;
   note: string | null;
+  note_bn?: string | null;
 };
 
 type ProgressPayload = {
@@ -6121,6 +7559,8 @@ type ProgressPayload = {
   officer?: { name?: string; phone?: string; area?: string } | null;
   listing?: ApiRow;
   application?: ApiRow;
+  /** Sale listings: the price rule's breakdown (lib/pricing.ts ruleFees). */
+  pricing?: ApiRow | null;
 };
 
 /** One-shot fetch of a single object. `useApiList` only speaks in arrays. */
@@ -6170,7 +7610,7 @@ function ProgressTrail({ steps }: { steps: ProgressStep[] }) {
                   <Text style={styles.trailCurrentPillText}>{tx('এখন এই ধাপে', 'HAPPENING NOW')}</Text>
                 </View>
               ) : null}
-              {step.note ? <Text style={styles.trailNote}>{step.note}</Text> : null}
+              {step.note ? <Text style={styles.trailNote}>{tx(step.note_bn || step.note, step.note)}</Text> : null}
             </View>
           </View>
         );
@@ -6193,6 +7633,7 @@ function OfficerCard({ officer }: { officer: { name?: string; phone?: string; ar
   );
 }
 
+/** One listing in full: photos, where it stands, the price it was quoted on, and who is handling it. */
 function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen) => void; listingId: string | null }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
@@ -6202,54 +7643,123 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
   const state = useApiObject<ProgressPayload>(resource);
   const data = state.data;
   const listing = (data?.listing ?? {}) as ApiRow;
+  const pricing = (data?.pricing ?? null) as ApiRow | null;
+  const photos = listingPhotos(listing);
+  const status = String(listing.status || 'submitted');
+  const meta = LISTING_STATUS[status] ?? LISTING_STATUS.submitted;
   const live = Number(listing.weight_kg || 0);
+  const verified = Number(listing.verified_weight_kg || 0);
   const meat = Number(listing.meat_weight_kg || 0) || (live * (Number(listing.dressing_pct) || DEFAULT_DRESSING_PCT)) / 100;
+  const paid = Number(listing.paid_amount || 0);
+  const basisWeight = verified || live;
+  const place = (lang === 'bn'
+    ? [listing.upazila_name_bn || listing.upazila_name, listing.district_name_bn || listing.district_name]
+    : [listing.upazila_name, listing.district_name]).filter(Boolean).join(', ');
+  const fee = (f: ApiRow | undefined) => Number(f?.amount ?? 0);
+  const feeSub = (f: ApiRow | undefined) => (f?.mode === 'pct' && f.pct ? tx(`জীবিত দামের ${num(Number(f.pct), 'bn')}%`, `${num(Number(f.pct), 'en')}% of the live price`) : tx('প্রতি কেজি', 'per kg'));
 
   return (
     <>
-      <Header title={tx('তালিকার অগ্রগতি', 'Listing Progress')} onBack={() => setScreen('myListings')} />
-      {state.loading ? <Text style={styles.fieldHint}>{tx('অগ্রগতি আনা হচ্ছে...', 'Loading progress...')}</Text> : null}
+      <Header title={tx('তালিকার বিবরণ', 'Listing details')} onBack={() => setScreen('myListings')} />
+      {state.loading ? (
+        <>
+          <View style={{ paddingHorizontal: 16, marginTop: 12 }}><Skeleton height={150} radius={14} /></View>
+          <ListSkeleton variant="row" count={3} />
+        </>
+      ) : null}
       {!state.loading && !data ? (
-        <View style={styles.projEmpty}>
-          <Text style={styles.projEmptyIcon}>🏷️</Text>
-          <Text style={styles.projEmptyTitle}>{tx('তালিকাটি পাওয়া যায়নি', 'Listing not found')}</Text>
-          <Text style={styles.projEmptyText}>{state.error || tx('তালিকাটি সরানো হয়েছে অথবা আপনার নয়।', 'It may have been removed, or it is not yours.')}</Text>
+        <View style={ui.emptyBox}>
+          <Text style={ui.emptyIcon}>🏷️</Text>
+          <Text style={ui.emptyTitle}>{tx('তালিকাটি পাওয়া যায়নি', 'Listing not found')}</Text>
+          <Text style={ui.emptyText}>{state.error || tx('তালিকাটি সরানো হয়েছে অথবা আপনার নয়।', 'It may have been removed, or it is not yours.')}</Text>
           <AppButton title={tx('আমার তালিকা', 'My Listings')} onPress={() => setScreen('myListings')} />
         </View>
       ) : null}
       {data ? (
         <>
-          <Card>
-            <Text style={styles.smallUpper}>{tx('রেফারেন্স', 'Reference')}</Text>
-            <Text style={styles.officerName}>{String(data.reference || '')}</Text>
-            <Text style={styles.officerMeta}>
-              {[rowTitle(listing, lang, String(listing.animal_name || 'Livestock')), listing.breed_name ? String(lang === 'bn' ? listing.breed_name_bn || listing.breed_name : listing.breed_name) : ''].filter(Boolean).join(' · ')}
-            </Text>
-            <View style={[styles.summaryChips, styles.summaryChipsInline]}>
-              {live > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('জীবিত', 'Live')} {num(live, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
-              {meat > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('মাংস', 'Meat')} {num(Math.round(meat), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
-              {Number(listing.verified_weight_kg || 0) > 0 ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{tx('যাচাইকৃত', 'Verified')} {num(Number(listing.verified_weight_kg), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
-            </View>
-          </Card>
-          {data.rejected ? (
-            <View style={styles.infoBar}>
-              <Text style={styles.infoText}>{tx('এই তালিকাটি বাতিল হয়েছে। মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This listing was cancelled or rejected. Talk to your field officer.')}</Text>
-            </View>
+          {photos.length ? (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={ui.photoStrip}>
+              {photos.map((uri) => <Image key={uri} source={{ uri }} style={ui.photo} resizeMode="cover" />)}
+            </ScrollView>
           ) : null}
-          <ProgressTrail steps={data.steps || []} />
-          <View style={styles.priceTable}>
-            <View style={styles.finalRow}>
-              <View style={styles.flex}>
-                <Text style={styles.finalLabel}>{Number(listing.paid_amount || 0) > 0 ? tx('পরিশোধিত', 'Paid') : tx('আনুমানিক আয়', 'Estimated earning')}</Text>
-                <Text style={styles.finalSub}>
-                  {Number(listing.paid_amount || 0) > 0
-                    ? [listing.payment_method ? tEnum(String(listing.payment_method), lang) : '', listing.payment_reference].filter(Boolean).join(' · ')
-                    : tx('চূড়ান্ত পেমেন্ট যাচাইকৃত ওজনে', 'Final payment is set on the verified weight')}
-                </Text>
+
+          <View style={ui.dHero}>
+            <Text style={ui.dHeroKicker}>{String(data.reference || '')} · {formatDate(String(listing.created_at), lang)}</Text>
+            <Text style={ui.dHeroTitle}>{listingTitle(listing, lang)}</Text>
+            <Text style={ui.dHeroSub}>{tx(meta.bn, meta.en)}{place ? `  ·  📍 ${place}` : ''}</Text>
+            <View style={ui.dHeroRow}>
+              <View>
+                <Text style={[ui.dHeroKicker, { letterSpacing: 0 }]}>{paid > 0 ? tx('পরিশোধিত', 'Paid') : tx('আনুমানিক আয়', 'Estimated earning')}</Text>
+                <Text style={ui.dHeroAmount}>{amount(paid || Number(listing.estimated_earning || 0), lang)}</Text>
               </View>
-              <Text style={styles.finalValue}>{amount(Number(listing.paid_amount || listing.estimated_earning || 0), lang)}</Text>
+              {verified > 0 ? <View style={ui.dHeroBadge}><Text style={ui.dHeroBadgeText}>✓ {tx('যাচাইকৃত', 'Verified')} {num(verified, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
             </View>
           </View>
+
+          <View style={ui.tagRow}>
+            {live > 0 ? <View style={ui.tag}><Text style={ui.tagText}>{tx('জীবিত', 'Live')} {num(live, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
+            {meat > 0 ? <View style={ui.tag}><Text style={ui.tagText}>{tx('মাংস', 'Meat')} {num(Math.round(meat), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
+            {Number(listing.age_months || 0) > 0 ? <View style={ui.tag}><Text style={ui.tagText}>{tx('বয়স', 'Age')} {num(Number(listing.age_months), lang)} {tx('মাস', 'months')}</Text></View> : null}
+            {Number(listing.quantity || 1) > 1 ? <View style={ui.tag}><Text style={ui.tagText}>{num(Number(listing.quantity), lang)} {tx('টি পশু', 'animals')}</Text></View> : null}
+          </View>
+
+          {data.rejected ? (
+            <View style={styles.infoBar}>
+              <Text style={styles.infoText}>{tx('এই তালিকাটি বাতিল হয়েছে। কারণ জানতে মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This listing was cancelled or rejected. Talk to your field officer to find out why.')}</Text>
+            </View>
+          ) : null}
+
+          <SectionTitle title={tx('অগ্রগতি', 'Progress')} />
+          <ProgressTrail steps={data.steps || []} />
+
+          {pricing ? (
+            <View style={ui.bdCard}>
+              <View style={ui.bdHead}>
+                <Text style={ui.bdHeadTitle}>{tx('মূল্য বিবরণী', 'Price breakdown')}</Text>
+                <Text style={ui.bdHeadSub}>{tx(`প্রতি কেজি জীবিত ওজনে · ${num(basisWeight, 'bn')} কেজি${verified ? ' (যাচাইকৃত)' : ''}`, `Per kg live weight · ${num(basisWeight, 'en')} kg${verified ? ' (verified)' : ''}`)}</Text>
+              </View>
+              {[
+                { key: 'b2b', title: tx('B2B বাজার দর', 'B2B market rate'), sub: '', rate: Number(pricing.b2b ?? 0), neg: false },
+                { key: 'platform', title: tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), sub: feeSub(pricing.platform as ApiRow), rate: fee(pricing.platform as ApiRow), neg: true },
+                { key: 'logistics', title: tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), sub: feeSub(pricing.logistics as ApiRow), rate: fee(pricing.logistics as ApiRow), neg: true },
+                { key: 'care', title: tx('গুদাম ও পশু চিকিৎসা', 'Warehousing & care'), sub: feeSub(pricing.care as ApiRow), rate: fee(pricing.care as ApiRow), neg: true },
+              ].map((r) => (
+                <View key={r.key} style={ui.bdRow}>
+                  <View style={styles.flex}>
+                    <Text style={ui.bdTitle}>{r.title}</Text>
+                    {r.sub ? <Text style={ui.bdSub}>{r.sub}</Text> : null}
+                  </View>
+                  <View style={ui.bdRight}>
+                    <Text style={[ui.bdTotal, r.neg && ui.bdTotalNeg]}>{r.neg ? '− ' : ''}{amount(r.rate * basisWeight, lang)}</Text>
+                    <Text style={ui.bdRate}>৳{num(r.rate, lang)} / {tx('কেজি', 'kg')}</Text>
+                  </View>
+                </View>
+              ))}
+              <View style={ui.bdFinal}>
+                <Text style={ui.bdFinalLabel}>{tx('নিট কৃষক মূল্য', 'Net farmer rate')} · ৳{num(Number(pricing.net ?? 0), lang)} / {tx('কেজি', 'kg')}</Text>
+                <Text style={ui.bdFinalValue}>{amount(Number(pricing.net ?? 0) * basisWeight, lang)}</Text>
+                <Text style={ui.bdFinalSub}>{tx('চূড়ান্ত পেমেন্ট মাঠ কর্মকর্তার যাচাইকৃত ওজনে।', 'The final payment uses the weight the field officer verifies.')}</Text>
+              </View>
+            </View>
+          ) : null}
+
+          {listing.description ? (
+            <View style={ui.dCard}>
+              <Text style={ui.dCardTitle}>{tx('বিবরণ', 'Description')}</Text>
+              <Text style={ui.bodyText}>{String(listing.description)}</Text>
+            </View>
+          ) : null}
+
+          {paid > 0 ? (
+            <View style={ui.dCard}>
+              <Text style={ui.dCardTitle}>{tx('পেমেন্ট', 'Payment')}</Text>
+              <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পরিমাণ', 'Amount')}</Text><Text style={ui.sumTotalVal}>{amount(paid, lang)}</Text></View>
+              {listing.payment_method ? <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পদ্ধতি', 'Method')}</Text><Text style={ui.sumVal}>{tEnum(String(listing.payment_method), lang)}</Text></View> : null}
+              {listing.payment_reference ? <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('রেফারেন্স', 'Reference')}</Text><Text style={ui.sumVal}>{String(listing.payment_reference)}</Text></View> : null}
+              {listing.paid_at ? <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('তারিখ', 'Date')}</Text><Text style={ui.sumVal}>{formatDate(String(listing.paid_at), lang)}</Text></View> : null}
+            </View>
+          ) : null}
+
           {data.officer ? <OfficerCard officer={data.officer} /> : null}
         </>
       ) : null}
@@ -6288,7 +7798,7 @@ function ProjectProgress({ setScreen, applicationId }: { setScreen: (screen: Scr
             <Text style={styles.productTitle}>{lang === 'bn' ? String(app.project_name_bn || app.project_name || '') : String(app.project_name || '')}</Text>
             {app.model_en ? <Text style={styles.officerMeta}>{lang === 'bn' ? String(app.model_bn || app.model_en) : String(app.model_en)}</Text> : null}
             <View style={[styles.summaryChips, styles.summaryChipsInline]}>
-              {app.duration_label ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⏱ {String(app.duration_label)}</Text></View> : null}
+              {durationText(app, lang) ? <View style={styles.summaryChip}><Text style={styles.summaryChipText}>⏱ {durationText(app, lang)}</Text></View> : null}
               {Number(app.income_amount || 0) > 0 ? (
                 <View style={styles.summaryChip}><Text style={styles.summaryChipText}>{(lang === 'bn' ? String(app.income_label_bn || '') : String(app.income_label_en || '')) || amount(Number(app.income_amount), lang)}</Text></View>
               ) : null}
@@ -6349,7 +7859,7 @@ function MyProjects({ setScreen, onOpen }: { setScreen: (screen: Screen) => void
               : <View style={styles.listingCardImagePh}><Text style={styles.buyCardImagePhText}>🤝</Text></View>}
             <View style={styles.listingCardBody}>
               <Text style={styles.productTitle} numberOfLines={1}>{lang === 'bn' ? String(a.project_name_bn || a.project_name || '') : String(a.project_name || '')}</Text>
-              <Text style={styles.productSub} numberOfLines={1}>{[String(a.application_code || ''), a.duration_label ? String(a.duration_label) : ''].filter(Boolean).join(' · ')}</Text>
+              <Text style={styles.productSub} numberOfLines={1}>{[String(a.application_code || ''), durationText(a, lang)].filter(Boolean).join(' · ')}</Text>
               <Text style={styles.buyCardPack}>{formatDate(a.created_at, lang)}</Text>
               <View style={styles.buyCardFoot}>
                 <Text style={styles.productPrice}>{Number(a.income_amount || 0) > 0 ? amount(Number(a.income_amount), lang) : ''}</Text>
@@ -6384,7 +7894,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const users = useApiList<ApiRow>('users');
   const user = authedUser || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
   const menuRows: Array<{ icon: string; title: string; sub: string; target?: Screen; action?: () => void; pill?: string }> = [
-    { icon: '👤', title: tx('ব্যক্তিগত তথ্য', 'Personal Info'), sub: tx('নাম, লিঙ্গ, ছবি', 'Name, gender, photo'), target: 'menuPersonal' },
+    { icon: '👤', title: tx('ব্যক্তিগত তথ্য', 'Personal Info'), sub: tx('নাম, লিঙ্গ, ছবি', 'Name, gender, photo'), target: 'menuPersonal', pill: user?.profile_change_pending ? tx('পর্যালোচনায়', 'In review') : undefined },
     { icon: '🏦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
     { icon: '🌾', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
     { icon: '🪪', title: tx('KYC ডকুমেন্ট', 'KYC Documents'), sub: tx('NID, কাগজপত্র', 'NID, papers'), target: 'menuKyc' },
@@ -6409,7 +7919,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
           )}
         </View>
         <Text style={styles.profileName}>{user?.display_name || user?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')}</Text>
-        <Text style={styles.profileMeta}>☎ {user?.phone || ''}{user?.district ? `   ⌖ ${user.district}` : ''}</Text>
+        <Text style={styles.profileMeta}>☎ {user?.phone || ''}{user?.district ? `   📍 ${lang === 'bn' ? user.district_bn || user.district : user.district}` : ''}</Text>
         <View style={styles.roleChipRow}>
           {roleChips.map((label) => (
             <View key={label} style={styles.roleChip}>
@@ -6684,7 +8194,7 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
     setError('');
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
     if (!result.canceled) setPickedUri(result.assets[0].uri);
   }
 
@@ -6826,38 +8336,184 @@ function FaqScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   );
 }
 
-function MarketUpdates({ setScreen, onSelect }: { setScreen: (screen: Screen) => void; onSelect: (id: string) => void }) {
+// ---------------------------------------------------------------------------
+// Market: rates, local listing activity and updates
+// ---------------------------------------------------------------------------
+
+const UPDATE_TYPE: Record<string, { icon: string; bn: string; en: string; tint: string }> = {
+  price: { icon: '💹', bn: 'দর', en: 'Price', tint: '#FDEBD3' },
+  stock: { icon: '📦', bn: 'মজুদ', en: 'Stock', tint: '#E1F3E7' },
+  training: { icon: '🎓', bn: 'প্রশিক্ষণ', en: 'Training', tint: '#E4EDFB' },
+  weather: { icon: '🌦', bn: 'আবহাওয়া', en: 'Weather', tint: '#E6F4F8' },
+  project: { icon: '🤝', bn: 'প্রকল্প', en: 'Project', tint: '#F4E8EE' },
+  notice: { icon: '📢', bn: 'নোটিশ', en: 'Notice', tint: '#FFF3C4' },
+};
+
+/** "Natore district" / "Lalpur upazila" / "Nationwide", in the reader's language. */
+function scopeLabel(row: ApiRow, lang: string): string {
+  const scope = String(row.scope || 'national');
+  if (scope === 'national') return lang === 'bn' ? 'সারা দেশ' : 'Nationwide';
+  const name = lang === 'bn' ? String(row.scope_bn || row.area_bn || row.scope_en || row.area_en || '') : String(row.scope_en || row.area_en || '');
+  const word = scope === 'upazila' ? (lang === 'bn' ? 'উপজেলা' : 'upazila') : scope === 'district' ? (lang === 'bn' ? 'জেলা' : 'district') : (lang === 'bn' ? 'বিভাগ' : 'division');
+  return `${name} ${word}`;
+}
+
+function rateName(r: ApiRow, lang: string): string {
+  const pick = (bn: unknown, en: unknown) => String((lang === 'bn' ? bn || en : en || bn) || '');
+  return [pick(r.animal_bn, r.animal_en) || pick(r.item_bn, r.item_en), pick(r.breed_bn, r.breed_en)].filter(Boolean).join(' · ');
+}
+
+/** Home: today's rate, what is moving in the district, the two newest updates. */
+function MarketSnapshot({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
-  const { user } = useAuth();
-  const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
-  const updates = useApiList<ApiRow>(`app/market-updates${district}`);
-  const rows = shouldUseFallback(updates) ? fallbackMarketUpdates : updates.rows;
+  const state = useApiObject<ApiRow>('app/market/overview');
+  const d = state.data;
+  const rates = (Array.isArray(d?.rates) ? d.rates : []) as ApiRow[];
+  const rate = rates[0];
+  const stats = (d?.listings ?? {}) as ApiRow;
+  const updates = ((Array.isArray(d?.updates) ? d.updates : []) as ApiRow[]).slice(0, 2);
+  const district = d?.area ? String(lang === 'bn' ? d.area.district_bn || d.area.district_en : d.area.district_en) : '';
   return (
     <>
-      <Header title={tx('বাজার আপডেট', 'Market Updates')} onBack={() => setScreen('home')} />
-      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
-        {updates.loading ? <ApiStatus state={updates} empty={tx('এখন কোনো আপডেট নেই।', 'No updates right now.')} /> : null}
-        {rows.map((row, index) => {
-          const id = String(row.id ?? index);
-          const hasDetail = Number(row.has_detail ?? 0) === 1 || !!row.detail_en || !!row.detail_bn || !!row.image_url;
-          const area = [row.district, row.upazila].filter(Boolean).join(' · ');
-          return (
-            <Pressable key={id} onPress={() => hasDetail && onSelect(id)} style={({ pressed }) => [styles.marketCard, pressed && hasDetail && styles.pressed]}>
-              {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketCardImage} /> : null}
-              <View style={styles.marketCardBody}>
-                <View style={styles.marketCardTop}>
-                  <Badge label={tEnum(row.category || row.update_type || 'update', lang)} tone="gold" />
-                  {row.created_at ? <Text style={styles.menuSub}>{formatDate(row.created_at, lang)}</Text> : null}
-                </View>
-                <Text style={styles.marketCardTitle}>{rowTitle(row, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
-                <Text style={styles.marketCardSub} numberOfLines={2}>{rowBody(row, lang, '')}</Text>
-                {area ? <Text style={styles.menuSub}>⌖ {area}</Text> : null}
-                {hasDetail ? <Text style={styles.marketReadMore}>{tx('বিস্তারিত দেখুন ›', 'Read details ›')}</Text> : null}
+      <SectionTitle title={tx('বাজার দর ও আপডেট', 'Market rates & updates')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('marketUpdates')} />
+      {state.loading && !d ? (
+        <View style={ui.mkCard}><Skeleton width="55%" height={12} /><Skeleton width="40%" height={26} style={{ marginTop: 8 }} /><Skeleton height={44} style={{ marginTop: 12 }} /></View>
+      ) : null}
+      {d ? (
+        <Pressable onPress={() => setScreen('marketUpdates')} style={({ pressed }) => [ui.mkCard, pressed && styles.pressed]}>
+          {rate ? (
+            <View style={ui.mkRateTop}>
+              <View style={styles.flex}>
+                <Text style={ui.mkKicker}>{rate.emoji ? `${rate.emoji} ` : ''}{rateName(rate, lang)} · {tx('আজকের B2B দর', "Today's B2B rate")}</Text>
+                <Text style={ui.mkRate}>৳{num(Number(rate.b2b_live), lang)}<Text style={ui.mkUnit}> / {tx('কেজি জীবিত', 'kg live')}</Text></Text>
+                <Text style={ui.mkSub}>
+                  {tx(`কৃষক পান ৳${num(Number(rate.net_farmer), 'bn')}/কেজি · মাংসে ৳${num(Number(rate.b2b_meat), 'bn')}`, `Farmer gets ৳${num(Number(rate.net_farmer), 'en')}/kg · meat ৳${num(Number(rate.b2b_meat), 'en')}`)}
+                </Text>
               </View>
-            </Pressable>
-          );
-        })}
-      </RefreshScroll>
+              <View style={ui.scopeChip}><Text style={ui.scopeChipText}>📍 {scopeLabel(rate, lang)}</Text></View>
+            </View>
+          ) : (
+            <Text style={ui.mkSub}>{tx('আপনার এলাকার জন্য এখন কোনো অনুমোদিত দর নেই।', 'No approved rate for your area right now.')}</Text>
+          )}
+          <View style={ui.mkStats}>
+            <View style={ui.mkStat}><Text style={ui.mkStatValue}>{num(Number(stats.open || 0), lang)}</Text><Text style={ui.mkStatLabel}>{tx('চলমান তালিকা', 'Open listings')}</Text></View>
+            <View style={ui.mkStatDivider} />
+            <View style={ui.mkStat}><Text style={ui.mkStatValue}>{num(Number(stats.paid_30d || 0), lang)}</Text><Text style={ui.mkStatLabel}>{tx('৩০ দিনে বিক্রি', 'Sold · 30 days')}</Text></View>
+            <View style={ui.mkStatDivider} />
+            <View style={ui.mkStat}><Text style={ui.mkStatValue}>{stats.avg_live_weight ? `${num(Number(stats.avg_live_weight), lang)}` : '—'}</Text><Text style={ui.mkStatLabel}>{tx('গড় ওজন (কেজি)', 'Avg weight (kg)')}</Text></View>
+          </View>
+          {district ? <Text style={ui.mkFoot}>{tx(`${district} জেলার হিসাব`, `Figures for ${district} district`)}</Text> : null}
+        </Pressable>
+      ) : null}
+      {updates.map((u) => {
+        const t = UPDATE_TYPE[String(u.update_type)] ?? UPDATE_TYPE.notice;
+        return (
+          <Pressable key={String(u.id)} onPress={() => setScreen('marketUpdates')} style={({ pressed }) => [ui.upRow, pressed && styles.pressed]}>
+            <View style={[ui.upIcon, { backgroundColor: t.tint }]}><Text style={{ fontSize: 18 }}>{t.icon}</Text></View>
+            <View style={styles.flex}>
+              <Text style={ui.upTitle} numberOfLines={1}>{rowTitle(u, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
+              <Text style={ui.upMeta} numberOfLines={1}>{tx(t.bn, t.en)} · 📍 {scopeLabel(u, lang)}{u.created_at ? ` · ${formatDate(String(u.created_at), lang)}` : ''}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.muted} />
+          </Pressable>
+        );
+      })}
+    </>
+  );
+}
+
+function MarketUpdates({ setScreen, onSelect }: { setScreen: (screen: Screen) => void; onSelect: (id: string) => void }) {
+  const { tx, lang } = useLanguage();
+  const state = useApiObject<ApiRow>('app/market/overview');
+  const [type, setType] = useState('all');
+  const d = state.data;
+  const rates = (Array.isArray(d?.rates) ? d.rates : []) as ApiRow[];
+  const stats = (d?.listings ?? {}) as ApiRow;
+  const byAnimal = (Array.isArray(stats.by_animal) ? stats.by_animal : []) as ApiRow[];
+  const updates = (Array.isArray(d?.updates) ? d.updates : []) as ApiRow[];
+  const types = Array.from(new Set(updates.map((u) => String(u.update_type))));
+  const shown = type === 'all' ? updates : updates.filter((u) => String(u.update_type) === type);
+  const district = d?.area ? String(lang === 'bn' ? d.area.district_bn || d.area.district_en : d.area.district_en) : '';
+  return (
+    <>
+      <Header title={tx('বাজার দর ও আপডেট', 'Market rates & updates')} onBack={() => setScreen('home')} />
+      {state.loading && !d ? <ListSkeleton variant="card" count={3} /> : null}
+      {!state.loading && !d ? (
+        <View style={ui.emptyBox}><Text style={ui.emptyIcon}>📉</Text><Text style={ui.emptyTitle}>{tx('বাজারের তথ্য আনা যায়নি', 'Could not load the market')}</Text><Text style={ui.emptyText}>{state.error || ''}</Text></View>
+      ) : null}
+      {d ? (
+        <>
+          <SectionTitle title={tx('আজকের দর', "Today's rates")} />
+          {rates.length === 0 ? <Text style={styles.fieldHint}>{tx('আপনার এলাকার জন্য এখন কোনো অনুমোদিত দর নেই।', 'No approved rate for your area right now.')}</Text> : null}
+          {rates.map((r) => (
+            <View key={String(r.id)} style={ui.rateCard}>
+              <View style={ui.rateHead}>
+                <Text style={ui.rateName}>{r.emoji ? `${r.emoji} ` : ''}{rateName(r, lang)}</Text>
+                <View style={ui.scopeChip}><Text style={ui.scopeChipText}>📍 {scopeLabel(r, lang)}</Text></View>
+              </View>
+              <View style={ui.rateGrid}>
+                <View style={ui.rateCell}><Text style={ui.rateCellLabel}>{tx('B2B · জীবিত', 'B2B · live')}</Text><Text style={ui.rateCellValue}>৳{num(Number(r.b2b_live), lang)}</Text></View>
+                <View style={ui.rateCell}><Text style={ui.rateCellLabel}>{tx('B2B · মাংস', 'B2B · meat')}</Text><Text style={ui.rateCellValue}>৳{num(Number(r.b2b_meat), lang)}</Text></View>
+                <View style={[ui.rateCell, ui.rateCellStrong]}><Text style={ui.rateCellLabel}>{tx('কৃষক পান · জীবিত', 'Farmer · live')}</Text><Text style={[ui.rateCellValue, { color: colors.maroon }]}>৳{num(Number(r.net_farmer), lang)}</Text></View>
+                <View style={[ui.rateCell, ui.rateCellStrong]}><Text style={ui.rateCellLabel}>{tx('কৃষক পান · মাংস', 'Farmer · meat')}</Text><Text style={[ui.rateCellValue, { color: colors.maroon }]}>৳{num(Number(r.net_farmer_meat), lang)}</Text></View>
+              </View>
+              <Text style={ui.rateFoot}>{tx('প্রতি কেজি', 'Per kg')}{r.effective_from ? ` · ${tx('কার্যকর', 'effective')} ${formatDate(String(r.effective_from), lang)}` : ''}</Text>
+            </View>
+          ))}
+
+          <SectionTitle title={district ? tx(`${district} জেলার বাজার`, `${district} district market`) : tx('বাজারের চিত্র', 'Market activity')} />
+          <View style={ui.mkGrid}>
+            {[
+              [tx('চলমান তালিকা', 'Open listings'), num(Number(stats.open || 0), lang)],
+              [tx('৭ দিনে নতুন', 'New · 7 days'), num(Number(stats.new_7d || 0), lang)],
+              [tx('৩০ দিনে বিক্রি', 'Sold · 30 days'), num(Number(stats.paid_30d || 0), lang)],
+              [tx('গড় ওজন', 'Avg live weight'), stats.avg_live_weight ? `${num(Number(stats.avg_live_weight), lang)} ${tx('কেজি', 'kg')}` : '—'],
+            ].map(([label, value]) => (
+              <View key={label} style={ui.mkGridCell}><Text style={ui.mkStatValue}>{value}</Text><Text style={ui.mkStatLabel}>{label}</Text></View>
+            ))}
+          </View>
+          {stats.avg_paid_per_kg ? <Text style={styles.fieldHint}>{tx(`সম্প্রতি কৃষকরা গড়ে ৳${num(Number(stats.avg_paid_per_kg), 'bn')}/কেজি পেয়েছেন।`, `Farmers were recently paid ৳${num(Number(stats.avg_paid_per_kg), 'en')}/kg on average.`)}</Text> : null}
+          {byAnimal.length ? (
+            <View style={ui.tagRow}>
+              {byAnimal.map((b) => (
+                <View key={String(b.name_en)} style={ui.tag}><Text style={ui.tagText}>{b.emoji ? `${b.emoji} ` : ''}{lang === 'bn' ? String(b.name_bn || b.name_en) : String(b.name_en)} · {num(Number(b.count), lang)}</Text></View>
+              ))}
+            </View>
+          ) : null}
+
+          <SectionTitle title={tx('আপডেট', 'Updates')} />
+          {types.length > 1 ? (
+            <ChipScroller
+              inset={16}
+              items={[{ id: 'all', label: tx('সব', 'All') }, ...types.map((t) => ({ id: t, label: `${(UPDATE_TYPE[t] ?? UPDATE_TYPE.notice).icon} ${tx((UPDATE_TYPE[t] ?? UPDATE_TYPE.notice).bn, (UPDATE_TYPE[t] ?? UPDATE_TYPE.notice).en)}` }))]}
+              selectedId={type}
+              onSelect={(i) => setType(i.id)}
+            />
+          ) : null}
+          {shown.length === 0 ? <Text style={styles.fieldHint}>{tx('এখন কোনো আপডেট নেই।', 'No updates right now.')}</Text> : null}
+          {shown.map((u) => {
+            const t = UPDATE_TYPE[String(u.update_type)] ?? UPDATE_TYPE.notice;
+            const hasDetail = Number(u.has_detail ?? 0) === 1;
+            return (
+              <Pressable key={String(u.id)} disabled={!hasDetail} onPress={() => onSelect(String(u.id))} style={({ pressed }) => [ui.upCard, pressed && hasDetail && styles.pressed]}>
+                <View style={ui.upCardTop}>
+                  <View style={[ui.upIcon, { backgroundColor: t.tint }]}><Text style={{ fontSize: 18 }}>{t.icon}</Text></View>
+                  <View style={styles.flex}>
+                    <Text style={ui.upMeta}>{tx(t.bn, t.en)}{u.created_at ? ` · ${formatDate(String(u.created_at), lang)}` : ''}</Text>
+                    <Text style={ui.upTitle}>{rowTitle(u, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
+                  </View>
+                  {u.image_url ? <Image source={{ uri: String(u.image_url) }} style={ui.upThumb} /> : null}
+                </View>
+                {rowBody(u, lang, '') ? <Text style={ui.upBody} numberOfLines={3}>{rowBody(u, lang, '')}</Text> : null}
+                <View style={ui.upFoot}>
+                  <View style={ui.scopeChip}><Text style={ui.scopeChipText}>📍 {scopeLabel(u, lang)}</Text></View>
+                  {hasDetail ? <Text style={ui.textLink}>{tx('বিস্তারিত ›', 'Details ›')}</Text> : null}
+                </View>
+              </Pressable>
+            );
+          })}
+        </>
+      ) : null}
     </>
   );
 }
@@ -6876,28 +8532,187 @@ function MarketDetail({ setScreen, id }: { setScreen: (screen: Screen) => void; 
   }, [id]);
 
   const detail = localized(row || undefined, lang, 'detail', '') || rowBody(row || undefined, lang, '');
-  const area = [row?.district, row?.upazila].filter(Boolean).join(' · ');
+  const t = UPDATE_TYPE[String(row?.update_type)] ?? UPDATE_TYPE.notice;
+  const area = [row?.upazila, row?.district].filter(Boolean).join(', ');
   return (
     <>
-      <Header title={tx('বাজার আপডেট', 'Market Update')} onBack={() => setScreen('marketUpdates')} />
-      <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
-        {loading ? <Text style={styles.apiNotice}>{tx('লোড হচ্ছে...', 'Loading...')}</Text> : null}
-        {!loading && !row ? <Text style={styles.apiNotice}>{tx('এই আপডেট পাওয়া যায়নি।', 'This update was not found.')}</Text> : null}
-        {row ? (
-          <>
-            {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketDetailImage} /> : null}
-            <View style={{ paddingHorizontal: 16, paddingTop: 14 }}>
-              <View style={styles.marketCardTop}>
-                <Badge label={tEnum(row.category || row.update_type || 'update', lang)} tone="gold" />
-                {row.created_at ? <Text style={styles.menuSub}>{formatDate(row.created_at, lang)}</Text> : null}
+      <Header title={tx('বাজার আপডেট', 'Market update')} onBack={() => setScreen('marketUpdates')} />
+      {loading ? <View style={{ padding: 16, gap: 10 }}><Skeleton height={180} radius={14} /><Skeleton width="70%" height={20} /><Skeleton width="90%" /><Skeleton width="80%" /></View> : null}
+      {!loading && !row ? <Text style={styles.apiNotice}>{tx('এই আপডেট পাওয়া যায়নি।', 'This update was not found.')}</Text> : null}
+      {row ? (
+        <>
+          {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.marketDetailImage} /> : null}
+          <View style={ui.dCard}>
+            <View style={ui.upCardTop}>
+              <View style={[ui.upIcon, { backgroundColor: t.tint }]}><Text style={{ fontSize: 18 }}>{t.icon}</Text></View>
+              <View style={styles.flex}>
+                <Text style={ui.upMeta}>{tx(t.bn, t.en)}{row.created_at ? ` · ${formatDate(String(row.created_at), lang)}` : ''}</Text>
+                <Text style={[ui.upTitle, { fontSize: 18 }]}>{rowTitle(row, lang, '')}</Text>
               </View>
-              <Text style={styles.marketDetailTitle}>{rowTitle(row, lang, '')}</Text>
-              {area ? <Text style={styles.menuSub}>⌖ {area}</Text> : null}
-              <Text style={styles.marketDetailBody}>{detail || rowBody(row, lang, '')}</Text>
             </View>
-          </>
-        ) : null}
-      </RefreshScroll>
+            {area ? <View style={[ui.scopeChip, { marginTop: 10 }]}><Text style={ui.scopeChipText}>📍 {area}</Text></View> : null}
+            <Text style={[ui.bodyText, { marginTop: 12 }]}>{detail || rowBody(row, lang, '')}</Text>
+          </View>
+        </>
+      ) : null}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Buyers & partners strip (home)
+// ---------------------------------------------------------------------------
+
+/**
+ * The buyers who take Shathi Sheba farmers' animals, in the admin's order. A
+ * gentle auto-advance shows every logo on a small phone; touching the strip
+ * hands control to the farmer.
+ */
+function PartnerStrip() {
+  const { tx, lang } = useLanguage();
+  const partners = useApiList<ApiRow>('app/partners');
+  const [open, setOpen] = useState<ApiRow | null>(null);
+  const scroller = useRef<ScrollView>(null);
+  const [userMoved, setUserMoved] = useState(false);
+  const index = useRef(0);
+  const rows = partners.rows;
+  const TILE = 132;
+  useEffect(() => {
+    if (userMoved || rows.length < 3) return;
+    const timer = setInterval(() => {
+      index.current = (index.current + 1) % rows.length;
+      scroller.current?.scrollTo({ x: index.current * TILE, animated: true });
+    }, 3200);
+    return () => clearInterval(timer);
+  }, [rows.length, userMoved]);
+  if (!partners.loading && !rows.length) return null;
+  const pick = (bn: unknown, en: unknown) => String((lang === 'bn' ? bn || en : en || bn) || '');
+  return (
+    <>
+      <SectionTitle title={tx('আমাদের ক্রেতা ও অংশীদার', 'Our buyers & partners')} />
+      <ScrollView
+        ref={scroller}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={ui.partnerRow}
+        onScrollBeginDrag={() => setUserMoved(true)}
+      >
+        {partners.loading && !rows.length
+          ? [0, 1, 2].map((i) => <Skeleton key={i} width={120} height={112} radius={14} />)
+          : rows.map((p) => (
+            <Pressable key={String(p.id)} onPress={() => setOpen(p)} style={({ pressed }) => [ui.partnerTile, pressed && styles.pressed]} accessibilityLabel={pick(p.name_bn, p.name_en)}>
+              {p.logo_url ? <Image source={{ uri: String(p.logo_url) }} style={ui.partnerTileLogo} resizeMode="contain" /> : <Text style={{ fontSize: 30 }}>🤝</Text>}
+              <Text style={ui.partnerTileName} numberOfLines={1}>{pick(p.name_bn, p.name_en)}</Text>
+              {pick(p.badge_bn, p.badge_en) ? <View style={ui.partnerTileBadge}><Text style={ui.partnerTileBadgeText}>{pick(p.badge_bn, p.badge_en)}</Text></View> : null}
+            </Pressable>
+          ))}
+      </ScrollView>
+      <Modal visible={!!open} transparent animationType="slide" onRequestClose={() => setOpen(null)}>
+        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(null)}>
+          <Pressable style={ui.sheet} onPress={() => {}}>
+            <View style={styles.dropdownHandle} />
+            {open ? (
+              <ScrollView>
+                <View style={ui.brandHead}>
+                  {open.logo_url ? <Image source={{ uri: String(open.logo_url) }} style={ui.brandBigLogo} resizeMode="contain" /> : null}
+                  <Text style={ui.brandBigName}>{pick(open.name_bn, open.name_en)}</Text>
+                  <Text style={ui.brandBigSub}>{[pick(open.badge_bn, open.badge_en), pick(open.tagline_bn, open.tagline_en)].filter(Boolean).join(' · ')}</Text>
+                </View>
+                {pick(open.description_bn, open.description_en) ? <Text style={ui.brandAbout}>{pick(open.description_bn, open.description_en)}</Text> : null}
+                {open.website ? (
+                  <Pressable style={({ pressed }) => [ui.sheetBtn, pressed && styles.pressed]} onPress={() => Linking.openURL(String(open.website))}>
+                    <Ionicons name="globe-outline" size={18} color="white" />
+                    <Text style={ui.sheetBtnText}>{tx('ওয়েবসাইট দেখুন', 'Visit website')}</Text>
+                  </Pressable>
+                ) : null}
+              </ScrollView>
+            ) : null}
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Notifications inbox
+// ---------------------------------------------------------------------------
+
+/** Unread count for the bell; refreshes with pull-to-refresh like every list. */
+function useUnreadCount(): number {
+  const { user } = useAuth();
+  const state = useApiObject<ApiRow>(user?.id ? 'app/notifications' : null);
+  return Number(state.data?.unread || 0);
+}
+
+const NOTIF_ICON: Array<[string, string]> = [['order', '🛒'], ['voucher', '🎁'], ['listing', '🏷️'], ['enrollment', '🤝'], ['broadcast', '📣']];
+
+function timeAgo(value: string, lang: Lang): string {
+  const diff = Math.max(0, Date.now() - new Date(value).getTime());
+  const m = Math.round(diff / 60000);
+  const say = (n: number, bnU: string, enU: string) => (lang === 'bn' ? `${num(n, 'bn')} ${bnU} আগে` : `${n} ${enU} ago`);
+  if (m < 1) return lang === 'bn' ? 'এইমাত্র' : 'just now';
+  if (m < 60) return say(m, 'মিনিট', 'min');
+  const h = Math.round(m / 60);
+  if (h < 24) return say(h, 'ঘণ্টা', 'h');
+  const days = Math.round(h / 24);
+  return days < 7 ? say(days, 'দিন', 'd') : formatDate(value, lang);
+}
+
+function NotificationsScreen({ setScreen, onOpen }: { setScreen: (screen: Screen) => void; onOpen: (data: Record<string, unknown>) => void }) {
+  const { tx, lang } = useLanguage();
+  const state = useApiObject<ApiRow>('app/notifications');
+  const [local, setLocal] = useState<{ items: ApiRow[]; unread: number } | null>(null);
+  const data = local ?? (state.data ? { items: (state.data.items ?? []) as ApiRow[], unread: Number(state.data.unread || 0) } : null);
+
+  async function markRead(id?: string) {
+    try {
+      const res = await apiCreate('app/notifications/read', id ? { id } : {});
+      const result = (res as any).result;
+      if (result) setLocal({ items: result.items ?? [], unread: Number(result.unread || 0) });
+    } catch {
+      // The inbox still works read-only; the dot just stays.
+    }
+  }
+
+  return (
+    <>
+      <Header title={tx('বিজ্ঞপ্তি', 'Notifications')} onBack={() => setScreen('home')} />
+      {data && data.unread > 0 ? (
+        <View style={ui.filterChipRow}>
+          <Text style={[ui.tilePack, { flex: 1 }]}>{tx(`${num(data.unread, 'bn')}টি নতুন`, `${data.unread} new`)}</Text>
+          <Pressable onPress={() => markRead()} hitSlop={8}><Text style={ui.textLink}>{tx('সব পড়া হয়েছে', 'Mark all read')}</Text></Pressable>
+        </View>
+      ) : null}
+      {state.loading && !data ? <ListSkeleton variant="row" count={4} /> : null}
+      {data && data.items.length === 0 ? (
+        <View style={ui.emptyBox}>
+          <Text style={ui.emptyIcon}>🔔</Text>
+          <Text style={ui.emptyTitle}>{tx('এখনো কোনো বিজ্ঞপ্তি নেই', 'No notifications yet')}</Text>
+          <Text style={ui.emptyText}>{tx('অর্ডার, তালিকা ও প্রকল্পের খবর এখানে আসবে।', 'News about your orders, listings and projects will appear here.')}</Text>
+        </View>
+      ) : null}
+      {data?.items.map((n) => {
+        const key = String(n.event_key || '');
+        const icon = NOTIF_ICON.find(([k]) => key.startsWith(k))?.[1] ?? '🔔';
+        const unread = !n.read_at;
+        const payload = parseMaybeJson(n.data_json) as Record<string, unknown>;
+        return (
+          <Pressable
+            key={String(n.id)}
+            onPress={() => { if (unread) void markRead(String(n.id)); onOpen(payload); }}
+            style={({ pressed }) => [ui.notifCard, unread && ui.notifUnread, pressed && styles.pressed]}
+          >
+            <View style={ui.notifIcon}><Text style={{ fontSize: 20 }}>{icon}</Text></View>
+            <View style={styles.flex}>
+              <Text style={[ui.notifTitle, unread && { fontWeight: '900' }]}>{String(n.title)}</Text>
+              <Text style={ui.notifBody}>{String(n.body)}</Text>
+              <Text style={ui.notifTime}>{timeAgo(String(n.created_at), lang)}</Text>
+            </View>
+            {unread ? <View style={ui.notifDot} /> : null}
+          </Pressable>
+        );
+      })}
     </>
   );
 }
@@ -7377,7 +9192,7 @@ function OfficerHelpStrip({ district, title }: { district?: string | null; title
   const role = officer
     ? rowTitle({ title_bn: officer.role_bn, title_en: officer.role }, lang, tx('মাঠ কর্মকর্তা', 'Field officer'))
     : tx('কেন্দ্রীয় সহায়তা', 'Central support');
-  const area = officer ? String(officer.upazila ?? officer.district ?? district ?? '') : '';
+  const area = officer ? String((lang === 'bn' ? officer.upazila_bn || officer.district_bn : null) || officer.upazila || officer.district || district || '') : '';
   const phone = officer ? String(officer.phone ?? officer.mobile ?? '') : '16234';
   const initials = (name || 'S').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 
@@ -9037,6 +10852,7 @@ function LoanApplyConsent({
   onSubmitted: (result: ApiRow) => void;
 }) {
   const { tx, lang } = useLanguage();
+  const appLocation = useAppLocation();
   const consents = useApiList<ApiRow>('app/finance/consents');
   // One switch per consent rather than a single blanket tick. Each is stored
   // separately with its own version and can be withdrawn on its own later, so a
@@ -9070,6 +10886,12 @@ function LoanApplyConsent({
         // rather than discovering it on the visit.
         needs_correction: draft.needsCorrection || undefined,
         needs_correction_note: draft.needsCorrection ? (draft.correctionNote || undefined) : undefined,
+        // GPS check-in: where the phone is as the farmer applies, resolved to
+        // geo ids when the app could place it.
+        checkin_lat: appLocation.latitude ?? undefined,
+        checkin_lng: appLocation.longitude ?? undefined,
+        checkin_district_id: appLocation.geo?.districtId ?? undefined,
+        checkin_upazila_id: appLocation.geo?.upazilaId ?? undefined,
         consents: required.map((c) => String(c.consent_key)),
       });
       const result = (res as any).result;
@@ -9084,6 +10906,14 @@ function LoanApplyConsent({
   return (
     <>
       <Header title={tx('ঋণের আবেদন', 'Loan application')} onBack={() => setScreen('loanApplyProfile')} right={tx('ধাপ ৪/৪', 'Step 4/4')} />
+      {!appLocation.granted || appLocation.latitude == null ? (
+        <View style={styles.infoBar}>
+          <Text style={styles.infoText}>
+            {tx('জমা দেওয়ার সময় ফোনের লোকেশন দিয়ে চেক-ইন হবে। ফোনের সেটিংসে শাথী সেবার জন্য লোকেশন চালু করুন।',
+                "Submitting checks you in with your phone's location. Turn location on for Shathi Sheba in your phone settings.")}
+          </Text>
+        </View>
+      ) : null}
       <RefreshScroll>
         <View style={{ paddingHorizontal: 16, marginTop: 14 }}>
           <Text style={{ color: colors.ink, fontSize: 19, fontWeight: '800' }}>

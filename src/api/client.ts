@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants from 'expo-constants';
 import type { ApiRow, Lang } from '../types';
 
 // The app's HTTP transport: URL building, the single fetch wrapper, the bearer
@@ -11,20 +12,33 @@ import type { ApiRow, Lang } from '../types';
 
 // The backend the app talks to.
 //
-// Development reads EXPO_PUBLIC_API_BASE_URL from .env, which points at whatever
-// LAN address this machine currently has. A release build reads .env.production,
-// which points at the EC2 deployment behind shathisheba.digigramventures.com.
+// Development talks to the admin's `npm run dev` server on port 3000 of the
+// machine running Metro. Its host is read from Expo's hostUri (the address the
+// phone already loaded the bundle from), so a changed Wi-Fi IP needs no edit.
+// Set EXPO_PUBLIC_DEV_API_BASE_URL in .env to point development elsewhere.
 //
-// The two fallbacks differ on purpose. A shipped APK that quietly falls back to
-// localhost resolves to the *phone itself*: every request fails, the app shows
-// its offline copy, and nothing says the build was misconfigured. So in a release
-// build the fallback is production, and only development falls back to localhost.
+// A release build reads .env.production, which points at the EC2 deployment
+// behind shathisheba.digigramventures.com. A shipped APK that quietly fell back
+// to localhost would resolve to the *phone itself*: every request fails, the app
+// shows its offline copy, and nothing says the build was misconfigured. So in a
+// release build the fallback is production.
 export const PRODUCTION_API_BASE_URL = 'https://shathisheba.digigramventures.com/api/v1';
 
-const configuredBaseUrl =
-  process.env.EXPO_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  (__DEV__ ? 'http://localhost:3000/api/v1' : PRODUCTION_API_BASE_URL);
+const DEV_API_PORT = 3000;
+
+function devApiBaseUrl(): string {
+  const override = process.env.EXPO_PUBLIC_DEV_API_BASE_URL;
+  if (override) return override;
+  // hostUri is "<host>:<metroPort>", e.g. "192.168.1.104:8081". A tunnel host
+  // (*.exp.direct) only forwards Metro, so it cannot reach port 3000.
+  const host = Constants.expoConfig?.hostUri?.split(':')[0];
+  if (host && !host.endsWith('.exp.direct')) return `http://${host}:${DEV_API_PORT}/api/v1`;
+  return `http://localhost:${DEV_API_PORT}/api/v1`;
+}
+
+const configuredBaseUrl = __DEV__
+  ? devApiBaseUrl()
+  : process.env.EXPO_PUBLIC_API_BASE_URL || process.env.API_BASE_URL || PRODUCTION_API_BASE_URL;
 
 // SEC-10. Plain HTTP is how you develop against a laptop on the same Wi-Fi; it is
 // not how you ship. Session tokens, phone numbers and loan applications travel
@@ -54,6 +68,13 @@ export const WEATHERAPI_LOCATION =
 
 export const SERVER_FALLBACK_MESSAGE = 'We could not load this from current server.';
 
+export type ApiFailure = Error & { code?: string; status?: number };
+
+/** The server's error code, if the failure carried one. */
+export function apiErrorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error ? (error as ApiFailure).code : undefined;
+}
+
 export function naturalApiError(error: unknown, lang: Lang) {
   const message = error instanceof Error ? error.message : String(error);
   if (/^TIMEOUT|timed out|took too long/i.test(message)) {
@@ -71,6 +92,7 @@ export function naturalApiError(error: unknown, lang: Lang) {
       ? `ডাটাবেস সমস্যা: ${message}`
       : `Database problem: ${message}`;
   }
+  if (apiErrorCode(error)) return message;
   return lang === 'bn'
     ? `তথ্য আনতে সমস্যা হয়েছে: ${message}`
     : `Could not fetch the latest content: ${message}`;
@@ -188,7 +210,12 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
       throw new Error('SESSION_EXPIRED: please sign in again');
     }
     if (!response.ok || json.ok === false) {
-      throw new Error(json.message || `Server responded with ${response.status}`);
+      // Keep the server's machine-readable code: the app routes on it — geo_locked
+      // opens the "outside your area" screen, change_pending the review state.
+      const failure = new Error(json.message || `Server responded with ${response.status}`) as ApiFailure;
+      failure.code = typeof json.code === 'string' ? json.code : undefined;
+      failure.status = response.status;
+      throw failure;
     }
     return json as T;
   } catch (error) {

@@ -6,16 +6,10 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Shathi Sheba uses your location to show local weather, rain alerts, and farming advice."
+        "NSLocationWhenInUseUsageDescription": "Shathi Sheba uses your location to set your area, check you in when you apply for a loan, and show local weather. Your location is saved with your profile."
       }
     },
     "android": {
@@ -28,12 +22,29 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": false,
       "predictiveBackGestureEnabled": false,
       "softwareKeyboardLayoutMode": "resize"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-status-bar",
+      "expo-audio",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#871449"
+        }
+      ]
+    ]
   }
 }
