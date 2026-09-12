@@ -51,3 +51,6 @@ home.png
 .codex/
 graphify-out/
 .graphify_python
+
+# Firebase client config (kept local; baked into the APK at build time)
+google-services.json

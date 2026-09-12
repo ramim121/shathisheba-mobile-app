@@ -25,6 +25,7 @@ import {
   StatusBar as NativeStatusBar,
   Image,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { colors } from './src/theme/colors';
 import { androidNavigationInset, androidStatusBarInset, styles } from './src/theme/styles';
@@ -230,6 +231,7 @@ function useAppLocation() {
 
 
 const AUTH_STORAGE_KEY = 'shathi.auth.v1';
+const LANG_STORAGE_KEY = 'shathi.lang.v1';
 
 const AuthContext = createContext<{
   user: AuthUser | null;
@@ -579,7 +581,7 @@ function bestHarvestAdvice(weather: ApiRow | null, lang: Lang) {
   }
   const time = String(goodHour.time || '').split(' ')[1] || '';
   return lang === 'bn'
-    ? `আজ ${time} নাগাদ তুলনামূলক কম বৃষ্টির সময় দেখা যাচ্ছে। জরুরি ফসল/সবজি কাটার কাজ এই সময়ের মধ্যে করুন।`
+    ? `আজ ${bn(time)} নাগাদ তুলনামূলক কম বৃষ্টির সময় দেখা যাচ্ছে। জরুরি ফসল/সবজি কাটার কাজ এই সময়ের মধ্যে করুন।`
     : `Around ${time} looks like a lower-rain window today. Use that period for urgent crop, vegetable, or fruit harvesting.`;
 }
 
@@ -834,7 +836,7 @@ function Header({
   return (
     <View style={styles.header}>
       {onBack ? (
-        <Pressable onPress={onBack} style={styles.backButton}>
+        <Pressable onPress={onBack} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]} hitSlop={8} accessibilityRole="button" accessibilityLabel="Back">
           <Text style={styles.backText}>‹</Text>
         </Pressable>
       ) : null}
@@ -976,7 +978,9 @@ function Shell({
             <Pressable
               key={tab.id}
               onPress={() => setScreen(tab.screen)}
-              style={styles.navItem}
+              style={({ pressed }) => [styles.navItem, pressed && { opacity: 0.7 }]}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: activeTab === tab.id }}
             >
               <View style={[styles.navIconWrap, activeTab === tab.id && styles.navIconWrapActive]}>
                 <Ionicons
@@ -1047,6 +1051,19 @@ export default function App() {
   const [weight, setWeight] = useState('200');
   const [qty, setQty] = useState(2);
   const [lang, setLang] = useState<Lang>('bn');
+  // The chosen language survives restarts, and the server learns it only once
+  // it has been read back — otherwise every launch would report the 'bn'
+  // default and English readers would get Bangla notifications.
+  const [langReady, setLangReady] = useState(false);
+  useEffect(() => {
+    AsyncStorage.getItem(LANG_STORAGE_KEY)
+      .then((v) => { if (v === 'en' || v === 'bn') setLang(v); })
+      .catch(() => {})
+      .finally(() => setLangReady(true));
+  }, []);
+  useEffect(() => {
+    if (langReady) AsyncStorage.setItem(LANG_STORAGE_KEY, lang).catch(() => {});
+  }, [lang, langReady]);
   const [cattleImage, setCattleImage] = useState<string | null>(null);
   const [listingDraft, setListingDraft] = useState<ListingDraft>(makeListingDraft);
   // Finance state is hoisted here for the same reason ListingDraft is: there is
@@ -1445,11 +1462,14 @@ async function sendApaMessage(text: string) {
   // language to write notifications in.
   useEffect(() => { if (authToken && authUser?.id) void registerForPush(); }, [authToken, authUser?.id]);
   useEffect(() => {
-    if (authToken && authUser?.id) apiCreate('app/me/lang', { lang }).catch(() => {});
-  }, [lang, authToken, authUser?.id]);
+    if (langReady && authToken && authUser?.id) apiCreate('app/me/lang', { lang }).catch(() => {});
+  }, [lang, langReady, authToken, authUser?.id]);
 
+  // Sub-pages keep their parent tab lit, so the bar says where you are.
+  const menuScreens: Screen[] = ['profile', 'menuPersonal', 'menuBanking', 'menuFarm', 'menuKyc', 'menuFaq'];
+  const projectScreens: Screen[] = ['projects', 'myProjects', 'projectProgress', 'kyc', 'regDone'];
   const activeTab: MainTab =
-    screen === 'community' ? 'community' : screen === 'projects' ? 'projects' : screen === 'profile' ? 'profile' : 'home';
+    screen === 'community' || screen === 'officers' ? 'community' : projectScreens.includes(screen) ? 'projects' : menuScreens.includes(screen) ? 'profile' : 'home';
 
   const content = useMemo(() => {
     const routes: Record<Screen, React.ReactNode> = {
@@ -2141,8 +2161,10 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
 
   return (
     <View style={styles.prefScreen}>
-      <Header title={tx('ব্যক্তিগত তথ্য', 'Personal Information')} right={firstSave ? tx('এড়িয়ে যান', 'Skip') : undefined} onRightPress={firstSave ? onDone : undefined} />
-      <View style={styles.prefLangCenter}><LangToggle subtle /></View>
+      {/* From the menu it is an ordinary sub-page: a back arrow, and no
+          language toggle floating over the title (the menu has one). */}
+      <Header title={tx('ব্যক্তিগত তথ্য', 'Personal Information')} onBack={firstSave ? undefined : onDone} right={firstSave ? tx('এড়িয়ে যান', 'Skip') : undefined} onRightPress={firstSave ? onDone : undefined} />
+      {firstSave ? <View style={styles.prefLangCenter}><LangToggle subtle /></View> : null}
       <RefreshScroll>
         {pending ? (
           <View style={{ marginHorizontal: 16, marginTop: 10, backgroundColor: colors.goldPale, borderWidth: 1, borderColor: '#EBC66A', borderRadius: 12, padding: 14 }}>
@@ -2805,7 +2827,7 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
           )}
         </Text>
       </View>
-      {liveWeather.loading ? <Text style={styles.apiNotice}>{tx('WeatherAPI থেকে লাইভ আবহাওয়া আনা হচ্ছে...', 'Loading live weather from WeatherAPI...')}</Text> : null}
+      {liveWeather.loading ? <Text style={styles.apiNotice}>{tx('লাইভ আবহাওয়া আনা হচ্ছে...', 'Loading live weather...')}</Text> : null}
       <WeatherSourceBadge fallback={liveWeather.usingFallback} error={liveWeather.error} />
       <View style={styles.weatherHero}>
         <View style={styles.flex}>
@@ -2822,7 +2844,7 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
 
       <View style={styles.weatherMetrics}>
         <WeatherMetric icon="💧" value={`${num(humidity, lang)}%`} label={tx('আর্দ্রতা', 'Humidity')} />
-        <WeatherMetric icon="↗" value={`${num(wind, lang)} km/h`} label={tx('বাতাস', 'Wind')} />
+        <WeatherMetric icon="↗" value={`${num(wind, lang)} ${tx('কিমি/ঘ', 'km/h')}`} label={tx('বাতাস', 'Wind')} />
         <WeatherMetric icon="🌧" value={`${num(rain, lang)}%`} label={tx('বৃষ্টির সম্ভাবনা', 'Rain chance')} />
       </View>
 
@@ -2830,7 +2852,7 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
       <View style={styles.forecastGrid}>
         {forecastDays.slice(0, 3).map((day, index) => (
           <View key={day.date || index} style={styles.forecastCard}>
-            <Text style={styles.forecastDay}>{index === 0 ? tx('আজ', 'Today') : day.date}</Text>
+            <Text style={styles.forecastDay}>{index === 0 ? tx('আজ', 'Today') : forecastDayLabel(day.date, lang)}</Text>
             <Text style={styles.forecastIcon}>{weatherConditionIcon(day.day?.condition?.code, 1)}</Text>
             <Text style={styles.forecastTemp}>{num(Math.round(day.day?.maxtemp_c ?? 0), lang)}° / {num(Math.round(day.day?.mintemp_c ?? 0), lang)}°</Text>
             <Text style={styles.forecastMeta}>{tx('বৃষ্টি', 'Rain')}: {num(day.day?.daily_chance_of_rain ?? 0, lang)}%</Text>
@@ -2856,8 +2878,8 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
             <Text style={styles.weatherAlertEmoji}>✓</Text>
           </View>
           <View style={styles.flex}>
-            <Text style={styles.weatherAlertTitle}>{tx('WeatherAPI সতর্কতা', 'WeatherAPI alerts')}</Text>
-            <Text style={styles.weatherAlertBody}>{tx('এই মুহূর্তে WeatherAPI থেকে কোনো গুরুতর সতর্কতা পাওয়া যায়নি।', 'WeatherAPI is not reporting any severe alert right now.')}</Text>
+            <Text style={styles.weatherAlertTitle}>{tx('কোনো গুরুতর সতর্কতা নেই', 'No severe alerts')}</Text>
+            <Text style={styles.weatherAlertBody}>{tx('এই মুহূর্তে আপনার এলাকার জন্য কোনো গুরুতর আবহাওয়া সতর্কতা নেই।', 'There is no severe weather alert for your area right now.')}</Text>
           </View>
         </Card>
       )}
@@ -2889,6 +2911,16 @@ function WeatherPage({ setScreen }: { setScreen: (screen: Screen) => void }) {
       </View>
     </>
   );
+}
+
+/** "Sun 13 Sep" / "রবি ১৩ সেপ্ট" for a forecast day's YYYY-MM-DD date. */
+function forecastDayLabel(value: unknown, lang: Lang): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value ?? ''));
+  if (!m) return String(value ?? '');
+  const date = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const days = lang === 'bn' ? ['রবি', 'সোম', 'মঙ্গল', 'বুধ', 'বৃহঃ', 'শুক্র', 'শনি'] : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const month = (lang === 'bn' ? MONTHS_BN : MONTHS_EN)[date.getMonth()];
+  return `${days[date.getDay()]} ${num(date.getDate(), lang)} ${month}`;
 }
 
 function WeatherMetric({ icon, value, label }: { icon: string; value: string; label: string }) {
@@ -5191,7 +5223,9 @@ function OrderListCard({ order, onOpen }: { order: ApiRow; onOpen: () => void })
   const badge = orderStatusBadge(status, tx);
   const [bg, fg] = orderTone(badge.tone);
   const stage = orderStage(status);
-  const title = String((lang === 'bn' ? order.items_summary_bn || order.items_summary : order.items_summary) || '');
+  // The server writes quantities as decimals ("×2.00"): show "×2" / "×২".
+  const title = String((lang === 'bn' ? order.items_summary_bn || order.items_summary : order.items_summary) || '')
+    .replace(/×\s*(\d+(?:\.\d+)?)/g, (_m, n: string) => `×${num(Number(n), lang)}`);
   const area = (lang === 'bn' ? [order.upazila_bn || order.upazila, order.district_bn || order.district] : [order.upazila, order.district]).filter(Boolean).join(', ');
   const who = String((lang === 'bn' ? order.distributor_name_bn || order.distributor_name : order.distributor_name) || '');
   const discount = Number(order.discount_amount || 0);
@@ -5683,7 +5717,10 @@ function BuyOrder({ setScreen, qty, setQty, product, onViewManufacturer }: {
   const firstPurchase = (quote?.first_purchase ?? null) as ApiRow | null;
   const promo = (quote?.promotion ?? null) as ApiRow | null;
   const metadata = parseMaybeJson(product?.metadata);
-  const features = Array.isArray(metadata.features) ? (metadata.features as string[]) : [];
+  // Feature tags are English-only unless the catalogue carries `features_bn`;
+  // a Bangla reader gets those or none, not English tags.
+  const featureList = lang === 'bn' ? metadata.features_bn : metadata.features;
+  const features = Array.isArray(featureList) ? (featureList as string[]) : [];
   const img = String(product?.image_url || metadata.image_url || '');
   const available = product?.status === 'active';
   const unit = unitLabel(product?.unit, lang);
@@ -6288,6 +6325,10 @@ function TrainingHome({ setScreen, openCategory }: { setScreen: (screen: Screen)
   const points = Number(data?.points ?? 0);
   const level = Number(data?.level ?? 1);
   const next = data?.next;
+  // Bangla readers get Bangla names or nothing — never the English ones.
+  const nextCategory = next ? String((lang === 'bn' ? next.category_name_bn : next.category_name) || '') : '';
+  const nextModule = next ? String((lang === 'bn' ? next.module_title_bn : next.module_title) || '') : '';
+  const nextSub = [nextCategory, nextModule].filter(Boolean).join(' · ');
 
   return (
     <>
@@ -6312,13 +6353,13 @@ function TrainingHome({ setScreen, openCategory }: { setScreen: (screen: Screen)
       {next ? (
         <Pressable
           style={({ pressed }) => [styles.trainContinue, pressed && styles.pressed]}
-          onPress={() => openCategory({ id: String(next.category_id), name: String(next.category_name || ''), emoji: '📘' })}
+          onPress={() => openCategory({ id: String(next.category_id), name: nextCategory || String(next.category_name || ''), emoji: '📘' })}
         >
           <Ionicons name={next.content_type === 'video' ? 'play-circle' : 'document-text'} size={30} color="#FFFFFF" />
           <View style={styles.flex}>
             <Text style={styles.trainContinueLabel}>{tx('পরবর্তী কনটেন্ট', 'Continue learning')}</Text>
             <Text style={styles.trainContinueTitle}>{rowTitle(next, lang, '')}</Text>
-            <Text style={styles.trainContinueSub}>{String(next.category_name || '')} · {String(next.module_title || '')}</Text>
+            {nextSub ? <Text style={styles.trainContinueSub}>{nextSub}</Text> : null}
           </View>
           <Ionicons name="chevron-forward" size={22} color="#FFFFFF" />
         </Pressable>
@@ -6365,7 +6406,7 @@ function TrainCatCard({ cat, onPress, highlighted }: { cat: any; onPress: () => 
     <Pressable onPress={onPress} style={({ pressed }) => [styles.trainCatCard, highlighted && styles.trainCatCardHi, pressed && styles.pressed]}>
       <Text style={styles.trainCatEmoji}>{cat.emoji || '📚'}</Text>
       <Text style={styles.trainCatTitle}>{rowTitle(cat, lang, tx('বিষয়', 'Topic'))}</Text>
-      <Text style={styles.trainCatMeta}>{num(Number(cat.module_count ?? 0), lang)} {tx('উপ-বিষয়', 'sub-topics')} · {num(total, lang)} {tx('কনটেন্ট', 'items')}</Text>
+      <Text style={styles.trainCatMeta}>{num(Number(cat.module_count ?? 0), lang)} {tx('উপ-বিষয়', Number(cat.module_count ?? 0) === 1 ? 'sub-topic' : 'sub-topics')} · {num(total, lang)} {tx('কনটেন্ট', total === 1 ? 'item' : 'items')}</Text>
       <View style={styles.trainProgressTrack}><View style={[styles.trainProgressFill, { width: `${pct}%` }]} /></View>
       <Text style={styles.trainCatMeta}>{num(done, lang)}/{num(total, lang)} {tx('সম্পন্ন', 'done')}</Text>
     </Pressable>
@@ -6449,7 +6490,8 @@ function TrainingModuleScreen({ module, setScreen, openContent }: { module: Lear
       {c.image_url ? <Image source={{ uri: String(c.image_url) }} style={styles.contentThumb} /> : <View style={[styles.contentThumb, styles.contentThumbFallback]}><Ionicons name={c.content_type === 'video' ? 'videocam' : 'document-text'} size={26} color={colors.maroon} /></View>}
       <View style={styles.flex}>
         <Text style={styles.contentTitle}>{rowTitle(c, lang, '')}</Text>
-        {c.excerpt ? <Text style={styles.contentExcerpt} numberOfLines={2}>{String(c.excerpt).replace(/[#*]/g, '')}</Text> : null}
+        {/* Bangla readers get the Bangla excerpt or none, not the English one. */}
+        {(lang === 'bn' ? c.excerpt_bn : c.excerpt) ? <Text style={styles.contentExcerpt} numberOfLines={2}>{String(lang === 'bn' ? c.excerpt_bn : c.excerpt).replace(/[#*]/g, '')}</Text> : null}
         <View style={styles.contentMetaRow}>
           <View style={styles.pointPill}><Ionicons name="star" size={11} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(c.points ?? 0), lang)}</Text></View>
           {c.has_quiz ? <View style={styles.quizPill}><Text style={styles.quizPillText}>{tx('কুইজ', 'Quiz')}</Text></View> : null}
@@ -6508,7 +6550,7 @@ function TrainingArticle({ contentId, setScreen, openQuiz }: { contentId: string
       <Header title={tx('আর্টিকেল', 'Article')} onBack={() => setScreen('trainingModule')} />
       {content?.image_url ? <Image source={{ uri: String(content.image_url) }} style={styles.readerImage} /> : null}
       <View style={styles.readerBody}>
-        <Text style={styles.readerKicker}>{String(content?.module_title || '')}</Text>
+        <Text style={styles.readerKicker}>{String((lang === 'bn' ? content?.module_title_bn : content?.module_title) || '')}</Text>
         <Text style={styles.readerTitle}>{rowTitle(content || undefined, lang, '')}</Text>
         <View style={styles.pointPillRow}>
           <View style={styles.pointPill}><Ionicons name="star" size={12} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(content?.points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text></View>
@@ -6602,7 +6644,7 @@ function TrainingVideoScreen({ contentId, setScreen }: { contentId: string | nul
         )}
       </View>
       <View style={styles.readerBody}>
-        <Text style={styles.readerKicker}>{String(content?.module_title || '')}</Text>
+        <Text style={styles.readerKicker}>{String((lang === 'bn' ? content?.module_title_bn : content?.module_title) || '')}</Text>
         <Text style={styles.readerTitle}>{rowTitle(content || undefined, lang, '')}</Text>
         <View style={styles.pointPillRow}>
           <View style={styles.pointPill}><Ionicons name="star" size={12} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(content?.points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text></View>
@@ -6972,7 +7014,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
       <SectionTitle title={tx('উপজেলা কর্মকর্তা', 'Upazila Officers')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('officers')} />
       <Card>
         {officerRows.slice(0, 2).map((officer, index) => (
-          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[tEnum(officer.role || officer.officer_role, lang), officer.district, officer.upazila].filter(Boolean).join(' · ')} phone={officer.phone ? String(officer.phone) : undefined} />
+          <Officer key={String(officer.id ?? index)} name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))} role={[tEnum(officer.role || officer.officer_role, lang), lang === 'bn' ? officer.district_bn || officer.district : officer.district, lang === 'bn' ? officer.upazila_bn || officer.upazila : officer.upazila].filter(Boolean).join(' · ')} phone={officer.phone ? String(officer.phone) : undefined} />
         ))}
         {officers.loading ? <Text style={styles.apiNotice}>{tx('কর্মকর্তার তথ্য আনা হচ্ছে...', 'Loading officer data...')}</Text> : null}
       </Card>
@@ -7036,7 +7078,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
           official={Number(post.is_official ?? 0) === 1}
           likes={num(post.like_count || 0, lang)}
           comments={num(post.comment_count || 0, lang)}
-          meta={[formatDate(post.created_at, lang), post.district || post.upazila].filter(Boolean).join(' · ')}
+          meta={[formatDate(post.created_at, lang), lang === 'bn' ? post.district_bn || post.upazila_bn || post.district || post.upazila : post.district || post.upazila].filter(Boolean).join(' · ')}
           highlight={Number(post.is_listing ?? 0) === 1}
           onViewListing={Number(post.is_listing ?? 0) === 1 ? () => setScreen('buyCategories') : undefined}
         />
@@ -7200,7 +7242,7 @@ function ProjectAreaCard({ project, onApply }: { project: ApiRow; onApply: () =>
                 <View style={ui.projStat}>
                   <Text style={ui.projStatIcon}>{s.icon}</Text>
                   <Text style={ui.projStatLabel}>{s.label}</Text>
-                  <Text style={ui.projStatValue} numberOfLines={2}>{s.value}</Text>
+                  <Text style={ui.projStatValue} numberOfLines={3}>{s.value}</Text>
                 </View>
               </View>
             ))}
@@ -7254,7 +7296,9 @@ function ProjectMineCard({ project, onOpen }: { project: ApiRow; onOpen?: () => 
     { label: tx('খামার মূল্যায়ন', 'Farm assessment'), done: farm },
   ];
   const firstPending = steps.findIndex((s) => !s.done);
-  const region = [project.upazila, project.district, project.division].filter(Boolean).join(', ');
+  const region = (lang === 'bn'
+    ? [project.upazila_bn || project.upazila, project.district_bn || project.district, project.division_bn || project.division]
+    : [project.upazila, project.district, project.division]).filter(Boolean).join(', ');
   const dates = [formatDate(project.start_date, lang), formatDate(project.end_date, lang)].filter(Boolean).join(' — ');
   return (
     <Card style={styles.projCard} onPress={onOpen}>
@@ -7319,7 +7363,7 @@ function Projects({ setScreen, onApply, onOpenApplication, initialTab = 'area' }
     <>
       <BrandHeader setScreen={setScreen} />
       <View style={styles.projectHero}>
-        <View style={styles.projectHeroIcon}><Text style={styles.projectHeroEmoji}>▣</Text></View>
+        <View style={styles.projectHeroIcon}><Ionicons name="briefcase" size={24} color="#FFFFFF" /></View>
         <View style={styles.flex}>
           <Text style={styles.projectHeroTitle}>{tx('শাথী পার্টনার প্রকল্প', 'Shathi Partner Projects')}</Text>
           <Text style={styles.projectHeroSub}>{tx('এলাকার, সকল ও আপনার প্রকল্প', 'Area, all and your projects')}</Text>
@@ -7619,8 +7663,24 @@ function ProgressTrail({ steps }: { steps: ProgressStep[] }) {
   );
 }
 
-function OfficerCard({ officer }: { officer: { name?: string; phone?: string; area?: string } }) {
-  const { tx } = useLanguage();
+/**
+ * The progress endpoints name an officer's area in English only. In Bangla,
+ * borrow the Bangla name from a row that already carries the same place
+ * (the listing, or the farmer's own profile).
+ */
+function officerAreaText(area: unknown, lang: Lang, ...rows: Array<Record<string, any> | null | undefined>): string {
+  const en = String(area ?? '').trim();
+  if (!en || lang !== 'bn') return en;
+  for (const row of rows) {
+    if (!row) continue;
+    if (row.upazila_bn && String(row.upazila ?? '').trim() === en) return String(row.upazila_bn);
+    if (row.district_bn && String(row.district ?? '').trim() === en) return String(row.district_bn);
+  }
+  return en;
+}
+
+function OfficerCard({ officer, context }: { officer: { name?: string; phone?: string; area?: string }; context?: Array<Record<string, any> | null | undefined> }) {
+  const { tx, lang } = useLanguage();
   // A plain Card, not styles.officerCard: that variant zeroes the horizontal
   // margin for the success screens, which already inset their own content. Used
   // at screen level it renders full-bleed beside cards that are inset by 16.
@@ -7628,15 +7688,19 @@ function OfficerCard({ officer }: { officer: { name?: string; phone?: string; ar
     <Card>
       <Text style={styles.smallUpper}>{tx('নির্ধারিত মাঠ কর্মকর্তা', 'Assigned field officer')}</Text>
       <Text style={styles.officerName}>{officer.name}</Text>
-      <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${officer.phone}` : '', officer.area].filter(Boolean).join(' · ')}</Text>
+      <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${num(officer.phone, lang)}` : '', officerAreaText(officer.area, lang, ...(context ?? []))].filter(Boolean).join(' · ')}</Text>
     </Card>
   );
 }
 
-/** One listing in full: photos, where it stands, the price it was quoted on, and who is handling it. */
+/** One listing in full: photos, where it stands, what happens next, the price it is paid on, and who is handling it. */
 function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen) => void; listingId: string | null }) {
   const { tx, lang } = useLanguage();
   const { user } = useAuth();
+  const { width } = useWindowDimensions();
+  const [slide, setSlide] = useState(0);
+  const [viewer, setViewer] = useState<number | null>(null);
+  const [showTrail, setShowTrail] = useState(true);
   const resource = listingId
     ? `app/sale/listing-progress?listing_id=${encodeURIComponent(listingId)}${user?.id ? `&user_id=${encodeURIComponent(String(user.id))}` : ''}`
     : null;
@@ -7647,6 +7711,7 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
   const photos = listingPhotos(listing);
   const status = String(listing.status || 'submitted');
   const meta = LISTING_STATUS[status] ?? LISTING_STATUS.submitted;
+  const [toneBg, toneFg] = orderTone(meta.tone);
   const live = Number(listing.weight_kg || 0);
   const verified = Number(listing.verified_weight_kg || 0);
   const meat = Number(listing.meat_weight_kg || 0) || (live * (Number(listing.dressing_pct) || DEFAULT_DRESSING_PCT)) / 100;
@@ -7658,12 +7723,36 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
   const fee = (f: ApiRow | undefined) => Number(f?.amount ?? 0);
   const feeSub = (f: ApiRow | undefined) => (f?.mode === 'pct' && f.pct ? tx(`জীবিত দামের ${num(Number(f.pct), 'bn')}%`, `${num(Number(f.pct), 'en')}% of the live price`) : tx('প্রতি কেজি', 'per kg'));
 
+  const steps = data?.steps || [];
+  const current = steps.find((s) => s.state === 'current');
+  const doneCount = steps.filter((s) => s.state === 'done').length;
+  // One headline number. The rule's net rate × the weight is what the farmer
+  // is paid on today, and it is what the breakdown below adds up to; the
+  // estimate stored at submission is shown beside it only when it differs.
+  const todayTotal = pricing ? Number(pricing.net ?? 0) * basisWeight : 0;
+  const quoted = Number(listing.estimated_earning || 0);
+  const headline = paid > 0 ? paid : todayTotal || quoted;
+  const headlineLabel = paid > 0
+    ? tx('পরিশোধিত', 'Paid to you')
+    : todayTotal ? tx('আজকের দরে আপনার আয়', 'Your earning at today’s rate') : tx('আনুমানিক আয়', 'Estimated earning');
+  const showQuoted = !paid && todayTotal > 0 && quoted > 0 && Math.abs(quoted - todayTotal) >= 1;
+  const officer = data?.officer ?? null;
+  const officerPhone = String(officer?.phone || '').replace(/[^0-9+]/g, '');
+  const photoW = width - 32;
+
+  const stats = [
+    live > 0 ? { key: 'live', icon: '⚖️', label: verified > 0 ? tx('যাচাইকৃত ওজন', 'Verified weight') : tx('জীবিত ওজন', 'Live weight'), value: `${num(verified || live, lang)} ${tx('কেজি', 'kg')}`, ok: verified > 0 } : null,
+    meat > 0 ? { key: 'meat', icon: '🥩', label: tx('আনুমানিক মাংস', 'Est. meat'), value: `${num(Math.round(meat), lang)} ${tx('কেজি', 'kg')}`, ok: false } : null,
+    Number(listing.age_months || 0) > 0 ? { key: 'age', icon: '📅', label: tx('বয়স', 'Age'), value: `${num(Number(listing.age_months), lang)} ${tx('মাস', 'months')}`, ok: false } : null,
+    { key: 'qty', icon: '🐄', label: tx('সংখ্যা', 'Quantity'), value: `${num(Number(listing.quantity || 1), lang)} ${tx('টি', Number(listing.quantity || 1) > 1 ? 'animals' : 'animal')}`, ok: false },
+  ].filter(Boolean) as { key: string; icon: string; label: string; value: string; ok: boolean }[];
+
   return (
     <>
       <Header title={tx('তালিকার বিবরণ', 'Listing details')} onBack={() => setScreen('myListings')} />
       {state.loading ? (
         <>
-          <View style={{ paddingHorizontal: 16, marginTop: 12 }}><Skeleton height={150} radius={14} /></View>
+          <View style={{ paddingHorizontal: 16, marginTop: 12 }}><Skeleton height={220} radius={16} /></View>
           <ListSkeleton variant="row" count={3} />
         </>
       ) : null}
@@ -7677,40 +7766,107 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
       ) : null}
       {data ? (
         <>
+          {/* Photos: full-width, swipe between them, tap to see one full screen. */}
           {photos.length ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={ui.photoStrip}>
-              {photos.map((uri) => <Image key={uri} source={{ uri }} style={ui.photo} resizeMode="cover" />)}
-            </ScrollView>
-          ) : null}
-
-          <View style={ui.dHero}>
-            <Text style={ui.dHeroKicker}>{String(data.reference || '')} · {formatDate(String(listing.created_at), lang)}</Text>
-            <Text style={ui.dHeroTitle}>{listingTitle(listing, lang)}</Text>
-            <Text style={ui.dHeroSub}>{tx(meta.bn, meta.en)}{place ? `  ·  📍 ${place}` : ''}</Text>
-            <View style={ui.dHeroRow}>
-              <View>
-                <Text style={[ui.dHeroKicker, { letterSpacing: 0 }]}>{paid > 0 ? tx('পরিশোধিত', 'Paid') : tx('আনুমানিক আয়', 'Estimated earning')}</Text>
-                <Text style={ui.dHeroAmount}>{amount(paid || Number(listing.estimated_earning || 0), lang)}</Text>
+            <View style={ui.ldGallery}>
+              <ScrollView
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onMomentumScrollEnd={(e) => setSlide(Math.round(e.nativeEvent.contentOffset.x / photoW))}
+                style={{ width: photoW, borderRadius: 16 }}
+              >
+                {photos.map((uri, i) => (
+                  <Pressable key={uri} onPress={() => setViewer(i)} accessibilityRole="imagebutton" accessibilityLabel={tx('ছবি বড় করে দেখুন', 'View photo')}>
+                    <Image source={{ uri }} style={[ui.ldPhoto, { width: photoW }]} resizeMode="cover" />
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <View style={ui.ldPhotoBadge}>
+                <Ionicons name="images-outline" size={13} color="white" />
+                <Text style={ui.ldPhotoBadgeText}>{num(slide + 1, lang)} / {num(photos.length, lang)}</Text>
               </View>
-              {verified > 0 ? <View style={ui.dHeroBadge}><Text style={ui.dHeroBadgeText}>✓ {tx('যাচাইকৃত', 'Verified')} {num(verified, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
+              {photos.length > 1 ? (
+                <View style={ui.ldDots}>{photos.map((u, i) => <View key={u} style={[ui.ldDot, i === slide && ui.ldDotOn]} />)}</View>
+              ) : null}
+            </View>
+          ) : (
+            <View style={ui.ldNoPhoto}>
+              <Text style={{ fontSize: 44 }}>{String(listing.emoji || '🐄')}</Text>
+              <Text style={ui.ldNoPhotoText}>{tx('কোনো ছবি দেওয়া হয়নি', 'No photos added')}</Text>
+            </View>
+          )}
+
+          {/* Identity and status. */}
+          <View style={ui.ldCard}>
+            <Text style={ui.ldKicker}>{String(data.reference || listing.listing_code || '')} · {formatDate(String(listing.created_at), lang)}</Text>
+            <Text style={ui.ldTitle}>{listingTitle(listing, lang)}</Text>
+            <View style={ui.ldMetaRow}>
+              <View style={[ui.statusPill, { backgroundColor: toneBg, marginTop: 0 }]}><Text style={[ui.statusPillText, { color: toneFg }]}>{tx(meta.bn, meta.en)}</Text></View>
+            </View>
+            {place ? (
+              <View style={ui.ldPlace}>
+                <Ionicons name="location-outline" size={15} color={colors.muted} />
+                <Text style={ui.ldPlaceText}>{place}</Text>
+              </View>
+            ) : null}
+            <View style={ui.ldStats}>
+              {stats.map((s) => (
+                <View key={s.key} style={ui.ldStat}>
+                  <Text style={ui.ldStatIcon}>{s.icon}</Text>
+                  <View style={styles.flex}>
+                    <Text style={ui.ldStatLabel} numberOfLines={1}>{s.label}</Text>
+                    <Text style={ui.ldStatValue} numberOfLines={1}>{s.ok ? '✓ ' : ''}{s.value}</Text>
+                  </View>
+                </View>
+              ))}
             </View>
           </View>
 
-          <View style={ui.tagRow}>
-            {live > 0 ? <View style={ui.tag}><Text style={ui.tagText}>{tx('জীবিত', 'Live')} {num(live, lang)} {tx('কেজি', 'kg')}</Text></View> : null}
-            {meat > 0 ? <View style={ui.tag}><Text style={ui.tagText}>{tx('মাংস', 'Meat')} {num(Math.round(meat), lang)} {tx('কেজি', 'kg')}</Text></View> : null}
-            {Number(listing.age_months || 0) > 0 ? <View style={ui.tag}><Text style={ui.tagText}>{tx('বয়স', 'Age')} {num(Number(listing.age_months), lang)} {tx('মাস', 'months')}</Text></View> : null}
-            {Number(listing.quantity || 1) > 1 ? <View style={ui.tag}><Text style={ui.tagText}>{num(Number(listing.quantity), lang)} {tx('টি পশু', 'animals')}</Text></View> : null}
+          {/* The money: one number, explained. */}
+          <View style={[ui.ldEarn, paid > 0 && ui.ldEarnPaid]}>
+            <Text style={ui.ldEarnLabel}>{headlineLabel}</Text>
+            <Text style={ui.ldEarnValue}>{amount(headline, lang)}</Text>
+            {paid > 0 ? (
+              <Text style={ui.ldEarnSub}>{[listing.payment_method ? tEnum(String(listing.payment_method), lang) : '', listing.paid_at ? formatDate(String(listing.paid_at), lang) : ''].filter(Boolean).join(' · ')}</Text>
+            ) : (
+              <>
+                {pricing ? <Text style={ui.ldEarnSub}>৳{num(Number(pricing.net ?? 0), lang)} / {tx('কেজি', 'kg')} × {num(basisWeight, lang)} {tx('কেজি', 'kg')}{verified ? tx(' (যাচাইকৃত)', ' (verified)') : ''}</Text> : null}
+                {showQuoted ? <Text style={ui.ldEarnSub}>{tx('তালিকা দেওয়ার সময়ের হিসাব', 'Estimate when you listed')}: {amount(quoted, lang)}</Text> : null}
+                <Text style={ui.ldEarnNote}>{tx('চূড়ান্ত পেমেন্ট মাঠ কর্মকর্তার যাচাইকৃত ওজনে হবে।', 'The final payment uses the weight the field officer verifies.')}</Text>
+              </>
+            )}
           </View>
 
           {data.rejected ? (
-            <View style={styles.infoBar}>
-              <Text style={styles.infoText}>{tx('এই তালিকাটি বাতিল হয়েছে। কারণ জানতে মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This listing was cancelled or rejected. Talk to your field officer to find out why.')}</Text>
+            <View style={ui.ldAlert}>
+              <Ionicons name="alert-circle" size={20} color={colors.danger} />
+              <Text style={ui.ldAlertText}>{data.note || tx('এই তালিকাটি বাতিল হয়েছে। কারণ জানতে মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This listing was cancelled or rejected. Talk to your field officer to find out why.')}</Text>
             </View>
           ) : null}
 
-          <SectionTitle title={tx('অগ্রগতি', 'Progress')} />
-          <ProgressTrail steps={data.steps || []} />
+          {/* What is happening now, and who to call about it. */}
+          {current && !data.rejected ? (
+            <View style={ui.ldNext}>
+              <View style={ui.ldNextHead}>
+                <Text style={ui.ldNextKicker}>{tx('এখন কী হচ্ছে', 'What’s happening now')}</Text>
+                <Text style={ui.ldNextStep}>{tx(`ধাপ ${num(current.index, 'bn')} / ${num(steps.length, 'bn')}`, `Step ${current.index} of ${steps.length}`)}</Text>
+              </View>
+              <View style={ui.ldBar}><View style={[ui.ldBarFill, { width: `${Math.round((doneCount / Math.max(1, steps.length)) * 100)}%` }]} /></View>
+              <Text style={ui.ldNextTitle}>{tx(current.title_bn, current.title_en)}</Text>
+              <Text style={ui.ldNextDesc}>{tx(current.desc_bn, current.desc_en)}</Text>
+              {current.note ? <Text style={ui.ldNextDesc}>{tx(current.note_bn || current.note, current.note)}</Text> : null}
+              {officerPhone ? (
+                <Pressable style={({ pressed }) => [ui.ldCall, pressed && styles.pressed]} onPress={() => Linking.openURL(`tel:${officerPhone}`)} accessibilityRole="button">
+                  <Ionicons name="call" size={16} color="white" />
+                  <Text style={ui.ldCallText}>{tx('মাঠ কর্মকর্তাকে কল করুন', 'Call your field officer')}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+
+          <SectionTitle title={tx('অগ্রগতি', 'Progress')} right={showTrail ? tx('লুকান', 'Hide') : tx('দেখুন', 'Show')} onRightPress={() => setShowTrail((v) => !v)} />
+          {showTrail ? <ProgressTrail steps={steps} /> : null}
 
           {pricing ? (
             <View style={ui.bdCard}>
@@ -7723,7 +7879,7 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
                 { key: 'platform', title: tx('প্ল্যাটফর্ম চার্জ', 'Platform fee'), sub: feeSub(pricing.platform as ApiRow), rate: fee(pricing.platform as ApiRow), neg: true },
                 { key: 'logistics', title: tx('লজিস্টিক্স ও পরিবহন', 'Logistics & transport'), sub: feeSub(pricing.logistics as ApiRow), rate: fee(pricing.logistics as ApiRow), neg: true },
                 { key: 'care', title: tx('গুদাম ও পশু চিকিৎসা', 'Warehousing & care'), sub: feeSub(pricing.care as ApiRow), rate: fee(pricing.care as ApiRow), neg: true },
-              ].map((r) => (
+              ].filter((r) => r.rate > 0).map((r) => (
                 <View key={r.key} style={ui.bdRow}>
                   <View style={styles.flex}>
                     <Text style={ui.bdTitle}>{r.title}</Text>
@@ -7738,7 +7894,6 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
               <View style={ui.bdFinal}>
                 <Text style={ui.bdFinalLabel}>{tx('নিট কৃষক মূল্য', 'Net farmer rate')} · ৳{num(Number(pricing.net ?? 0), lang)} / {tx('কেজি', 'kg')}</Text>
                 <Text style={ui.bdFinalValue}>{amount(Number(pricing.net ?? 0) * basisWeight, lang)}</Text>
-                <Text style={ui.bdFinalSub}>{tx('চূড়ান্ত পেমেন্ট মাঠ কর্মকর্তার যাচাইকৃত ওজনে।', 'The final payment uses the weight the field officer verifies.')}</Text>
               </View>
             </View>
           ) : null}
@@ -7750,20 +7905,42 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
             </View>
           ) : null}
 
-          {paid > 0 ? (
+          {paid > 0 && listing.payment_reference ? (
             <View style={ui.dCard}>
               <Text style={ui.dCardTitle}>{tx('পেমেন্ট', 'Payment')}</Text>
-              <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পরিমাণ', 'Amount')}</Text><Text style={ui.sumTotalVal}>{amount(paid, lang)}</Text></View>
-              {listing.payment_method ? <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('পদ্ধতি', 'Method')}</Text><Text style={ui.sumVal}>{tEnum(String(listing.payment_method), lang)}</Text></View> : null}
-              {listing.payment_reference ? <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('রেফারেন্স', 'Reference')}</Text><Text style={ui.sumVal}>{String(listing.payment_reference)}</Text></View> : null}
-              {listing.paid_at ? <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('তারিখ', 'Date')}</Text><Text style={ui.sumVal}>{formatDate(String(listing.paid_at), lang)}</Text></View> : null}
+              <View style={ui.sumLine}><Text style={ui.sumKey}>{tx('রেফারেন্স', 'Reference')}</Text><Text style={ui.sumVal}>{String(listing.payment_reference)}</Text></View>
             </View>
           ) : null}
 
-          {data.officer ? <OfficerCard officer={data.officer} /> : null}
+          {officer ? (
+            <View style={ui.ldOfficer}>
+              <View style={ui.ldOfficerAvatar}><Text style={ui.ldOfficerInitial}>{String(officer.name || '?').trim().charAt(0).toUpperCase()}</Text></View>
+              <View style={styles.flex}>
+                <Text style={ui.ldKicker}>{tx('নির্ধারিত মাঠ কর্মকর্তা', 'Your field officer')}</Text>
+                <Text style={ui.ldOfficerName}>{officer.name}</Text>
+                <Text style={ui.ldOfficerMeta}>{[officer.phone ? num(officer.phone, lang) : '', officerAreaText(officer.area, lang, listing, user as ApiRow | null)].filter(Boolean).join(' · ')}</Text>
+              </View>
+              {officerPhone ? (
+                <Pressable style={({ pressed }) => [ui.ldOfficerCall, pressed && styles.pressed]} onPress={() => Linking.openURL(`tel:${officerPhone}`)} accessibilityLabel={tx('কল করুন', 'Call')} hitSlop={6}>
+                  <Ionicons name="call" size={18} color={colors.maroon} />
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+          <View style={{ height: 16 }} />
         </>
       ) : null}
-      <AppButton title={tx('আমার তালিকায় ফিরুন', 'Back to My Listings')} variant="outline" onPress={() => setScreen('myListings')} />
+
+      <Modal visible={viewer !== null} transparent animationType="fade" onRequestClose={() => setViewer(null)}>
+        <View style={ui.ldViewer}>
+          <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false} contentOffset={{ x: (viewer ?? 0) * width, y: 0 }}>
+            {photos.map((uri) => <Image key={uri} source={{ uri }} style={{ width, height: '100%' }} resizeMode="contain" />)}
+          </ScrollView>
+          <Pressable style={ui.ldViewerClose} onPress={() => setViewer(null)} accessibilityLabel={tx('বন্ধ করুন', 'Close')} hitSlop={10}>
+            <Ionicons name="close" size={26} color="white" />
+          </Pressable>
+        </View>
+      </Modal>
     </>
   );
 }
@@ -7816,7 +7993,7 @@ function ProjectProgress({ setScreen, applicationId }: { setScreen: (screen: Scr
               <Text style={styles.noteText}>{data.note}</Text>
             </View>
           ) : null}
-          {data.officer ? <OfficerCard officer={data.officer} /> : null}
+          {data.officer ? <OfficerCard officer={data.officer} context={[app, user as ApiRow | null]} /> : null}
         </>
       ) : null}
       <AppButton title={tx('আমার প্রকল্পে ফিরুন', 'Back to My Projects')} variant="outline" onPress={() => setScreen('myProjects')} />
@@ -7919,7 +8096,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
           )}
         </View>
         <Text style={styles.profileName}>{user?.display_name || user?.full_name || tx('শাথী ব্যবহারকারী', 'Shathi user')}</Text>
-        <Text style={styles.profileMeta}>☎ {user?.phone || ''}{user?.district ? `   📍 ${lang === 'bn' ? user.district_bn || user.district : user.district}` : ''}</Text>
+        <Text style={styles.profileMeta}>☎ {num(user?.phone || '', lang)}{user?.district ? `   📍 ${lang === 'bn' ? user.district_bn || user.district : user.district}` : ''}</Text>
         <View style={styles.roleChipRow}>
           {roleChips.map((label) => (
             <View key={label} style={styles.roleChip}>
@@ -8064,7 +8241,13 @@ function BankingScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
     }
   }
 
-  const providers = ['bkash', 'nagad', 'rocket', 'upay'];
+  // Stored ids stay lowercase; only the label is the brand's own spelling.
+  const providers: Array<{ id: string; label: string }> = [
+    { id: 'bkash', label: tx('বিকাশ', 'bKash') },
+    { id: 'nagad', label: tx('নগদ', 'Nagad') },
+    { id: 'rocket', label: tx('রকেট', 'Rocket') },
+    { id: 'upay', label: tx('উপায়', 'Upay') },
+  ];
   return (
     <>
       <Header title={tx('ব্যাংকিং বিবরণ', 'Banking Details')} onBack={() => setScreen('profile')} />
@@ -8076,8 +8259,8 @@ function BankingScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <Text style={styles.label}>{tx('মোবাইল ব্যাংকিং', 'Mobile banking')}</Text>
         <View style={styles.kycChipRow}>
           {providers.map((p) => (
-            <Pressable key={p} style={[styles.genderPill, { flex: 0, paddingHorizontal: 16 }, provider === p && styles.genderPillActive]} onPress={() => setProvider(provider === p ? '' : p)}>
-              <Text style={[styles.genderPillText, provider === p && styles.genderPillTextActive]}>{p}</Text>
+            <Pressable key={p.id} style={({ pressed }) => [styles.choiceChip, provider === p.id && styles.genderPillActive, pressed && styles.pressed]} onPress={() => setProvider(provider === p.id ? '' : p.id)}>
+              <Text style={[styles.genderPillText, provider === p.id && styles.genderPillTextActive]}>{p.label}</Text>
             </Pressable>
           ))}
         </View>
@@ -8224,7 +8407,7 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <Text style={styles.pageHint}>{tx('ডকুমেন্টের ধরন নির্বাচন করে নমুনা দেখে ছবি তুলুন।', 'Pick a document type, check the sample, then add a photo.')}</Text>
         <View style={styles.kycChipRow}>
           {docTypes.map((d) => (
-            <Pressable key={d.key} style={[styles.genderPill, { flex: 0, paddingHorizontal: 14 }, docType === d.key && styles.genderPillActive]} onPress={() => { setDocType(d.key); setPickedUri(null); }}>
+            <Pressable key={d.key} style={({ pressed }) => [styles.choiceChip, docType === d.key && styles.genderPillActive, pressed && styles.pressed]} onPress={() => { setDocType(d.key); setPickedUri(null); }}>
               <Text style={[styles.genderPillText, docType === d.key && styles.genderPillTextActive]}>{d.label}</Text>
             </Pressable>
           ))}
@@ -8314,9 +8497,12 @@ function FaqScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
       <Header title={tx('সাহায্য ও FAQ', 'Help & FAQ')} onBack={() => setScreen('profile')} />
       <RefreshScroll contentContainerStyle={styles.menuFormScroll}>
         {faqs.loading ? <ApiStatus state={faqs} empty={tx('এখন কোনো প্রশ্ন পাওয়া যায়নি।', 'No FAQs available right now.')} /> : null}
-        {faqs.rows.map((row) => {
+        {faqs.rows.filter((row) => row.status !== 'Inactive').map((row) => {
           const id = String(row.id);
-          const question = localized(row, lang, 'question', String(row.question || row.question_en || ''));
+          // Older servers send only `question` (English) and `bangla`.
+          const question = lang === 'bn' && row.bangla && !row.question_bn
+            ? String(row.bangla)
+            : localized(row, lang, 'question', String(row.question || row.question_en || ''));
           const answer = localized(row, lang, 'answer', String(row.answer || row.answer_en || ''));
           const isOpen = open === id;
           return (
@@ -8734,7 +8920,7 @@ function OfficersScreen({ setScreen }: { setScreen: (screen: Screen) => void }) 
             <Officer
               key={String(officer.id ?? index)}
               name={String(officer.name || officer.full_name || tx('কর্মকর্তা', 'Officer'))}
-              role={[tEnum(officer.role || officer.officer_role, lang), officer.district, officer.upazila].filter(Boolean).join(' · ')}
+              role={[tEnum(officer.role || officer.officer_role, lang), lang === 'bn' ? officer.district_bn || officer.district : officer.district, lang === 'bn' ? officer.upazila_bn || officer.upazila : officer.upazila].filter(Boolean).join(' · ')}
               phone={officer.phone ? String(officer.phone) : undefined}
             />
           ))}
@@ -9035,7 +9221,7 @@ const fin = StyleSheet.create({
 
   // Amount + quote
   amountRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6 },
-  amountInput: { flex: 1, borderWidth: 1.5, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14,
+  amountInput: { flex: 1, minWidth: 0, borderWidth: 1.5, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14,
                  paddingVertical: 12, fontSize: 22, fontWeight: '800', color: colors.ink, textAlign: 'right', backgroundColor: colors.card },
   sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
   stepBtn: { width: 44, height: 44, borderRadius: 22, borderWidth: 1.5, borderColor: colors.line,
@@ -9190,7 +9376,7 @@ function OfficerHelpStrip({ district, title }: { district?: string | null; title
   const officer = officers.rows[0];
   const name = officer ? String(officer.name ?? officer.full_name ?? '') : tx('শাথী সেবা সহায়তা', 'Shathi Sheba support');
   const role = officer
-    ? rowTitle({ title_bn: officer.role_bn, title_en: officer.role }, lang, tx('মাঠ কর্মকর্তা', 'Field officer'))
+    ? (lang === 'bn' && officer.role_bn ? String(officer.role_bn) : officer.role ? tEnum(officer.role, lang) : tx('মাঠ কর্মকর্তা', 'Field officer'))
     : tx('কেন্দ্রীয় সহায়তা', 'Central support');
   const area = officer ? String((lang === 'bn' ? officer.upazila_bn || officer.district_bn : null) || officer.upazila || officer.district || district || '') : '';
   const phone = officer ? String(officer.phone ?? officer.mobile ?? '') : '16234';
@@ -10639,8 +10825,11 @@ function LoanApplyDetails({
                   style={({ pressed }) => [fin.schedHead, pressed && styles.pressed]}
                 >
                   <Text style={fin.schedHeadText}>
-                    {num(schedule.length, lang)}{tx('টি ', ' ')}
-                    {financeLabel(quote.repayment_mode, lang)} {tx('কিস্তি', 'instalments')}
+                    {/* The mode label already ends in "instalment" — "16 weekly
+                        instalment instalments" said it twice. */}
+                    {lang === 'bn'
+                      ? `${num(schedule.length, lang)}টি ${financeLabel(quote.repayment_mode, lang)}`
+                      : `${schedule.length} ${financeLabel(quote.repayment_mode, lang)}${schedule.length > 1 && /installment$/i.test(financeLabel(quote.repayment_mode, lang)) ? 's' : ''}`}
                     {'  '}
                     <Text style={{ color: colors.muted, fontWeight: '600' }}>
                       ({amount(quote.total_payable, lang)})
@@ -11817,7 +12006,7 @@ function OverdueHandling({ arrears, account }: { arrears?: LoanArrears; account:
           <SectionTitle title={tx('যোগাযোগ করুন', 'Who to contact')} />
           <Card style={{ marginHorizontal: 16, padding: 14 }}>
             <Text style={styles.officerName}>{officer.name}</Text>
-            <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${officer.phone}` : '', officer.area].filter(Boolean).join(' · ')}</Text>
+            <Text style={styles.officerMeta}>{[officer.phone ? `☎ ${num(officer.phone, lang)}` : '', officer.area].filter(Boolean).join(' · ')}</Text>
             {officer.phone ? (
               <AppButton title={tx('কর্মকর্তাকে কল করুন', 'Call your officer')} variant="outline" onPress={() => Linking.openURL(`tel:${officer.phone}`)} />
             ) : null}
