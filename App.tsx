@@ -10,6 +10,7 @@ import YoutubePlayer from 'react-native-youtube-iframe';
 import {
   ActivityIndicator,
   Animated,
+  BackHandler,
   Easing,
   Keyboard,
   KeyboardAvoidingView,
@@ -208,6 +209,15 @@ const ENUM_LABELS: Record<string, [string, string]> = {
   fishery: ['মৎস্য', 'Fishery'], vegetables: ['সবজি', 'Vegetables'], fruits: ['ফল', 'Fruits'],
   field_officer: ['মাঠ কর্মকর্তা', 'Field officer'], ho_query_officer: ['এইচও কর্মকর্তা', 'HO officer'], community_officer: ['কমিউনিটি কর্মকর্তা', 'Community officer'],
   question: ['প্রশ্ন', 'Question'], update: ['আপডেট', 'Update'], general: ['সাধারণ', 'General'], complaint: ['অভিযোগ', 'Complaint'], crop: ['ফসল', 'Crop'],
+  // Sale listing workflow (v2): statuses, field-verification results and the
+  // animal profile's enums. Without these the app would print raw codes.
+  verified: ['যাচাই সম্পন্ন', 'Verified'], contracted: ['ক্রয় চুক্তি হয়েছে', 'Contracted'],
+  shipped: ['পাঠানো হয়েছে', 'Shipped'], paid: ['পরিশোধিত', 'Paid'],
+  passed: ['উত্তীর্ণ', 'Passed'], failed: ['উত্তীর্ণ হয়নি', 'Not passed'], recheck: ['পুনরায় যাচাই', 'Recheck'],
+  scheduled: ['নির্ধারিত', 'Scheduled'], visited: ['পরিদর্শন হয়েছে', 'Visited'], in_progress: ['চলমান', 'In progress'],
+  intact: ['শিং আছে', 'Horns intact'], dehorned: ['শিং কাটা', 'Dehorned'], polled: ['শিংবিহীন', 'Polled'],
+  calm: ['শান্ত', 'Calm'], normal: ['স্বাভাবিক', 'Normal'], aggressive: ['উগ্র', 'Aggressive'],
+  good: ['ভালো', 'Good'], minor_issue: ['সামান্য সমস্যা', 'Minor issue'], lame: ['খোঁড়া', 'Lame'], injured: ['আঘাতপ্রাপ্ত', 'Injured'],
 };
 function tEnum(value: unknown, lang: Lang) {
   const key = String(value ?? '').toLowerCase().trim();
@@ -1045,8 +1055,56 @@ class ErrorBoundary extends Component<{ children: React.ReactNode; onHome?: () =
   }
 }
 
+// Screens the app shows before (or during) sign-in. They carry no bottom tabs,
+// and Android's back button leaves the app from them rather than jumping home.
+const AUTH_SCREENS: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
+
 export default function App() {
-  const [screen, setScreen] = useState<Screen>('onboarding');
+  const [screen, setScreenState] = useState<Screen>('onboarding');
+  // There is no navigation library here, so the root keeps the history itself:
+  // Android's back button and back gesture need somewhere to go back to, and
+  // until now they closed the app from every screen. Each screen change records
+  // where the farmer came from; `hardwareBackPress` pops that. Home (and the
+  // sign-out landing) is a root: reaching it empties the stack, so back from
+  // home leaves the app the way Android expects.
+  const screenRef = useRef<Screen>('onboarding');
+  const historyRef = useRef<Screen[]>([]);
+  const setScreen = useCallback((next: Screen) => {
+    const current = screenRef.current;
+    if (current === next) return;
+    if (next === 'home' || next === 'onboarding') {
+      historyRef.current = [];
+    } else {
+      // Returning to a screen that is already behind us unwinds to it instead
+      // of stacking a second copy — otherwise back would walk in circles.
+      const seen = historyRef.current.lastIndexOf(next);
+      historyRef.current = seen >= 0 ? historyRef.current.slice(0, seen) : [...historyRef.current, current].slice(-30);
+    }
+    screenRef.current = next;
+    setScreenState(next);
+  }, []);
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const onBackPress = () => {
+      const previous = historyRef.current[historyRef.current.length - 1];
+      if (previous) {
+        historyRef.current = historyRef.current.slice(0, -1);
+        screenRef.current = previous;
+        setScreenState(previous);
+        return true;
+      }
+      // Nothing recorded: from a sub-screen fall back to home, and only from
+      // home (or before sign-in) let Android close the app.
+      if (screenRef.current !== 'home' && !AUTH_SCREENS.includes(screenRef.current)) {
+        screenRef.current = 'home';
+        setScreenState('home');
+        return true;
+      }
+      return false;
+    };
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => subscription?.remove?.();
+  }, []);
   const [onboarding, setOnboarding] = useState(0);
   const [weight, setWeight] = useState('200');
   const [qty, setQty] = useState(2);
@@ -1753,7 +1811,7 @@ async function sendApaMessage(text: string) {
   // not fail loudly — it silently freezes a screen's props.
   }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo, orderDetailId, buyManufacturer, openFromNotification]);
 
-  const authScreens: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
+  const authScreens = AUTH_SCREENS;
 
   return (
     <SafeAreaProvider>
@@ -6948,7 +7006,6 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   ].filter(Boolean).join('&');
   const posts = useApiList<ApiRow>(`community/posts${feedQs ? '?' + feedQs : ''}`);
   const officers = useApiList<ApiRow>(`community/officers${district}`);
-  const marketUpdates = useApiList<ApiRow>(`app/market-updates${district}`);
   const [postDraft, setPostDraft] = useState('');
   const [postImage, setPostImage] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
@@ -6956,8 +7013,6 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const [localPosts, setLocalPosts] = useState<ApiRow[]>([]);
   const officerRows = shouldUseFallback(officers) ? fallbackOfficers : officers.rows;
   const postRows = shouldUseFallback(posts) && !localPosts.length ? fallbackCommunityPosts : posts.rows;
-  // Top market updates surface in the feed as highlighted official Shathi Sheba cards.
-  const highlightUpdates = (shouldUseFallback(marketUpdates) ? [] : marketUpdates.rows).slice(0, 2);
 
   async function pickPostImage() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -7036,23 +7091,9 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
       ) : null}
       {postError ? <Text style={styles.apiNotice}>{postError}</Text> : null}
 
-      {highlightUpdates.length ? (
-        <>
-          <SectionTitle title={tx('শাথী সেবা আপডেট', 'Shathi Sheba Updates')} right={tx('সব দেখুন', 'See all')} onRightPress={() => setScreen('marketUpdates')} />
-          {highlightUpdates.map((row, index) => (
-            <Pressable key={`mk-${row.id ?? index}`} onPress={() => setScreen('marketUpdates')}>
-              <Card style={styles.officialCard}>
-                <View style={styles.officialRibbon}>
-                  <Text style={styles.officialRibbonText}>{tx('শাথী সেবা ✓', 'Shathi Sheba ✓')}</Text>
-                </View>
-                {row.image_url ? <Image source={{ uri: String(row.image_url) }} style={styles.officialImage} /> : null}
-                <Text style={styles.postName}>{rowTitle(row, lang, tx('বাজার আপডেট', 'Market update'))}</Text>
-                <Text style={styles.postText} numberOfLines={2}>{rowBody(row, lang, '')}</Text>
-              </Card>
-            </Pressable>
-          ))}
-        </>
-      ) : null}
+      {/* The same market rates & updates card the home screen shows, rather than
+          a second, thinner copy of the official updates. "See all" is its own. */}
+      <MarketSnapshot setScreen={setScreen} />
 
       <SectionTitle title={tx('কমিউনিটি পোস্ট', 'Community Posts')} warning={fallbackWarning(posts)} />
       <View style={styles.feedFilterRow}>
@@ -7080,7 +7121,6 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
           comments={num(post.comment_count || 0, lang)}
           meta={[formatDate(post.created_at, lang), lang === 'bn' ? post.district_bn || post.upazila_bn || post.district || post.upazila : post.district || post.upazila].filter(Boolean).join(' · ')}
           highlight={Number(post.is_listing ?? 0) === 1}
-          onViewListing={Number(post.is_listing ?? 0) === 1 ? () => setScreen('buyCategories') : undefined}
         />
       ))}
     </>
@@ -7108,7 +7148,7 @@ function Officer({ name, role, phone }: { name: string; role: string; phone?: st
   );
 }
 
-function Post({ name, tag, text, likes, comments, meta, image, official, highlight, onViewListing }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean; highlight?: boolean; onViewListing?: () => void }) {
+function Post({ name, tag, text, likes, comments, meta, image, official, highlight }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean; highlight?: boolean }) {
   const { tx } = useLanguage();
   return (
     <Card style={[styles.postCard, official && styles.officialCard, highlight && styles.listingPostCard]}>
@@ -7129,11 +7169,6 @@ function Post({ name, tag, text, likes, comments, meta, image, official, highlig
       </View>
       {text ? <Text style={styles.postText}>{text}</Text> : null}
       {image ? <Image source={{ uri: image }} style={styles.postImage} /> : null}
-      {onViewListing ? (
-        <Pressable onPress={onViewListing} style={({ pressed }) => [styles.listingPostBtn, pressed && styles.pressed]}>
-          <Text style={styles.listingPostBtnText}>🛒 {tx('শাথী থেকে কিনুন-এ দেখুন', 'View in Buy from Shathi')}</Text>
-        </Pressable>
-      ) : null}
       <View style={styles.postActions}>
         <View style={styles.postActionItem}><Ionicons name="heart-outline" size={18} color={colors.muted} /><Text style={styles.postActionText}>{likes}</Text></View>
         <View style={styles.postActionItem}><Ionicons name="chatbubble-outline" size={17} color={colors.muted} /><Text style={styles.postActionText}>{comments}</Text></View>
@@ -7453,29 +7488,43 @@ function LedgerRow({ label, value, green, strong }: { label: string; value: stri
   );
 }
 
-// Seller's own listings + their admin-approval status.
-function listingStatusTone(s: string): 'green' | 'gold' | 'rose' | 'blue' {
-  return s === 'active' ? 'green' : s === 'rejected' || s === 'cancelled' ? 'rose' : s === 'sold' ? 'blue' : 'gold';
-}
+// Seller's own listings and where each one stands.
+//
+// v2 (2026-09): the admin approval step is gone. A listing runs
+// submitted → field_verification → verified → contracted → shipped → paid,
+// with `cancelled` and `rejected` as terminal side states. `active` and `sold`
+// are the retired words for verified and contracted; rows written before the
+// migration still carry them, so they keep an entry here. A listing is never a
+// Buy-from-Shathi product any more, so nothing says "finding a buyer".
 
-// The step a listing stands on, as on the server (lib/endpoints/progress.ts).
+/** The six milestones the farmer is shown. The mini step dots count them. */
+const LISTING_STEP_COUNT = 6;
+
+// How many of those six steps a status has completed — the step the listing is
+// standing on is therefore the one at this index.
 const LISTING_STAGE: Record<string, number> = {
-  draft: 0, submitted: 1, field_verification: 1, verified: 2, active: 3, contracted: 4, sold: 4, shipped: 5, paid: 6, rejected: -1, cancelled: -1,
+  draft: 0, submitted: 1, field_verification: 1, verified: 3, active: 3, contracted: 4, sold: 4, shipped: 5, paid: 6, rejected: -1, cancelled: -1,
 };
 
 const LISTING_STATUS: Record<string, { bn: string; en: string; tone: 'green' | 'gold' | 'rose' | 'blue' }> = {
   draft: { bn: 'খসড়া', en: 'Draft', tone: 'gold' },
   submitted: { bn: 'জমা হয়েছে · মাঠ যাচাইয়ের অপেক্ষায়', en: 'Submitted · awaiting field visit', tone: 'gold' },
-  field_verification: { bn: 'মাঠ যাচাই চলছে', en: 'Field verification', tone: 'gold' },
-  verified: { bn: 'যাচাই সম্পন্ন · অনুমোদনের অপেক্ষায়', en: 'Verified · awaiting approval', tone: 'blue' },
-  active: { bn: 'অনুমোদিত · ক্রেতা খোঁজা হচ্ছে', en: 'Approved · finding a buyer', tone: 'blue' },
+  field_verification: { bn: 'মাঠ যাচাই চলছে', en: 'Field verification under way', tone: 'gold' },
+  verified: { bn: 'যাচাই সম্পন্ন · ক্রয় চুক্তির অপেক্ষায়', en: 'Verified · awaiting purchase contract', tone: 'blue' },
+  active: { bn: 'যাচাই সম্পন্ন · ক্রয় চুক্তির অপেক্ষায়', en: 'Verified · awaiting purchase contract', tone: 'blue' },
   contracted: { bn: 'ক্রয় চুক্তি হয়েছে', en: 'Purchase contract accepted', tone: 'blue' },
   sold: { bn: 'ক্রয় চুক্তি হয়েছে', en: 'Purchase contract accepted', tone: 'blue' },
   shipped: { bn: 'পাঠানো হয়েছে · পেমেন্টের অপেক্ষায়', en: 'Shipped · payment next', tone: 'blue' },
   paid: { bn: 'পরিশোধিত', en: 'Paid', tone: 'green' },
-  rejected: { bn: 'বাতিল হয়েছে', en: 'Rejected', tone: 'rose' },
+  rejected: { bn: 'প্রত্যাখ্যাত হয়েছে', en: 'Rejected', tone: 'rose' },
   cancelled: { bn: 'বাতিল হয়েছে', en: 'Cancelled', tone: 'rose' },
 };
+
+/** Cancelled and rejected listings are out of the flow: no counts, own section. */
+function isListingClosedOut(status: unknown): boolean {
+  const s = String(status ?? '');
+  return s === 'cancelled' || s === 'rejected';
+}
 
 function listingTitle(l: ApiRow, lang: string): string {
   const names = lang === 'bn'
@@ -7520,7 +7569,7 @@ function ListingCard({ listing, onOpen }: { listing: ApiRow; onOpen?: () => void
       </View>
       {stage >= 0 ? (
         <View style={ui.miniSteps}>
-          {[0, 1, 2, 3, 4, 5].map((i) => <View key={i} style={[ui.miniStep, i < stage && ui.miniStepDone, i === stage && ui.miniStepCurrent]} />)}
+          {Array.from({ length: LISTING_STEP_COUNT }, (_, i) => i).map((i) => <View key={i} style={[ui.miniStep, i < stage && ui.miniStepDone, i === stage && ui.miniStepCurrent]} />)}
         </View>
       ) : null}
       <View style={ui.oFoot}>
@@ -7545,16 +7594,20 @@ function MyListingsBody({ setScreen, onOpenProgress }: { setScreen: (screen: Scr
   const uid = user?.id ? `?user_id=${encodeURIComponent(String(user.id))}` : '';
   const listings = useApiList<ApiRow>(`app/sale/my-listings${uid}`);
   const rows = listings.rows;
-  const open = rows.filter((l) => !['paid', 'rejected', 'cancelled'].includes(String(l.status)));
-  const closed = rows.filter((l) => ['paid', 'rejected', 'cancelled'].includes(String(l.status)));
-  const earned = rows.reduce((s, l) => s + Number(l.paid_amount || 0), 0);
+  // Cancelled and rejected listings leave the flow: they get their own section
+  // below, and they count towards nothing at the top.
+  const dropped = rows.filter((l) => isListingClosedOut(l.status));
+  const live = rows.filter((l) => !isListingClosedOut(l.status));
+  const open = live.filter((l) => String(l.status) !== 'paid');
+  const closed = live.filter((l) => String(l.status) === 'paid');
+  const earned = live.reduce((s, l) => s + Number(l.paid_amount || 0), 0);
   return (
     <>
       {rows.length ? (
         <View style={ui.projStats}>
           <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('চলমান', 'Active')}</Text><Text style={[ui.projStatValue, { fontSize: 18 }]}>{num(open.length, lang)}</Text></View>
           <View style={ui.projStatDivider} />
-          <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('সম্পন্ন', 'Completed')}</Text><Text style={[ui.projStatValue, { fontSize: 18 }]}>{num(closed.filter((l) => l.status === 'paid').length, lang)}</Text></View>
+          <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('সম্পন্ন', 'Completed')}</Text><Text style={[ui.projStatValue, { fontSize: 18 }]}>{num(closed.length, lang)}</Text></View>
           <View style={ui.projStatDivider} />
           <View style={ui.projStat}><Text style={ui.projStatLabel}>{tx('মোট আয়', 'Earned')}</Text><Text style={[ui.projStatValue, { fontSize: 15 }]}>{amount(earned, lang)}</Text></View>
         </View>
@@ -7572,6 +7625,8 @@ function MyListingsBody({ setScreen, onOpenProgress }: { setScreen: (screen: Scr
       {open.map((l) => <ListingCard key={String(l.id)} listing={l} onOpen={onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined} />)}
       {closed.length ? <SectionTitle title={tx('আগের তালিকা', 'Past listings')} /> : null}
       {closed.map((l) => <ListingCard key={String(l.id)} listing={l} onOpen={onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined} />)}
+      {dropped.length ? <SectionTitle title={tx('বাতিল', 'Cancelled')} /> : null}
+      {dropped.map((l) => <ListingCard key={String(l.id)} listing={l} onOpen={onOpenProgress ? () => onOpenProgress(String(l.id)) : undefined} />)}
     </>
   );
 }
@@ -7594,10 +7649,18 @@ type ProgressStep = {
   note_bn?: string | null;
 };
 
+/**
+ * A closed-out listing. The server used to send `rejected: true`; the v2
+ * contract sends `cancelled` / `rejected` objects carrying the reason and the
+ * date. Both shapes arrive here, so the screen reads either.
+ */
+type ClosedOut = { at?: string | null; reason?: string | null };
+
 type ProgressPayload = {
   reference?: string;
   status?: string;
-  rejected?: boolean;
+  rejected?: boolean | ClosedOut | null;
+  cancelled?: ClosedOut | null;
   steps?: ProgressStep[];
   note?: string | null;
   officer?: { name?: string; phone?: string; area?: string } | null;
@@ -7605,6 +7668,13 @@ type ProgressPayload = {
   application?: ApiRow;
   /** Sale listings: the price rule's breakdown (lib/pricing.ts ruleFees). */
   pricing?: ApiRow | null;
+  /** Listings v2 — what the field officer records, section by section. Any of
+   *  these may be missing while the section has not been filled in yet. */
+  field_verification?: ApiRow | null;
+  vaccinations?: ApiRow[] | null;
+  animal_profile?: ApiRow | null;
+  shipment?: ApiRow | null;
+  contract?: ApiRow | null;
 };
 
 /** One-shot fetch of a single object. `useApiList` only speaks in arrays. */
@@ -7693,6 +7763,51 @@ function OfficerCard({ officer, context }: { officer: { name?: string; phone?: s
   );
 }
 
+/** Trimmed text from any API value; '' when the server has not sent it. */
+function txt(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value).trim();
+}
+
+/** An object field from the API, or {} when it is missing — so a screen can
+ *  read `section.field` without guarding every access. */
+function asRow(value: unknown): ApiRow {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as ApiRow) : {};
+}
+
+/**
+ * The server's own words for a refusal. `naturalApiError` explains transport
+ * failures, which is wrong for a request the server answered deliberately —
+ * "you have already posted 3 times today" must reach the farmer unchanged.
+ */
+function serverMessage(error: unknown, lang: Lang): string {
+  const failure = error as { status?: number; message?: string } | null;
+  if (failure && typeof failure === 'object' && typeof failure.status === 'number' && failure.message) return failure.message;
+  return naturalApiError(error, lang);
+}
+
+/** One label -> value line in a listing-details section; nothing when empty. */
+function LdLine({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  if (!value) return null;
+  return (
+    <View style={ui.sumLine}>
+      <Text style={ui.sumKey}>{label}</Text>
+      <Text style={[ui.sumVal, strong ? { color: colors.maroon } : null]}>{value}</Text>
+    </View>
+  );
+}
+
+/** The head of one listing-details section: an icon, a title, an optional pill. */
+function LdSectionHead({ icon, title, pill }: { icon: string; title: string; pill?: { label: string; tone: 'green' | 'gold' | 'rose' | 'blue' } | null }) {
+  const [bg, fg] = orderTone(pill?.tone ?? 'rose');
+  return (
+    <View style={ui.ldSecHead}>
+      <Text style={ui.ldSecIcon}>{icon}</Text>
+      <Text style={ui.ldSecTitle}>{title}</Text>
+      {pill ? <View style={[ui.statusPill, { backgroundColor: bg, marginTop: 0 }]}><Text style={[ui.statusPillText, { color: fg }]}>{pill.label}</Text></View> : null}
+    </View>
+  );
+}
+
 /** One listing in full: photos, where it stands, what happens next, the price it is paid on, and who is handling it. */
 function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen) => void; listingId: string | null }) {
   const { tx, lang } = useLanguage();
@@ -7739,6 +7854,95 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
   const officer = data?.officer ?? null;
   const officerPhone = String(officer?.phone || '').replace(/[^0-9+]/g, '');
   const photoW = width - 32;
+
+  // ---- Listings v2 -----------------------------------------------------------
+  // Everything the field officer records arrives as its own section, and any of
+  // them may be absent: the server may not send it yet, or the officer has not
+  // filled it in. Each block below renders only once it has something to say.
+  const fv = asRow(data?.field_verification);
+  const vaccinations = (Array.isArray(data?.vaccinations) ? data.vaccinations : []) as ApiRow[];
+  const profile = asRow(data?.animal_profile);
+  const shipment = asRow(data?.shipment);
+  const contract = asRow(data?.contract);
+
+  const fvResult = txt(fv.result);
+  const fvWeight = Number(fv.verified_weight_kg || 0);
+  const fvOfficer = txt(fv.officer_name) || txt(fv.recorded_by_name);
+  const hasFieldVerification = !!(fvResult || fvWeight > 0 || fvOfficer || txt(fv.visit_date) || txt(fv.verified_at));
+  const fvTone: 'green' | 'gold' | 'rose' | 'blue' = fvResult === 'passed' ? 'green' : fvResult === 'failed' ? 'rose' : 'gold';
+
+  const profileRows = ([
+    [tx('রঙ', 'Colour'), txt(profile.colour)],
+    [tx('বিশেষ চিহ্ন', 'Distinguishing marks'), txt(profile.distinguishing_marks)],
+    [tx('শিং', 'Horns'), profile.horn_status ? tEnum(profile.horn_status, lang) : ''],
+    [tx('খাসি করা', 'Castrated'), profile.is_castrated === null || profile.is_castrated === undefined || profile.is_castrated === '' ? '' : Number(profile.is_castrated) ? tx('হ্যাঁ', 'Yes') : tx('না', 'No')],
+    [tx('স্বভাব', 'Temperament'), profile.temperament ? tEnum(profile.temperament, lang) : ''],
+    [tx('খাবার', 'Feed'), txt(profile.feed_type)],
+    [tx('থাকার ব্যবস্থা', 'Housing'), txt(profile.housing_type)],
+    [tx('কৃমিনাশক দেওয়া হয়েছে', 'Dewormed on'), formatDate(profile.deworming_on, lang)],
+    [tx('সর্বশেষ চিকিৎসা', 'Last treatment'), formatDate(profile.last_treatment_on, lang)],
+    [tx('বিমা রেফারেন্স', 'Insurance ref'), txt(profile.insurance_ref)],
+    [tx('পশু চিকিৎসক', 'Vet'), [txt(profile.vet_name), profile.vet_phone ? num(txt(profile.vet_phone), lang) : ''].filter(Boolean).join(' · ')],
+  ] as Array<[string, string]>).filter(([, value]) => !!value);
+  const profileNotes = [txt(profile.feeding_note), txt(profile.last_treatment_note), txt(profile.health_notes)].filter(Boolean).join(' · ');
+
+  const buyerName = txt(contract.buyer_name);
+  const buyerOrg = txt(contract.buyer_org);
+  const agreedRate = Number(contract.agreed_rate_per_kg || 0);
+  const agreedWeight = Number(contract.agreed_weight_kg || 0);
+  const contractAmount = Number(contract.contract_amount || 0);
+  const advanceAmount = Number(contract.advance_amount || 0);
+  const hasContract = !!(buyerName || buyerOrg || agreedRate || agreedWeight || contractAmount || advanceAmount || txt(contract.accepted_at) || txt(contract.contract_ref));
+
+  const driverPhone = txt(shipment.driver_phone).replace(/[^0-9+]/g, '');
+  const vehicleText = [shipment.vehicle_type ? tEnum(shipment.vehicle_type, lang) : '', txt(shipment.vehicle_ref)].filter(Boolean).join(' · ');
+  const expectedArrival = txt(shipment.expected_arrival) || txt(shipment.expected_arrival_at);
+  const hasShipment = !!(txt(shipment.dispatched_at) || vehicleText || txt(shipment.driver_name) || driverPhone || expectedArrival || txt(shipment.arrived_at) || txt(shipment.transporter));
+
+  // Cancelled and rejected. The older server said `rejected: true` and put the
+  // reason in `note`; the v2 payload sends an object with the reason and date,
+  // and the listing row carries them too. Read whichever arrived.
+  const closedInfo = (() => {
+    const pick = (value: unknown): ClosedOut | null => (value && typeof value === 'object' ? (value as ClosedOut) : null);
+    const cancelled = pick(data?.cancelled);
+    const rejectedObj = pick(data?.rejected);
+    const kind = status === 'rejected' || rejectedObj ? 'rejected' : status === 'cancelled' || cancelled || data?.rejected === true ? 'cancelled' : null;
+    if (!kind) return null;
+    const info = kind === 'rejected' ? rejectedObj : cancelled;
+    return {
+      kind,
+      at: txt(info?.at) || txt(kind === 'rejected' ? listing.rejected_at : listing.cancelled_at),
+      reason: txt(info?.reason) || txt(kind === 'rejected' ? listing.reject_reason : listing.cancel_reason) || txt(data?.note),
+    };
+  })();
+
+  // Share this listing's current status to the community. The server decides
+  // whether the farmer may post again today; the app only relays what it says.
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareNote, setShareNote] = useState('');
+  const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState('');
+  const [shared, setShared] = useState(false);
+
+  async function shareToCommunity() {
+    if (!listingId || sharing) return;
+    setSharing(true);
+    setShareError('');
+    try {
+      await apiCreate('app/community/share-listing', {
+        user_id: Number(user?.id) || undefined,
+        listing_id: listingId,
+        note: shareNote.trim() || undefined,
+      });
+      setShared(true);
+      setShareNote('');
+      setShareOpen(false);
+    } catch (error) {
+      setShareError(serverMessage(error, lang));
+    } finally {
+      setSharing(false);
+    }
+  }
 
   const stats = [
     live > 0 ? { key: 'live', icon: '⚖️', label: verified > 0 ? tx('যাচাইকৃত ওজন', 'Verified weight') : tx('জীবিত ওজন', 'Live weight'), value: `${num(verified || live, lang)} ${tx('কেজি', 'kg')}`, ok: verified > 0 } : null,
@@ -7823,6 +8027,24 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
             </View>
           </View>
 
+          {/* Cancelled or rejected: say so plainly, with the reason and the date. */}
+          {closedInfo ? (
+            <View style={ui.ldAlert}>
+              <Ionicons name="alert-circle" size={20} color={colors.danger} />
+              <View style={styles.flex}>
+                <Text style={ui.ldAlertTitle}>
+                  {closedInfo.kind === 'rejected'
+                    ? tx('এই তালিকাটি প্রত্যাখ্যাত হয়েছে', 'This listing was rejected')
+                    : tx('এই তালিকাটি বাতিল হয়েছে', 'This listing was cancelled')}
+                </Text>
+                <Text style={ui.ldAlertText}>
+                  {closedInfo.reason || tx('কারণ জানতে মাঠ কর্মকর্তার সাথে কথা বলুন।', 'Talk to your field officer to find out why.')}
+                </Text>
+                {closedInfo.at ? <Text style={ui.ldAlertMeta}>{formatDate(closedInfo.at, lang)}</Text> : null}
+              </View>
+            </View>
+          ) : null}
+
           {/* The money: one number, explained. */}
           <View style={[ui.ldEarn, paid > 0 && ui.ldEarnPaid]}>
             <Text style={ui.ldEarnLabel}>{headlineLabel}</Text>
@@ -7833,20 +8055,35 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
               <>
                 {pricing ? <Text style={ui.ldEarnSub}>৳{num(Number(pricing.net ?? 0), lang)} / {tx('কেজি', 'kg')} × {num(basisWeight, lang)} {tx('কেজি', 'kg')}{verified ? tx(' (যাচাইকৃত)', ' (verified)') : ''}</Text> : null}
                 {showQuoted ? <Text style={ui.ldEarnSub}>{tx('তালিকা দেওয়ার সময়ের হিসাব', 'Estimate when you listed')}: {amount(quoted, lang)}</Text> : null}
-                <Text style={ui.ldEarnNote}>{tx('চূড়ান্ত পেমেন্ট মাঠ কর্মকর্তার যাচাইকৃত ওজনে হবে।', 'The final payment uses the weight the field officer verifies.')}</Text>
+                {!closedInfo ? <Text style={ui.ldEarnNote}>{tx('চূড়ান্ত পেমেন্ট মাঠ কর্মকর্তার যাচাইকৃত ওজনে হবে।', 'The final payment uses the weight the field officer verifies.')}</Text> : null}
               </>
             )}
           </View>
 
-          {data.rejected ? (
-            <View style={ui.ldAlert}>
-              <Ionicons name="alert-circle" size={20} color={colors.danger} />
-              <Text style={ui.ldAlertText}>{data.note || tx('এই তালিকাটি বাতিল হয়েছে। কারণ জানতে মাঠ কর্মকর্তার সাথে কথা বলুন।', 'This listing was cancelled or rejected. Talk to your field officer to find out why.')}</Text>
-            </View>
+          {/* Tell the community where this animal has got to. */}
+          {!closedInfo ? (
+            <>
+              <Pressable
+                style={({ pressed }) => [ui.ldShare, pressed && styles.pressed]}
+                onPress={() => { setShareError(''); setShareOpen(true); }}
+                accessibilityRole="button"
+              >
+                <Ionicons name="share-social-outline" size={18} color={colors.maroon} />
+                <Text style={ui.ldShareText}>{tx('কমিউনিটিতে শেয়ার করুন', 'Share to community')}</Text>
+              </Pressable>
+              {shared ? (
+                <View style={ui.ldShareOk}>
+                  <Ionicons name="checkmark-circle" size={16} color={colors.green} />
+                  <Text style={ui.ldShareOkText}>{tx('কমিউনিটিতে পোস্ট হয়েছে।', 'Posted to the community.')}</Text>
+                  <Text style={styles.sectionRight} onPress={() => setScreen('community')}>{tx('দেখুন', 'View')}</Text>
+                </View>
+              ) : null}
+              {shareError && !shareOpen ? <Text style={ui.ldShareError}>{shareError}</Text> : null}
+            </>
           ) : null}
 
           {/* What is happening now, and who to call about it. */}
-          {current && !data.rejected ? (
+          {current && !closedInfo ? (
             <View style={ui.ldNext}>
               <View style={ui.ldNextHead}>
                 <Text style={ui.ldNextKicker}>{tx('এখন কী হচ্ছে', 'What’s happening now')}</Text>
@@ -7867,6 +8104,92 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
 
           <SectionTitle title={tx('অগ্রগতি', 'Progress')} right={showTrail ? tx('লুকান', 'Hide') : tx('দেখুন', 'Show')} onRightPress={() => setShowTrail((v) => !v)} />
           {showTrail ? <ProgressTrail steps={steps} /> : null}
+
+          {/* What the field officer found on the visit. */}
+          {hasFieldVerification ? (
+            <View style={ui.dCard}>
+              <LdSectionHead
+                icon="🔍"
+                title={tx('মাঠ যাচাই', 'Field verification')}
+                pill={fvResult ? { label: tEnum(fvResult, lang), tone: fvTone } : null}
+              />
+              <LdLine label={tx('পরিদর্শনের তারিখ', 'Visit date')} value={formatDate(fv.visit_date, lang)} />
+              <LdLine label={tx('যাচাইকৃত ওজন', 'Verified weight')} value={fvWeight > 0 ? `${num(fvWeight, lang)} ${tx('কেজি', 'kg')}` : ''} strong />
+              <LdLine label={tx('যাচাই সম্পন্ন', 'Verified on')} value={formatDate(fv.verified_at, lang)} />
+              <LdLine label={tx('মাঠ কর্মকর্তা', 'Field officer')} value={fvOfficer} />
+              {txt(fv.health_notes) ? <Text style={ui.ldSecNote}>{txt(fv.health_notes)}</Text> : null}
+            </View>
+          ) : null}
+
+          {/* Vaccinations, newest first as the server sends them. */}
+          {vaccinations.length ? (
+            <View style={ui.dCard}>
+              <LdSectionHead icon="💉" title={tx('টিকার তথ্য', 'Vaccinations')} />
+              {vaccinations.map((v, i) => (
+                <View key={String(v.id ?? i)} style={[ui.ldVacc, i === 0 && ui.ldVaccFirst]}>
+                  <Text style={ui.ldVaccName}>
+                    {txt(v.vaccine_name) || tx('টিকা', 'Vaccine')}
+                    {txt(v.dose_no) ? ` · ${tx('ডোজ', 'Dose')} ${num(txt(v.dose_no), lang)}` : ''}
+                  </Text>
+                  <Text style={ui.ldVaccMeta}>
+                    {[
+                      v.given_on ? `${tx('দেওয়া হয়েছে', 'Given')} ${formatDate(v.given_on, lang)}` : '',
+                      v.next_due_on ? `${tx('পরের ডোজ', 'Next due')} ${formatDate(v.next_due_on, lang)}` : '',
+                      txt(v.vet_name) ? `${tx('পশু চিকিৎসক', 'Vet')} ${txt(v.vet_name)}` : '',
+                    ].filter(Boolean).join('  ·  ')}
+                  </Text>
+                  {txt(v.notes) ? <Text style={ui.ldVaccMeta}>{txt(v.notes)}</Text> : null}
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          {/* The animal's own profile — only the fields that were filled in. */}
+          {profileRows.length || profileNotes ? (
+            <View style={ui.dCard}>
+              <LdSectionHead icon="🐄" title={tx('পশুর প্রোফাইল', 'Animal profile')} />
+              {profileRows.map(([label, value]) => <LdLine key={label} label={label} value={value} />)}
+              {profileNotes ? <Text style={ui.ldSecNote}>{profileNotes}</Text> : null}
+            </View>
+          ) : null}
+
+          {/* The purchase contract the buyer accepted. */}
+          {hasContract ? (
+            <View style={ui.dCard}>
+              <LdSectionHead icon="🤝" title={tx('ক্রয় চুক্তি', 'Purchase contract')} />
+              <LdLine label={tx('ক্রেতা', 'Buyer')} value={[buyerName, buyerOrg].filter(Boolean).join(' · ')} />
+              <LdLine label={tx('চুক্তির রেফারেন্স', 'Contract ref')} value={txt(contract.contract_ref)} />
+              <LdLine label={tx('চুক্তির দর', 'Agreed rate')} value={agreedRate > 0 ? `৳${num(agreedRate, lang)} / ${tx('কেজি', 'kg')}` : ''} />
+              <LdLine label={tx('চুক্তির ওজন', 'Agreed weight')} value={agreedWeight > 0 ? `${num(agreedWeight, lang)} ${tx('কেজি', 'kg')}` : ''} />
+              <LdLine label={tx('চুক্তির মোট', 'Contract amount')} value={contractAmount > 0 ? amount(contractAmount, lang) : ''} strong />
+              <LdLine label={tx('অগ্রিম', 'Advance')} value={advanceAmount > 0 ? amount(advanceAmount, lang) : ''} />
+              <LdLine label={tx('চুক্তির তারিখ', 'Accepted on')} value={formatDate(contract.accepted_at, lang)} />
+            </View>
+          ) : null}
+
+          {/* On the road to the buyer. */}
+          {hasShipment ? (
+            <View style={ui.dCard}>
+              <LdSectionHead
+                icon="🚚"
+                title={tx('পরিবহন', 'Shipment')}
+                pill={txt(shipment.arrived_at) ? { label: tx('পৌঁছেছে', 'Arrived'), tone: 'green' } : txt(shipment.dispatched_at) ? { label: tx('পথে আছে', 'On the way'), tone: 'blue' } : null}
+              />
+              <LdLine label={tx('রওনা', 'Dispatched')} value={formatDate(shipment.dispatched_at, lang)} />
+              <LdLine label={tx('গাড়ি', 'Vehicle')} value={vehicleText} />
+              <LdLine label={tx('পরিবহনকারী', 'Transporter')} value={txt(shipment.transporter)} />
+              <LdLine label={tx('চালক', 'Driver')} value={[txt(shipment.driver_name), txt(shipment.driver_phone) ? num(txt(shipment.driver_phone), lang) : ''].filter(Boolean).join(' · ')} />
+              <LdLine label={tx('পৌঁছানোর কথা', 'Expected arrival')} value={formatDate(expectedArrival, lang)} />
+              <LdLine label={tx('পৌঁছেছে', 'Arrived')} value={formatDate(shipment.arrived_at, lang)} />
+              {txt(shipment.condition_note) ? <Text style={ui.ldSecNote}>{txt(shipment.condition_note)}</Text> : null}
+              {driverPhone ? (
+                <Pressable style={({ pressed }) => [ui.ldMiniCall, pressed && styles.pressed]} onPress={() => Linking.openURL(`tel:${driverPhone}`)} accessibilityRole="button">
+                  <Ionicons name="call" size={15} color={colors.maroon} />
+                  <Text style={ui.ldMiniCallText}>{tx('চালককে কল করুন', 'Call the driver')}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
 
           {pricing ? (
             <View style={ui.bdCard}>
@@ -7930,6 +8253,32 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
           <View style={{ height: 16 }} />
         </>
       ) : null}
+
+      {/* A short note, then the listing's status goes to the community feed. */}
+      <Modal visible={shareOpen} transparent animationType="slide" onRequestClose={() => setShareOpen(false)}>
+        <Pressable style={styles.dropdownBackdrop} onPress={() => setShareOpen(false)}>
+          <Pressable style={styles.dropdownCard} onPress={() => {}}>
+            <View style={styles.dropdownHandle} />
+            <Text style={styles.dropdownSheetTitle}>{tx('কমিউনিটিতে শেয়ার', 'Share to community')}</Text>
+            <Text style={ui.ldShareHint}>
+              {tx('আপনার তালিকার বর্তমান অবস্থা কমিউনিটিতে পোস্ট হবে। চাইলে ছোট একটি নোট যোগ করুন।', 'Your listing and where it stands will be posted to the community. Add a short note if you like.')}
+            </Text>
+            <TextInput
+              style={ui.ldShareInput}
+              value={shareNote}
+              onChangeText={setShareNote}
+              placeholder={tx('যেমন: আমার গরুটি যাচাই হয়েছে, আলহামদুলিল্লাহ।', 'e.g. My cow passed its check today.')}
+              placeholderTextColor={colors.muted}
+              multiline
+              maxLength={200}
+            />
+            <Text style={ui.ldShareCount}>{num(shareNote.length, lang)} / {num(200, lang)}</Text>
+            {shareError ? <Text style={ui.ldShareError}>{shareError}</Text> : null}
+            <AppButton title={sharing ? tx('পাঠানো হচ্ছে...', 'Posting...') : tx('পোস্ট করুন', 'Post')} onPress={shareToCommunity} disabled={sharing} />
+            <AppButton title={tx('বাতিল', 'Cancel')} variant="outline" onPress={() => setShareOpen(false)} />
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal visible={viewer !== null} transparent animationType="fade" onRequestClose={() => setViewer(null)}>
         <View style={ui.ldViewer}>
@@ -8078,7 +8427,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
     // Secondary entry point to the finance feature, directly above My Listings
     // (MOB-RDY-05).
     { icon: '🧭', title: tx('ফাইন্যান্স প্রস্তুতি', 'Finance Readiness'), sub: tx('আপনার ঋণ প্রস্তুতি দেখুন', 'See your finance readiness'), target: 'financeReadinessResult' },
-    { icon: '🏷️', title: tx('আমার বিক্রির তালিকা', 'My Listings'), sub: tx('তালিকা ও অনুমোদনের অবস্থা', 'Listings & approval status'), target: 'myListings' },
+    { icon: '🏷️', title: tx('আমার বিক্রির তালিকা', 'My Listings'), sub: tx('তালিকা ও তার অগ্রগতি', 'Listings & their progress'), target: 'myListings' },
     { icon: '🤝', title: tx('আমার প্রকল্প', 'My Projects'), sub: tx('আবেদন ও প্রকল্পের অগ্রগতি', 'Applications & project progress'), target: 'myProjects' },
     { icon: '🗂️', title: tx('ক্যাটাগরি আপডেট', 'Update Categories'), sub: tx('পছন্দ তালিকা পরিবর্তন', 'Change preferences'), target: 'prefAnimal' },
     { icon: '🌐', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },

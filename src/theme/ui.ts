@@ -401,4 +401,28 @@ export const ui = StyleSheet.create({
   ldOfficerCall: { width: 44, height: 44, borderRadius: 22, borderWidth: 1.5, borderColor: colors.maroon, alignItems: 'center', justifyContent: 'center' },
   ldViewer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)' },
   ldViewerClose: { position: 'absolute', top: 44, right: 16, width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
+
+  // ---- Listing details: what the field officer records ---------------------
+  // Each block is a plain dCard with a titled head; a block is only rendered
+  // when its section has been filled in, so the page grows as the work happens.
+  ldSecHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  ldSecIcon: { fontSize: 17 },
+  ldSecTitle: { flex: 1, color: colors.ink, fontSize: 15, fontWeight: '800' },
+  ldSecNote: { color: colors.muted, fontSize: 12.5, lineHeight: 18, marginTop: 8 },
+  ldAlertTitle: { color: '#991B1B', fontSize: 14.5, fontWeight: '900', marginBottom: 2 },
+  ldAlertMeta: { color: '#B45309', fontSize: 12, fontWeight: '700', marginTop: 4 },
+  ldVacc: { borderTopWidth: 1, borderColor: colors.line, paddingTop: 9, marginTop: 9 },
+  ldVaccFirst: { borderTopWidth: 0, paddingTop: 0, marginTop: 2 },
+  ldVaccName: { color: colors.ink, fontSize: 14, fontWeight: '800' },
+  ldVaccMeta: { color: colors.muted, fontSize: 12.5, lineHeight: 18, marginTop: 2 },
+  ldMiniCall: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 11, height: 42, borderRadius: 12, borderWidth: 1.5, borderColor: colors.maroon },
+  ldMiniCallText: { color: colors.maroon, fontSize: 14, fontWeight: '800' },
+  ldShare: { marginHorizontal: 16, marginTop: 12, height: 46, borderRadius: 12, borderWidth: 1.5, borderColor: colors.maroon, backgroundColor: 'white', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  ldShareText: { color: colors.maroon, fontSize: 14.5, fontWeight: '800' },
+  ldShareOk: { marginHorizontal: 16, marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  ldShareOkText: { flex: 1, color: colors.green, fontSize: 13, fontWeight: '700' },
+  ldShareHint: { color: colors.muted, fontSize: 13, lineHeight: 19, paddingHorizontal: 20, paddingBottom: 10 },
+  ldShareInput: { marginHorizontal: 20, minHeight: 84, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', padding: 12, color: colors.ink, fontSize: 14.5, textAlignVertical: 'top' },
+  ldShareCount: { color: colors.muted, fontSize: 11.5, textAlign: 'right', paddingHorizontal: 20, marginTop: 4 },
+  ldShareError: { color: colors.danger, fontSize: 13, lineHeight: 19, paddingHorizontal: 20, marginTop: 8, fontWeight: '600' },
 });
