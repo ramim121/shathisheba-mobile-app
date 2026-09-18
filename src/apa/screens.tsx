@@ -14,7 +14,8 @@ import {
   saveApaSettings, startApaLive,
   type ApaEntitlement, type ApaLiveReceipt, type ApaUserSettings,
 } from '../ai/apa';
-import { deviceVoiceName, primeDeviceVoice, speechAvailability, stopSpeech } from '../ai/speech';
+import { deviceVoiceName, primeDeviceVoice, speechAvailability, speechMode, stopSpeech } from '../ai/speech';
+import { clear as clearAudioCache, stats as audioCacheStats } from '../media/audioCache';
 import { ListenButton } from '../ai/ListenButton';
 import { APA_AMBER, APA_END, APA_GREEN, apa } from './styles';
 import { bn, clock, screenFromAction, useApa, type ApaTurn } from './state';
@@ -1441,11 +1442,15 @@ export function ApaSettingsScreen({ setScreen }: { setScreen: (screen: Screen) =
   const [renews, setRenews] = useState('');
   const [busy, setBusy] = useState(false);
   const [voice, setVoice] = useState<{ ok: boolean; name: string | null }>({ ok: true, name: null });
+  const [held, setHeld] = useState<{ files: number; bytes: number }>({ files: 0, bytes: 0 });
 
   useEffect(() => {
     let alive = true;
     void speechAvailability()
       .then((state) => { if (alive) setVoice({ ok: state.ok, name: state.voice ?? deviceVoiceName() }); })
+      .catch(() => undefined);
+    void audioCacheStats()
+      .then((next) => { if (alive) setHeld(next); })
       .catch(() => undefined);
     return () => { alive = false; };
   }, []);
@@ -1525,24 +1530,32 @@ export function ApaSettingsScreen({ setScreen }: { setScreen: (screen: Screen) =
                 detail={tx('ভয়েসে প্রশ্ন করলে নিজে থেকেই পড়ে শোনাবে', 'Plays on its own when you ask by voice')}
                 right={<Toggle on={settings.read_aloud} onPress={() => void patch({ read_aloud: !settings.read_aloud })} />}
               />
-              {/* Read-aloud is the phone's own engine, so it depends on a
-                  voice being installed. A switch that silently does nothing is
-                  worse than one that says what is missing and where to get it. */}
+              {/* Which engine reads is a platform setting, so this row
+                  reports rather than offers — and it says what she can do
+                  about the one case that leaves her with no voice at all. */}
               <SettingRow
                 icon="🗣"
                 title={tx('যে কণ্ঠে পড়ে শোনাবে', 'Voice used for reading')}
                 detail={
-                  voice.ok
-                    ? tx('আপনার ফোনের নিজের কণ্ঠ — ইন্টারনেট ছাড়াও চলবে', "Your phone's own voice — works without internet")
-                    : tx('এই ফোনে বাংলা কণ্ঠ নেই', 'No Bangla voice on this phone')
+                  speechMode() === 'device'
+                    ? voice.ok
+                      ? tx('আপনার ফোনের নিজের কণ্ঠ — ইন্টারনেট ছাড়াও চলবে', "Your phone's own voice — works without internet")
+                      : tx('এই ফোনে বাংলা কণ্ঠ নেই', 'No Bangla voice on this phone')
+                    : voice.ok
+                      ? tx('শাথী আপার নিজের কণ্ঠ · একবার শুনলে ফোনেই জমা থাকবে', "Shathi Apa's own voice · kept on your phone after the first listen")
+                      : tx('শাথী আপার নিজের কণ্ঠ · ইন্টারনেট লাগবে', "Shathi Apa's own voice · needs internet")
                 }
                 right={
-                  voice.ok ? (
-                    <Text style={apa.rowValue} numberOfLines={1}>{voice.name ?? tx('আছে', 'Ready')}</Text>
-                  ) : (
+                  speechMode() === 'device' && !voice.ok ? (
                     <Pressable onPress={() => Linking.openSettings()}>
                       <Text style={apa.rowValue}>{tx('নামান', 'Install')}</Text>
                     </Pressable>
+                  ) : (
+                    <Text style={apa.rowValue} numberOfLines={1}>
+                      {speechMode() === 'device'
+                        ? voice.name ?? tx('আছে', 'Ready')
+                        : tx('শাথী আপা', 'Shathi Apa')}
+                    </Text>
                   )
                 }
               />
@@ -1583,6 +1596,37 @@ export function ApaSettingsScreen({ setScreen }: { setScreen: (screen: Screen) =
                 // Cannot be permanently dismissed, only acknowledged — spending
                 // someone else's data without saying so is not a setting.
                 right={<Toggle on amber onPress={() => undefined} />}
+              />
+              {/* The whole reason server speech is affordable: a clip is
+                  downloaded once and then played from the phone. She should be
+                  able to see that, and to reclaim the space. */}
+              <SettingRow
+                icon="🎧"
+                title={tx('জমা রাখা কথা', 'Saved audio')}
+                detail={
+                  held.files
+                    ? lang === 'bn'
+                      ? `${bn(held.files)}টি উত্তর ফোনে জমা আছে · ইন্টারনেট ছাড়াই শোনা যাবে`
+                      : `${held.files} answers saved · playable with no internet`
+                    : tx('এখনো কিছু জমা হয়নি', 'Nothing saved yet')
+                }
+                right={
+                  held.files ? (
+                    <Pressable
+                      onPress={() => {
+                        void clearAudioCache().then(() => setHeld({ files: 0, bytes: 0 }));
+                      }}
+                    >
+                      <Text style={apa.rowValue}>
+                        {lang === 'bn'
+                          ? `${bn(Math.round(held.bytes / 1048576))} MB · মুছুন`
+                          : `${Math.round(held.bytes / 1048576)} MB · Clear`}
+                      </Text>
+                    </Pressable>
+                  ) : (
+                    <Text style={apa.rowValue}>—</Text>
+                  )
+                }
               />
               <SettingRow
                 icon="📡"

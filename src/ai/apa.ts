@@ -1,5 +1,5 @@
 import { apiRequest } from '../api/client';
-import { needsServerSpeech, primeDeviceVoice, setDefaultRate } from './speech';
+import { needsServerSpeech, primeDeviceVoice, primeSpeechUrls, setDefaultRate, setSpeechMode } from './speech';
 import { optimiseImage, setAiImageMaxPx } from '../media/image';
 import type { CattleAiResult, Lang } from '../types';
 
@@ -186,6 +186,8 @@ export async function getApaSpeechConfig() {
   }>('app/apa/speech-config', { silent: true });
   setAiImageMaxPx(json.data.image_max_px);
   setDefaultRate(json.data.rate);
+  setSpeechMode(json.data.mode);
+  await primeSpeechUrls();
   return json.data;
 }
 

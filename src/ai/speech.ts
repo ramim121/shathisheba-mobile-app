@@ -2,35 +2,37 @@ import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { apiRequest } from '../api/client';
+import { heldLocally, localSpeech } from '../media/audioCache';
 import type { Lang } from '../types';
 
 /**
- * Reading aloud, on the phone's own engine wherever the phone can.
+ * Reading aloud: Gemini's voice, cached on the phone, with the device's own
+ * engine behind it.
  *
- * Every answer used to be synthesised by Gemini and sent down as base64 WAV.
- * That was wrong three times over:
+ * Which of the two leads is a **product** decision, not a technical one, and it
+ * is a setting (`apa_tts_mode`) rather than a constant here:
  *
- *   - **Cost.** Spoken output is the most expensive token type there is. A
- *     farmer who listens to everything — and they do — was the single largest
- *     line in the bill, larger than the answers themselves.
- *   - **Weight.** A 40-second answer is ~2.5 MB of base64 over a connection
- *     that is often 2G, before she hears the first word.
- *   - **Offline.** Nothing could be re-read without a network round trip, which
- *     defeats the point of keeping the history on the device.
+ *   - `server` — Gemini synthesises. It sounds markedly better than any
+ *     on-device Bengali voice, and for a farmer who cannot read, the voice *is*
+ *     the product. This is the default.
+ *   - `device_then_server` — the phone reads if it has a Bangla voice, and the
+ *     server covers the handsets that do not.
+ *   - `device` — the phone always reads. Free and offline, more synthetic.
  *
- * Android has had a text-to-speech engine since 2009 and Google's engine ships
- * a Bengali (bn-BD) voice. It is free, instant, works with the plane in
- * flight-mode and costs nothing per farmer per year. It also sounds more
- * synthetic than Gemini, which is a real loss — and a smaller one than any of
- * the three above.
+ * What makes `server` affordable is that **the audio is paid for once.** Every
+ * clip is cached on disk under the server's own content hash, so a replay is a
+ * local file read: no data off her pack, no request against the day's quota,
+ * and it still works with no signal. See `../media/audioCache.ts`.
  *
- * So: the device reads, always, when it has a Bangla voice installed. The
- * server is the fallback for the handsets that do not, and it is asked for
- * audio **by id** — never by sending it text — so an open text-to-speech
- * endpoint is not left on the internet.
+ * Three properties hold whichever mode is in force:
  *
- * Nothing here ever sends the text of an answer anywhere. When the device can
- * speak, no request is made at all.
+ *   - **The text never leaves the phone.** The server is asked for audio **by
+ *     id** and looks the text up itself, with ownership in the WHERE clause, so
+ *     there is no open text-to-speech endpoint on the internet.
+ *   - **Offline still speaks.** If a clip is already cached it plays from disk;
+ *     if it is not and there is no network, the device voice takes over.
+ *   - **A handset with no Bangla voice is told where to get one**, in two taps,
+ *     rather than handed a button that silently does nothing.
  */
 
 /* ---------------------------------------------------------------------------
@@ -227,6 +229,21 @@ export function setDefaultRate(rate: string | null | undefined) {
   if (rate && rate in RATES) defaultRate = rate;
 }
 
+/**
+ * Which engine leads, as the server configures it.
+ *
+ * Unknown until `app/apa/speech-config` has answered. `server` is assumed
+ * meanwhile, because that is the configured default and guessing `device` would
+ * have the first answer of a session read in the worse voice.
+ */
+let mode: 'server' | 'device_then_server' | 'device' = 'server';
+export function setSpeechMode(next: string | null | undefined) {
+  if (next === 'server' || next === 'device_then_server' || next === 'device') mode = next;
+}
+export function speechMode() {
+  return mode;
+}
+
 export function rateValue(rate: string | null | undefined): number {
   return RATES[String(rate ?? defaultRate)] ?? 1;
 }
@@ -276,6 +293,43 @@ export function speakingToken(): string | null {
 
 export function isSpeaking(token?: string): boolean {
   return token ? playingToken === token : playingToken !== null;
+}
+
+/**
+ * Which URL the server last gave for a given message, article or update.
+ *
+ * Small and deliberately persistent: it is what lets a replay skip the request
+ * entirely. Without it the phone has to ask the server for a URL it already
+ * holds the file for, which spends a request from the day's allowance to learn
+ * something it already knew.
+ */
+const URL_MEMO_KEY = 'shathi.speech.urls.v1';
+let urlMemo: Record<string, string> | null = null;
+
+export async function primeSpeechUrls(): Promise<void> {
+  if (urlMemo) return;
+  try {
+    const raw = await AsyncStorage.getItem(URL_MEMO_KEY);
+    urlMemo = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    urlMemo = {};
+  }
+}
+
+const memoKey = (where: SpeechSource) => `${where.source}:${where.id}`;
+
+function rememberedUrl(where: SpeechSource): string | null {
+  return urlMemo?.[memoKey(where)] ?? null;
+}
+
+function rememberUrl(where: SpeechSource, url: string) {
+  urlMemo = urlMemo ?? {};
+  urlMemo[memoKey(where)] = url;
+  // Bounded, oldest-inserted first. Two hundred entries is far more than the
+  // sixty turns the chat itself keeps.
+  const keys = Object.keys(urlMemo);
+  if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete urlMemo[k];
+  AsyncStorage.setItem(URL_MEMO_KEY, JSON.stringify(urlMemo)).catch(() => undefined);
 }
 
 /** Stop whatever is speaking, on either path. Safe to call when nothing is. */
@@ -335,12 +389,31 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
     return 'device';
   }
 
-  const hasVoice = await primeDeviceVoice();
-  if (hasVoice) {
+  // Gemini's voice first when that is the configured mode and the caller gave
+  // us something the server can look up. A clip already on disk is played
+  // without a request at all, so a replay costs nothing either way.
+  const wantsServer = mode === 'server' || (mode === 'device_then_server' && !(await primeDeviceVoice()));
+  if (wantsServer && input.server) {
+    try {
+      await speakFromServer(input.server, input, token);
+      return 'server';
+    } catch (error) {
+      // The server could not or would not produce audio — out of quota, out of
+      // signal, or nothing to read. Her own phone is the answer to all three.
+      if (await primeDeviceVoice()) {
+        await speakOnDevice(body, input, token);
+        return 'device';
+      }
+      throw error;
+    }
+  }
+
+  if (await primeDeviceVoice()) {
     await speakOnDevice(body, input, token);
     return 'device';
   }
 
+  // No Bangla voice on the phone and nothing the server can look up.
   if (!input.server) {
     const error = new Error('NO_VOICE');
     input.onEnd?.();
@@ -399,6 +472,14 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
   announce(token);
   input.onStart?.();
   try {
+    // A clip we already hold for this exact source needs no request at all.
+    // Keyed by source and id rather than by URL, because the URL is what the
+    // request would have told us — and the point is not to make it.
+    const known = rememberedUrl(where);
+    if (known && heldLocally(known)) {
+      await playUrl(known, input, token);
+      return;
+    }
     const json = await apiRequest<{
       result:
         | { mode: 'device'; text: string; language: string; rate: string }
@@ -429,6 +510,7 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
       await speakOnDevice(speakable(result.text), { ...input, rate: result.rate }, token);
       return;
     }
+    rememberUrl(where, result.url);
     await playUrl(result.url, input, token);
   } catch (error) {
     if (playingToken === token) announce(null);
@@ -437,10 +519,17 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
   }
 }
 
-/** Play a WAV the server produced, from its URL. */
+/**
+ * Play a clip the server produced — from disk if we already have it.
+ *
+ * The first listen downloads and keeps it; every listen after that is a local
+ * file read, which costs her nothing and works with the signal off.
+ */
 async function playUrl(url: string, input: SpeakInput, token: string): Promise<void> {
   const mine = generation;
-  const next = createAudioPlayer({ uri: url });
+  const uri = await localSpeech(url);
+  if (mine !== generation) return;
+  const next = createAudioPlayer({ uri });
   if (mine !== generation) {
     try { next.remove(); } catch { /* already gone */ }
     return;
