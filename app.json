@@ -48,7 +48,13 @@
         }
       ],
       "expo-asset",
-      "expo-font"
+      "expo-font",
+      [
+        "./plugins/withAsyncStorageSize",
+        {
+          "sizeMB": 20
+        }
+      ]
     ]
   }
 }

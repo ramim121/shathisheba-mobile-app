@@ -15,6 +15,8 @@ export type Screen =
   | 'shathiApa'
   | 'apaVoice'
   | 'apaCamera'
+  | 'apaUnlock'
+  | 'apaSettings'
   | 'login'
   | 'personalInfo'
   | 'prefAnimal'

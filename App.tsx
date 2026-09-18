@@ -2,9 +2,7 @@ import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
-import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { Ionicons } from '@expo/vector-icons';
-import { GoogleGenAI, MediaResolution } from '@google/genai';
 import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import YoutubePlayer from 'react-native-youtube-iframe';
 import {
@@ -31,10 +29,13 @@ import {
 import { colors } from './src/theme/colors';
 import { androidNavigationInset, androidStatusBarInset, styles } from './src/theme/styles';
 import { ui } from './src/theme/ui';
+import {
+  AppButton, Badge, Card, Header, LanguageContext, MarkdownText, useLanguage,
+} from './src/theme/primitives';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { onNotificationTap, registerForPush } from './src/notifications';
 import type {
-  ApiRow, ApiState, AppRole, AuthUser, CattleAiResult, ChatMessage, Lang, LearnCat, LearnMod,
+  ApiRow, ApiState, AppRole, AuthUser, CattleAiResult, Lang, LearnCat, LearnMod,
   ListingDraft, LocationState, MainTab, PreferenceKey, PreferenceOption, PreferenceSection,
   Screen, TrainingContentKind, TrainingModule, WeatherApiState,
   FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
@@ -43,11 +44,15 @@ import type {
   NarrativeChange, LoanAccountView, LoanArrears, GeoValue, ProfileChangeRequest,
 } from './src/types';
 import {
-  analyzeCattlePhoto, askShathiApaAudio, askShathiApaAudioWithTranscript, askShathiApaImage,
-  askShathiApaImageFollowup, askShathiApaText, generateListingDescription, generateResponseSuggestions,
-  friendlyAiError, isAiSpeaking, parseJsonArray, parseJsonObject, playAiSpeech, stopAiSpeech,
-  summarizeMarkdown, toggleSpeech, withSuggestions,
-} from './src/ai/gemini';
+  analyzeCattlePhoto, friendlyAiError, generateListingDescription, summarizeMarkdown,
+} from './src/ai/apa';
+import { stopSpeech } from './src/ai/speech';
+import { ListenButton, ListenStrip } from './src/ai/ListenButton';
+import { optimiseAll, optimiseImage } from './src/media/image';
+import { ApaProvider, useApa } from './src/apa/state';
+import {
+  ApaCameraScreen, ApaComposer, ApaLiveScreen, ApaSettingsScreen, ApaUnlockScreen, ShathiApaScreen,
+} from './src/apa/screens';
 import {
   API_BASE_URL, API_CACHE_PREFIX, SERVER_FALLBACK_MESSAGE, WEATHERAPI_KEY, WEATHERAPI_LOCATION,
   apiCreate, apiList, apiRequest, apiUrl, authHeaders, loadingStore, naturalApiError, refreshStore,
@@ -121,13 +126,6 @@ const preferenceOrder: PreferenceKey[] = ['cattle', 'crops', 'fishery', 'vegetab
 
 const bnDigits = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
 
-const LanguageContext = createContext<{
-  lang: Lang;
-  setLang: (lang: Lang) => void;
-  toggleLang: () => void;
-  tx: (bnText: string, enText: string) => string;
-} | null>(null);
-
 const LocationContext = createContext<LocationState>({
   query: WEATHERAPI_LOCATION,
   label: 'Default location',
@@ -148,14 +146,6 @@ function useScreenAccessory(node: React.ReactNode, deps: unknown[]) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
   useEffect(() => () => setAccessory(null), [setAccessory]);
-}
-
-function useLanguage() {
-  const context = useContext(LanguageContext);
-  if (!context) {
-    throw new Error('useLanguage must be used inside LanguageContext');
-  }
-  return context;
 }
 
 function bn(value: number | string) {
@@ -804,119 +794,6 @@ function LangToggle({ subtle = false }: { subtle?: boolean }) {
   );
 }
 
-function AppButton({
-  title,
-  onPress,
-  variant = 'primary',
-  disabled = false,
-}: {
-  title: string;
-  onPress: () => void;
-  variant?: 'primary' | 'gold' | 'outline';
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      style={({ pressed }) => [
-        styles.button,
-        variant === 'gold' && styles.goldButton,
-        variant === 'outline' && styles.outlineButton,
-        disabled && styles.buttonDisabled,
-        pressed && !disabled && styles.pressed,
-      ]}
-    >
-      <Text style={[styles.buttonText, variant === 'outline' && styles.outlineButtonText, disabled && styles.buttonTextDisabled]}>{title}</Text>
-    </Pressable>
-  );
-}
-
-function Header({
-  title,
-  onBack,
-  right,
-  onRightPress,
-}: {
-  title: string;
-  onBack?: () => void;
-  right?: string;
-  onRightPress?: () => void;
-}) {
-  return (
-    <View style={styles.header}>
-      {onBack ? (
-        <Pressable onPress={onBack} style={({ pressed }) => [styles.backButton, pressed && styles.pressed]} hitSlop={8} accessibilityRole="button" accessibilityLabel="Back">
-          <Text style={styles.backText}>‹</Text>
-        </Pressable>
-      ) : null}
-      <Text style={styles.headerTitle}>{title}</Text>
-      {right ? (
-        <Text style={styles.headerRight} onPress={onRightPress}>{right}</Text>
-      ) : (
-        <View style={styles.headerSpacer} />
-      )}
-    </View>
-  );
-}
-
-function Badge({ label, tone = 'rose' }: { label: string; tone?: 'rose' | 'green' | 'gold' | 'blue' }) {
-  const style = {
-    rose: styles.badgeRose,
-    green: styles.badgeGreen,
-    gold: styles.badgeGold,
-    blue: styles.badgeBlue,
-  }[tone];
-  return (
-    <View style={[styles.badge, style]}>
-      <Text style={[styles.badgeText, tone === 'green' && styles.badgeGreenText]}>{label}</Text>
-    </View>
-  );
-}
-
-function MarkdownText({
-  text,
-  style,
-  strongStyle,
-}: {
-  text: string;
-  style?: object;
-  strongStyle?: object;
-}) {
-  const lines = text.split('\n').filter((line) => line.trim().length > 0);
-  return (
-    <>
-      {lines.map((line, lineIndex) => {
-        const trimmed = line.replace(/^#{1,4}\s*/, '').trim();
-        const bullet = /^[-*•]\s+/.test(trimmed);
-        const clean = trimmed.replace(/^[-*•]\s+/, '');
-        const parts = clean.split(/(\*\*[^*]+\*\*)/g).filter(Boolean);
-        return (
-          <Text key={`${lineIndex}-${clean.slice(0, 8)}`} style={style}>
-            {bullet ? '• ' : ''}
-            {parts.map((part, index) => {
-              const strong = part.startsWith('**') && part.endsWith('**');
-              return (
-                <Text key={`${index}-${part.slice(0, 6)}`} style={strong ? strongStyle : undefined}>
-                  {strong ? part.slice(2, -2) : part}
-                </Text>
-              );
-            })}
-          </Text>
-        );
-      })}
-    </>
-  );
-}
-
-
-function Card({ children, style, onPress }: { children: React.ReactNode; style?: object; onPress?: () => void }) {
-  if (onPress) {
-    return <Pressable onPress={onPress} style={({ pressed }) => [styles.card, style, pressed && styles.pressed]}>{children}</Pressable>;
-  }
-  return <View style={[styles.card, style]}>{children}</View>;
-}
-
 function Tile({
   icon,
   title,
@@ -1057,7 +934,7 @@ class ErrorBoundary extends Component<{ children: React.ReactNode; onHome?: () =
 
 // Screens the app shows before (or during) sign-in. They carry no bottom tabs,
 // and Android's back button leaves the app from them rather than jumping home.
-const AUTH_SCREENS: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits', 'apaVoice', 'apaCamera'];
+const AUTH_SCREENS: Screen[] = ['onboarding', 'login', 'personalInfo', 'prefAnimal', 'prefLivestock', 'prefCrops', 'prefFish', 'prefVegetable', 'prefFruits'];
 
 export default function App() {
   const [screen, setScreenState] = useState<Screen>('onboarding');
@@ -1147,10 +1024,6 @@ export default function App() {
   const [learnCategory, setLearnCategory] = useState<LearnCat | null>(null);
   const [learnModule, setLearnModule] = useState<LearnMod | null>(null);
   const [learnContentId, setLearnContentId] = useState<string | null>(null);
-  const [apaMessages, setApaMessages] = useState<ChatMessage[]>([]);
-  const [apaImageUri, setApaImageUri] = useState<string | null>(null);
-  const [apaBusy, setApaBusy] = useState(false);
-  const [apaDraftSuggestion, setApaDraftSuggestion] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<ApiRow | null>(null);
   const [buyCategory, setBuyCategory] = useState<ApiRow | null>(null);
   const [buyInitialTab, setBuyInitialTab] = useState<'shop' | 'orders'>('shop');
@@ -1336,66 +1209,6 @@ export default function App() {
     void refreshLocation();
   }, [refreshLocation]);
 
-async function sendApaMessage(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed || apaBusy) return;
-    const userMessage: ChatMessage = { role: 'user', text: trimmed };
-    const history = [...apaMessages, userMessage];
-    setApaMessages(history);
-    setApaBusy(true);
-    try {
-      const answer = apaImageUri
-        ? await askShathiApaImageFollowup(apaImageUri, trimmed, lang, history)
-        : await askShathiApaText(trimmed, lang, history);
-      const finalAnswer = answer || (lang === 'bn' ? 'দুঃখিত, উত্তর পাওয়া যায়নি।' : 'Sorry, no answer was returned.');
-      const modelMessage = await withSuggestions(finalAnswer, lang, history);
-      setApaMessages((messages) => [...messages, modelMessage]);
-      setApaDraftSuggestion('');
-    } catch (error) {
-      setApaMessages((messages) => [...messages, { role: 'model', text: error instanceof Error ? error.message : (lang === 'bn' ? 'AI সেবা চালু করা যায়নি।' : 'Could not start AI service.') }]);
-    } finally {
-      setApaBusy(false);
-    }
-  }
-
-  async function sendApaImage(uri: string) {
-    if (apaBusy) return;
-    setApaImageUri(uri);
-    const userMessage: ChatMessage = { role: 'user', text: lang === 'bn' ? 'ছবি সংযুক্ত করেছি।' : 'I attached an image.', imageUri: uri };
-    const history = [...apaMessages, userMessage];
-    setApaMessages(history);
-    setApaBusy(true);
-    try {
-      const answer = await askShathiApaImage(uri, lang);
-      const finalAnswer = answer || (lang === 'bn' ? 'ছবির বিশ্লেষণ পাওয়া যায়নি।' : 'No image analysis returned.');
-      const modelMessage = await withSuggestions(finalAnswer, lang, history);
-      setApaMessages((messages) => [...messages, modelMessage]);
-    } catch (error) {
-      setApaMessages((messages) => [...messages, { role: 'model', text: friendlyAiError(error, lang) }]);
-    } finally {
-      setApaBusy(false);
-    }
-  }
-
-  async function sendApaVoice(uri: string) {
-    if (apaBusy) return;
-    setApaBusy(true);
-    try {
-      const voice = await askShathiApaAudioWithTranscript(uri, lang);
-      const userMessage: ChatMessage = { role: 'user', text: voice.transcript };
-      const history = [...apaMessages, userMessage];
-      setApaMessages(history);
-      const answer = voice.answer;
-      const finalAnswer = answer || (lang === 'bn' ? 'ভয়েস থেকে উত্তর পাওয়া যায়নি।' : 'No answer returned from voice.');
-      const modelMessage = await withSuggestions(finalAnswer, lang, history);
-      setApaMessages((messages) => [...messages, modelMessage]);
-    } catch (error) {
-      setApaMessages((messages) => [...messages, { role: 'model', text: friendlyAiError(error, lang) }]);
-    } finally {
-      setApaBusy(false);
-    }
-  }
-
   const go = (next: Screen) => setScreen(next);
 
   // The app has no navigation stack — every screen hardcodes its own back
@@ -1539,9 +1352,11 @@ async function sendApaMessage(text: string) {
         />
       ),
       gpsGrant: <GpsGrant onContinue={() => go('login')} refreshLocation={refreshLocation} />,
-      shathiApa: <ShathiApa setScreen={go} messages={apaMessages} busy={apaBusy} onAsk={sendApaMessage} setDraftSuggestion={setApaDraftSuggestion} />,
-      apaVoice: <ApaVoice setScreen={go} />,
-      apaCamera: <ApaCamera setScreen={go} />,
+      shathiApa: <ShathiApaScreen setScreen={go} />,
+      apaVoice: <ApaLiveScreen setScreen={go} />,
+      apaCamera: <ApaCameraScreen setScreen={go} />,
+      apaUnlock: <ApaUnlockScreen setScreen={go} />,
+      apaSettings: <ApaSettingsScreen setScreen={go} />,
       login: <Login onAuthed={(user) => go(routeAfterAuth(user))} />,
       personalInfo: (
         <PersonalInfo
@@ -1809,7 +1624,7 @@ async function sendApaMessage(text: string) {
   // a repayment mode updated the state and re-rendered nothing, and a consent
   // checkbox could be ticked but never cleared. A missing dependency here does
   // not fail loudly — it silently freezes a screen's props.
-  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, apaMessages, apaImageUri, apaBusy, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo, orderDetailId, buyManufacturer, openFromNotification]);
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo, orderDetailId, buyManufacturer, openFromNotification]);
 
   const authScreens = AUTH_SCREENS;
 
@@ -1818,6 +1633,11 @@ async function sendApaMessage(text: string) {
     <AuthContext.Provider value={authValue}>
       <LanguageContext.Provider value={languageValue}>
         <LocationContext.Provider value={appLocation}>
+        {/* Shathi Apa's conversation lives above SafeAreaView because the chat
+            and the composer that writes to it are siblings, not parent and
+            child — Shell pins the composer above the navigation bar. It is
+            inside LanguageContext because every string in it is bilingual. */}
+        <ApaProvider authed={Boolean(authUser)} onNavigate={go}>
         <SafeAreaView
           // iOS: the notch and home bar. Android draws edge-to-edge and the
           // screen pads for the status bar itself (androidStatusBarInset).
@@ -1838,13 +1658,14 @@ async function sendApaMessage(text: string) {
             </KeyboardAvoidingView>
           ) : (
             <AccessoryContext.Provider value={setScreenAccessory}>
-              <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaInputBar onAsk={sendApaMessage} onImage={sendApaImage} onVoice={sendApaVoice} busy={apaBusy} draftSuggestion={apaDraftSuggestion} clearDraftSuggestion={() => setApaDraftSuggestion('')} /> : screenAccessory ?? undefined}>
+              <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaComposer setScreen={go} /> : screenAccessory ?? undefined}>
                 <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
               </Shell>
             </AccessoryContext.Provider>
           )}
           <GlobalLoader />
         </SafeAreaView>
+        </ApaProvider>
         </LocationContext.Provider>
       </LanguageContext.Provider>
     </AuthContext.Provider>
@@ -2168,7 +1989,9 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
     const uri = result.assets[0].uri;
     setImageUri(uri);
     try {
-      const url = await uploadImage(uri, 'profiles');
+      // A profile picture is shown at 96 pixels. Uploading twelve megapixels
+      // of it was costing her data for something nobody ever sees.
+      const url = await uploadImage((await optimiseImage(uri, 'avatar')).uri, 'profiles');
       setUploadedUrl(url);
     } catch (uploadError) {
       setError(naturalApiError(uploadError, lang));
@@ -2811,21 +2634,7 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
         <ServiceCard icon="🎓" title={tx('প্রশিক্ষণ মডিউল', 'Training Modules')} sub={tx('ভিডিও ও বিশেষজ্ঞ পরামর্শ', 'Videos & expert advice')} tone="blue" onPress={() => setScreen('training')} />
         <ServiceCard icon="🏦" title={tx('ঋণের আবেদন', 'Apply for Loan')} sub={tx('ঋণের ধরন, কিস্তি ও আবেদন', 'Loan types, instalments & applying')} tone="green" onPress={() => setScreen('financeHub')} />
       </View>
-      <Pressable onPress={() => setScreen('shathiApa')} style={({ pressed }) => [styles.homeApaCard, pressed && styles.pressed]}>
-        <View style={styles.homeApaIcon}>
-          <View style={styles.homeApaLogo}>
-            <View style={[styles.logoLeaf, styles.logoLeafGreen]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleOne]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleTwo]} />
-          </View>
-        </View>
-        <View style={styles.flex}>
-          <Text style={styles.homeApaKicker}>{tx('AI সহায়তা', 'AI Assistant')}</Text>
-          <Text style={styles.homeApaTitle}>{tx('শাথী আপাকে জিজ্ঞেস করুন', 'Ask Shathi Apa')}</Text>
-          <Text style={styles.homeApaSub}>{tx('দাম, আবহাওয়া, রোগ বা প্রকল্প নিয়ে দ্রুত উত্তর পান।', 'Get fast answers on price, weather, disease, or projects.')}</Text>
-        </View>
-        <Text style={styles.homeApaArrow}>›</Text>
-      </Pressable>
+      <HomeApaCard setScreen={setScreen} />
       <PartnerStrip />
       <MarketSnapshot setScreen={setScreen} />
     </>
@@ -2991,486 +2800,98 @@ function WeatherMetric({ icon, value, label }: { icon: string; value: string; la
   );
 }
 
-function ShathiApa({
-  setScreen,
-  messages,
-  busy,
-  onAsk,
-  setDraftSuggestion,
-}: {
-  setScreen: (screen: Screen) => void;
-  messages: ChatMessage[];
-  busy: boolean;
-  onAsk: (text: string) => void;
-  setDraftSuggestion: (text: string) => void;
-}) {
-  const { tx, lang } = useLanguage();
-  const suggestions = [
-    tx('আজ গরুর দাম কত?', 'Ask about cattle price today'),
-    tx('কোন প্রকল্প চলছে?', 'What projects are running?'),
-    tx('আজ বৃষ্টি হবে?', 'Will it rain today?'),
-    tx('গরু বিক্রি করতে কী লাগবে?', 'What is needed to sell cattle?'),
-  ];
-  const hasMessages = messages.length > 0;
-
+/**
+ * Entry point one: the header glyph. Three states, all in the same position —
+ * bare maroon when she can ask, grey with a lock dot when she cannot, green
+ * with a live dot while the mic is open. Nothing on the home screen moves.
+ */
+function ApaGlyphButton({ onPress }: { onPress: () => void }) {
+  const { entitlement, recording } = useApa();
+  const locked = entitlement ? !entitlement.features.ask_text : false;
   return (
-    <>
-      <Header title={tx('শাথী আপা', 'Shathi Apa')} onBack={() => setScreen('home')} />
-      <View style={[styles.apaHero, hasMessages && styles.apaHeroCompact]}>
-        <View style={styles.apaAvatar}>
-          <View style={styles.apaLogoMark}>
-            <View style={[styles.logoLeaf, styles.logoLeafGreen]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleOne]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleTwo]} />
-          </View>
-        </View>
-        <View style={hasMessages ? styles.flex : undefined}>
-          <Text style={[styles.apaTitle, hasMessages && styles.apaTitleCompact]}>{tx('শাথী আপাকে জিজ্ঞেস করুন', 'Ask Shathi Apa')}</Text>
-          <Text style={[styles.apaSubtitle, hasMessages && styles.apaSubtitleCompact]}>{tx('ভয়েস, ছবি বা চ্যাট দিয়ে প্রশ্ন করুন।', 'Ask with voice, image, or chat.')}</Text>
-        </View>
-      </View>
-      <View style={[styles.apaActions, hasMessages && styles.apaActionsCompact]}>
-        <Pressable onPress={() => setScreen('apaVoice')} style={({ pressed }) => [hasMessages ? styles.apaMiniAction : styles.apaActionPrimary, pressed && styles.pressed]}>
-          <Text style={hasMessages ? styles.apaMiniActionIcon : styles.apaActionIcon}>🎙</Text>
-          <Text style={hasMessages ? styles.apaMiniActionText : styles.apaActionTitle}>{tx('লাইভ', 'Live')}</Text>
-        </Pressable>
-        <Pressable onPress={() => setScreen('apaCamera')} style={({ pressed }) => [hasMessages ? styles.apaMiniAction : styles.apaActionSecondary, pressed && styles.pressed]}>
-          <Text style={hasMessages ? styles.apaMiniActionIcon : styles.apaActionIcon}>📷</Text>
-          <Text style={hasMessages ? styles.apaMiniActionText : styles.apaActionTitle}>{tx('ছবি', 'Image')}</Text>
-        </Pressable>
-      </View>
-      {!hasMessages ? (
-        <View style={styles.suggestionWrap}>
-          {suggestions.map((item) => (
-            <Pressable key={item} style={styles.suggestionBubble} onPress={() => onAsk(item)}>
-              <Text style={styles.suggestionText}>{item}</Text>
-            </Pressable>
-          ))}
-        </View>
-      ) : null}
-      {messages.length ? (
-        <View style={styles.apaChatPreview}>
-          {messages.slice(-4).map((message, index) => (
-            <View key={`${message.role}-${index}-${message.text.slice(0, 8)}`} style={[styles.apaMessageBubble, message.role === 'user' ? styles.apaUserBubble : styles.apaModelBubble]}>
-              <MarkdownText text={message.text} style={[styles.apaMessageText, message.role === 'user' && styles.apaUserText]} strongStyle={[styles.markdownStrong, message.role === 'user' && styles.apaUserText]} />
-              {message.imageUri ? <Image source={{ uri: message.imageUri }} style={styles.chatAttachedImage} /> : null}
-              {message.role === 'model' ? (
-                <Pressable style={styles.speakerButton} onPress={() => toggleSpeech(message.text, lang)}>
-                  <Text style={styles.speakerIcon}>🔊</Text>
-                </Pressable>
-              ) : null}
-              {message.role === 'model' && index === messages.slice(-4).length - 1 && message.suggestions?.length ? (
-                <View style={styles.responseSuggestionRow}>
-                  {message.suggestions.map((item) => (
-                    <Pressable key={item} style={styles.responseSuggestionBubble} onPress={() => onAsk(item)}>
-                      <Text style={styles.responseSuggestionText}>{item}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : null}
-            </View>
-          ))}
-          {busy ? <Text style={styles.apaThinking}>{tx('শাথী আপা ভাবছে...', 'Shathi Apa is thinking...')}</Text> : null}
-        </View>
-      ) : null}
-    </>
+    <Pressable onPress={onPress} style={styles.brandIconButton} accessibilityLabel="Shathi Apa">
+      <Text style={[styles.geminiIcon, locked && { color: colors.muted, opacity: 0.6 }, recording && { color: colors.green }]}>✦</Text>
+      {locked ? <View style={apaEntry.lock} /> : null}
+      {recording ? <View style={apaEntry.live} /> : null}
+    </Pressable>
   );
 }
 
-function ApaInputBar({
-  onAsk,
-  onImage,
-  onVoice,
-  busy,
-  draftSuggestion,
-  clearDraftSuggestion,
-}: {
-  onAsk: (text: string) => void;
-  onImage: (uri: string) => void;
-  onVoice: (uri: string) => void;
-  busy: boolean;
-  draftSuggestion: string;
-  clearDraftSuggestion: () => void;
-}) {
-  const { tx } = useLanguage();
-  const [draft, setDraft] = useState('');
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [recording, setRecording] = useState(false);
-  const displayDraft = recording ? tx('শুনছে... শেষ হলে আবার মাইকে চাপ দিন', 'Listening... tap the mic again when done') : draft;
-  useEffect(() => {
-    if (draftSuggestion) {
-      setDraft(draftSuggestion);
-      clearDraftSuggestion();
-    }
-  }, [draftSuggestion, clearDraftSuggestion]);
-  function submit() {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft('');
-    onAsk(text);
-  }
-  async function attachImage() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      quality: 0.72,
-    });
-    if (!result.canceled) {
-      onImage(result.assets[0].uri);
-    }
-  }
-  async function toggleVoice() {
-    if (recording) {
-      await recorder.stop();
-      const uri = recorder.uri;
-      setRecording(false);
-      if (uri) onVoice(uri);
-      return;
-    }
-    const permission = await AudioModule.requestRecordingPermissionsAsync();
-    if (!permission.granted) return;
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-    await recorder.prepareToRecordAsync();
-    recorder.record();
-    setRecording(true);
-  }
-  return (
-    <View style={styles.apaInputBar}>
-      <View style={styles.apaComposerTop}>
-        <TextInput
-          style={styles.apaTextInput}
-          placeholder={tx('শাথী আপাকে জিজ্ঞেস করুন...', 'Ask Shathi Apa...')}
-          placeholderTextColor={colors.muted}
-          value={displayDraft}
-          onChangeText={setDraft}
-          editable={!busy && !recording}
-          multiline
-          textAlignVertical="top"
-        />
-      </View>
-      <View style={styles.apaComposerBottom}>
-        <View style={styles.apaComposerTools}>
-          <Pressable style={styles.apaInputIconButton} onPress={attachImage} disabled={busy}>
-            <Text style={styles.apaInputIcon}>📎</Text>
-          </Pressable>
-          <Pressable style={[styles.apaInputIconButton, recording && styles.apaInputIconButtonActive]} onPress={toggleVoice} disabled={busy}>
-            <Text style={styles.apaInputIcon}>🎙</Text>
-          </Pressable>
-        </View>
-        <Pressable style={[styles.apaSendButton, busy && styles.apaSendButtonDisabled]} onPress={submit} disabled={busy}>
-          <Text style={styles.apaSendText}>{busy ? '…' : '›'}</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-}
+const apaEntry = StyleSheet.create({
+  lock: { position: 'absolute', right: 4, bottom: 4, width: 7, height: 7, borderRadius: 4, backgroundColor: colors.muted },
+  live: { position: 'absolute', right: 4, bottom: 4, width: 7, height: 7, borderRadius: 4, backgroundColor: colors.green },
+  mic: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
+  micLocked: { backgroundColor: '#B9A3AE' },
+  micIcon: { fontSize: 22 },
+  micBadge: {
+    position: 'absolute', right: -1, bottom: -1, width: 20, height: 20, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff', borderWidth: 1, borderColor: colors.line,
+  },
+  micBadgeText: { fontSize: 10 },
+  unlocked: { borderColor: colors.gold, borderWidth: 1.5 },
+  progressTrack: { height: 5, borderRadius: 3, backgroundColor: 'rgba(0,0,0,0.08)', overflow: 'hidden', marginTop: 6 },
+  progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.gold },
+  progressText: { color: colors.muted, fontSize: 11.5, marginTop: 4 },
+  celebrate: { color: '#B07908', fontSize: 12, fontWeight: '700', marginTop: 4 },
+});
 
-function ApaVoice({ setScreen }: { setScreen: (screen: Screen) => void }) {
+/**
+ * Entry point two: the amber card keeps its place and trades its trailing
+ * chevron for a mic. Locked, the mic greys and takes a lock badge and the card
+ * gains an unlock-progress line — so she sees how close she is rather than a
+ * dead end.
+ */
+function HomeApaCard({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [recording, setRecording] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [answer, setAnswer] = useState('');
-  const [transcript, setTranscript] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [liveStatus, setLiveStatus] = useState(tx('শাথী আপা প্রস্তুত', 'Shathi Apa ready'));
-  const pulse = useRef(new Animated.Value(0)).current;
-  const introduced = useRef(false);
-
-  useEffect(() => {
-    if (introduced.current) return;
-    introduced.current = true;
-    const intro = tx(
-      'আমি শাথী আপা। কৃষি, গবাদি পশু, আবহাওয়া, রোগ, ফিড বা বাজারদর নিয়ে প্রশ্ন করুন।',
-      'I am Shathi Apa. Ask about farming, livestock, weather, disease, feed, or market price.'
-    );
-    setAnswer(intro);
-    playAiSpeech(intro, lang, () => setIsSpeaking(true), () => setIsSpeaking(false)).catch(() => setIsSpeaking(false));
-  }, [lang, tx]);
-
-  useEffect(() => {
-    if (!isRecording && !isSpeaking) {
-      pulse.stopAnimation();
-      pulse.setValue(0);
-      return;
-    }
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 1, duration: 860, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 0, duration: 0, useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => {
-      loop.stop();
-    };
-  }, [isRecording, isSpeaking, pulse]);
-
-  async function toggleRecording() {
-    if (isAiSpeaking()) {
-      await stopAiSpeech();
-      setIsSpeaking(false);
-      setLiveStatus(tx('শুনছি...', 'Listening...'));
-    }
-    if (recording) {
-      setBusy(true);
-      try {
-        await recorder.stop();
-        const uri = recorder.uri;
-        setRecording(false);
-        setIsRecording(false);
-        if (uri) {
-          setLiveStatus(tx('কথা বুঝে নিচ্ছে...', 'Understanding your voice...'));
-          const voice = await askShathiApaAudioWithTranscript(uri, lang);
-          setTranscript(voice.transcript);
-          const finalAnswer = voice.answer || tx('উত্তর পাওয়া যায়নি।', 'No answer returned.');
-          setAnswer(finalAnswer);
-          setLiveStatus(tx('শাথী আপা বলছে', 'Shathi Apa is speaking'));
-          await playAiSpeech(finalAnswer, lang, () => setIsSpeaking(true), () => {
-            setIsSpeaking(false);
-            setLiveStatus(tx('আবার প্রশ্ন করতে মাইকে চাপ দিন', 'Tap mic to ask again'));
-          });
-        }
-      } catch (error) {
-        setAnswer(friendlyAiError(error, lang));
-        setLiveStatus(tx('ভয়েস উত্তর পাওয়া যায়নি', 'Voice answer unavailable'));
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    const permission = await AudioModule.requestRecordingPermissionsAsync();
-    if (!permission.granted) return;
-    setTranscript(tx('শুনছে... শেষ হলে আবার মাইকে চাপ দিন', 'Listening... tap the mic again when done'));
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-    await recorder.prepareToRecordAsync();
-    recorder.record();
-    setRecording(true);
-    setIsRecording(true);
-    setLiveStatus(tx('আপনার কথা শুনছে', 'Listening to you'));
-  }
-
-  const ringScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.45] });
-  const ringOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0] });
-  const secondaryRingScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.22] });
-  const subtitleLines = answer.split('\n').filter(Boolean).slice(0, 2).join('\n');
+  const { entitlement, justUnlocked, dismissUnlocked } = useApa();
+  const locked = entitlement ? !entitlement.features.ask_text : false;
+  const done = entitlement?.steps_done ?? 0;
+  const total = entitlement?.steps_total ?? 5;
 
   return (
-    <View style={styles.apaLiveScreen}>
-      <Header title={tx('শাথী আপা', 'Shathi Apa')} onBack={() => setScreen('shathiApa')} />
-      <View style={styles.voiceStage}>
-        <View style={styles.liveBrandDot}>
-          <View style={styles.apaLogoMark}>
-            <View style={[styles.logoLeaf, styles.logoLeafGreen]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleOne]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleTwo]} />
-          </View>
-        </View>
-        <Text style={styles.liveStatus}>{liveStatus}</Text>
-        <Text style={styles.voiceTitle}>{busy ? tx('উত্তর তৈরি হচ্ছে...', 'Generating answer...') : isRecording ? tx('শুনছি', 'Listening') : isSpeaking ? tx('শাথী আপা বলছে', 'Shathi Apa speaking') : tx('লাইভ কথোপকথন', 'Live conversation')}</Text>
-        <Text style={styles.voiceHint}>{tx('কৃষি, পশু, ফিড, আবহাওয়া, রোগ বা বাজারদর নিয়ে কথা বলুন', 'Talk about farming, livestock, feed, weather, disease, or market price')}</Text>
-        <View style={styles.voiceOrbWrap}>
-          {(isRecording || isSpeaking) ? (
-            <>
-              <Animated.View style={[styles.voicePulseRing, { opacity: ringOpacity, transform: [{ scale: ringScale }] }]} />
-              <Animated.View style={[styles.voicePulseRingInner, { opacity: ringOpacity, transform: [{ scale: secondaryRingScale }] }]} />
-            </>
-          ) : null}
-          <Pressable style={[styles.voiceCenterMic, isRecording && styles.voiceCenterMicListening, isSpeaking && styles.voiceCenterMicSpeaking]} onPress={toggleRecording} disabled={busy && !recording}>
-            <Text style={styles.voiceCenterMicIcon}>{isSpeaking ? '◉' : '🎙'}</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.voiceTranscript}>{transcript}</Text>
-        <Text numberOfLines={2} style={styles.voiceSubtitle}>{subtitleLines}</Text>
-      </View>
-      <View style={styles.voiceBottom}>
-        <Pressable style={[styles.voiceMic, isRecording && styles.voiceMicActive]} onPress={toggleRecording} disabled={busy && !recording}>
-          <Text style={styles.voiceMicIcon}>{isRecording ? '■' : '🎙'}</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-}
-
-function ApaCamera({ setScreen }: { setScreen: (screen: Screen) => void }) {
-  const { tx, lang } = useLanguage();
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState('');
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [recording, setRecording] = useState(false);
-  const displayDraft = recording ? tx('শুনছে... শেষ হলে আবার মাইকে চাপ দিন', 'Listening... tap the mic again when done') : draft;
-  const [analyzing, setAnalyzing] = useState(false);
-  async function analyzeSelectedImage(uri: string) {
-    setAnalyzing(true);
-    setMessages([]);
-    try {
-      const reply = await askShathiApaImage(uri, lang);
-      const finalAnswer = reply || tx('ছবির বিশ্লেষণ পাওয়া যায়নি।', 'No image analysis returned.');
-      const modelMessage = await withSuggestions(finalAnswer, lang, []);
-      setMessages([modelMessage]);
-    } catch (error) {
-      setMessages([{ role: 'model', text: error instanceof Error ? error.message : tx('ছবি বিশ্লেষণ করা যায়নি।', 'Could not analyze image.') }]);
-    } finally {
-      setAnalyzing(false);
-    }
-  }
-  async function sendFollowup() {
-    const question = draft.trim();
-    if (!question || !photoUri || analyzing) return;
-    setDraft('');
-    await sendImageQuestion(question);
-  }
-  async function sendImageQuestion(question: string) {
-    if (!question || !photoUri || analyzing) return;
-    const nextMessages: ChatMessage[] = [...messages, { role: 'user', text: question }];
-    setMessages(nextMessages);
-    setAnalyzing(true);
-    try {
-      const reply = await askShathiApaImageFollowup(photoUri, question, lang, nextMessages);
-      const finalAnswer = reply || tx('উত্তর পাওয়া যায়নি।', 'No answer returned.');
-      const modelMessage = await withSuggestions(finalAnswer, lang, nextMessages);
-      setMessages((current) => [...current, modelMessage]);
-    } catch (error) {
-      setMessages((current) => [...current, { role: 'model', text: error instanceof Error ? error.message : tx('ফলোআপ উত্তর পাওয়া যায়নি।', 'Could not answer follow-up.') }]);
-    } finally {
-      setAnalyzing(false);
-    }
-  }
-  async function toggleImageVoice() {
-    if (recording) {
-      await recorder.stop();
-      const uri = recorder.uri;
-      setRecording(false);
-      if (uri && photoUri) {
-        setAnalyzing(true);
-        try {
-          const voice = await askShathiApaAudioWithTranscript(uri, lang);
-          setAnalyzing(false);
-          await sendImageQuestion(voice.transcript);
-        } catch (error) {
-          setAnalyzing(false);
-          setMessages((current) => [...current, { role: 'model', text: friendlyAiError(error, lang) }]);
-        }
-      }
-      return;
-    }
-    const permission = await AudioModule.requestRecordingPermissionsAsync();
-    if (!permission.granted) return;
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-    await recorder.prepareToRecordAsync();
-    recorder.record();
-    setRecording(true);
-  }
-  async function openCamera() {
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) return;
-    const result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
-      quality: 0.72,
-    });
-    if (!result.canceled) {
-      const uri = result.assets[0].uri;
-      setPhotoUri(uri);
-      await analyzeSelectedImage(uri);
-    }
-  }
-  async function pickImage() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      quality: 0.72,
-    });
-    if (!result.canceled) {
-      const uri = result.assets[0].uri;
-      setPhotoUri(uri);
-      await analyzeSelectedImage(uri);
-    }
-  }
-
-  return (
-    <View style={styles.apaImageScreen}>
-      <Header title={tx('শাথী আপা', 'Shathi Apa')} onBack={() => setScreen('shathiApa')} />
-      <ScrollView contentContainerStyle={styles.apaImageContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.apaImageBrand}>
-        <View style={styles.apaAvatar}>
-          <View style={styles.apaLogoMark}>
-            <View style={[styles.logoLeaf, styles.logoLeafGreen]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleOne]} />
-            <View style={[styles.logoLeaf, styles.logoLeafPurpleTwo]} />
-          </View>
-        </View>
-        <View style={styles.flex}>
-          <Text style={styles.apaImageTitle}>{tx('ছবি বিশ্লেষণ', 'Image Analysis')}</Text>
-          <Text style={styles.apaImageSub}>{tx('ফসল, পশু, রোগ বা খামারের ছবি দিন। তারপর ফলোআপ প্রশ্ন করুন।', 'Attach a crop, livestock, disease, or farm image, then ask follow-up questions.')}</Text>
+    <Pressable
+      onPress={() => { if (justUnlocked) dismissUnlocked(); setScreen(locked ? 'apaUnlock' : 'shathiApa'); }}
+      style={({ pressed }) => [styles.homeApaCard, justUnlocked && apaEntry.unlocked, pressed && styles.pressed]}
+    >
+      <View style={styles.homeApaIcon}>
+        <View style={styles.homeApaLogo}>
+          <View style={[styles.logoLeaf, styles.logoLeafGreen]} />
+          <View style={[styles.logoLeaf, styles.logoLeafPurpleOne]} />
+          <View style={[styles.logoLeaf, styles.logoLeafPurpleTwo]} />
         </View>
       </View>
-      <View style={styles.apaImagePreview}>
-        {photoUri ? (
-          <Image source={{ uri: photoUri }} style={styles.apaImagePhoto} />
-        ) : (
+      <View style={styles.flex}>
+        <Text style={styles.homeApaKicker}>
+          {justUnlocked ? tx('🎉 খুলে গেছে', '🎉 Unlocked') : tx('AI সহায়তা', 'AI Assistant')}
+        </Text>
+        <Text style={styles.homeApaTitle}>{tx('শাথী আপাকে জিজ্ঞেস করুন', 'Ask Shathi Apa')}</Text>
+        <Text style={styles.homeApaSub}>
+          {locked
+            ? tx('পরিচয় যাচাই করলে যত খুশি প্রশ্ন করতে পারবেন', 'Verify once and ask as much as you like')
+            : tx('মাইক চেপে ধরে বলুন', 'Hold the mic and speak')}
+        </Text>
+        {justUnlocked ? (
+          <Text style={apaEntry.celebrate}>
+            {tx('এখন লাইভ কথাও বলতে পারবেন', 'You can talk live now')}
+          </Text>
+        ) : locked ? (
           <>
-            <Text style={styles.apaImageEmptyIcon}>📷</Text>
-            <Text style={styles.apaImageEmptyTitle}>{tx('ছবি সংযুক্ত করুন', 'Attach image')}</Text>
-            <Text style={styles.apaImageEmptySub}>{tx('ক্যামেরা বা গ্যালারি থেকে ছবি নিন', 'Use camera or gallery')}</Text>
+            <View style={apaEntry.progressTrack}>
+              <View style={[apaEntry.progressFill, { width: `${Math.round((done / Math.max(1, total)) * 100)}%` }]} />
+            </View>
+            <Text style={apaEntry.progressText}>
+              {lang === 'bn'
+                ? `${bn(done)}/${bn(total)} ধাপ শেষ — পরিচয় যাচাই বাকি`
+                : `${done}/${total} steps done — verification left`}
+            </Text>
           </>
-        )}
-      </View>
-      <View style={styles.apaImageActions}>
-        <Pressable style={styles.apaImageActionButton} onPress={pickImage} disabled={analyzing}>
-          <Text style={styles.apaImageActionText}>{tx('গ্যালারি', 'Gallery')}</Text>
-        </Pressable>
-        <Pressable style={styles.apaImageActionButtonPrimary} onPress={openCamera} disabled={analyzing}>
-          <Text style={styles.apaImageActionTextPrimary}>{tx('ক্যামেরা', 'Camera')}</Text>
-        </Pressable>
-      </View>
-      <View style={styles.apaImageChat}>
-        {messages.map((message, index) => (
-          <View key={`${index}-${message.role}`} style={[styles.apaMessageBubble, message.role === 'user' ? styles.apaUserBubble : styles.apaModelBubble]}>
-            <MarkdownText text={message.text} style={[styles.apaMessageText, message.role === 'user' && styles.apaUserText]} strongStyle={[styles.markdownStrong, message.role === 'user' && styles.apaUserText]} />
-            {message.role === 'model' && message.suggestions?.length ? (
-              <View style={styles.responseSuggestionRow}>
-                {message.suggestions.map((item) => (
-                  <Pressable key={item} style={styles.responseSuggestionBubble} onPress={() => sendImageQuestion(item)}>
-                    <Text style={styles.responseSuggestionText}>{item}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-          </View>
-        ))}
-        {analyzing ? (
-          <View style={styles.apaModelBubble}>
-            <MarkdownText text={tx('**শাথী আপা বিশ্লেষণ করছে...**', '**Shathi Apa is analyzing...**')} style={styles.apaMessageText} strongStyle={styles.markdownStrong} />
-          </View>
         ) : null}
       </View>
-      </ScrollView>
-      <View style={styles.apaImageInputBar}>
-        <TextInput
-          style={[styles.apaTextInput, styles.apaImageTextInput]}
-          value={displayDraft}
-          onChangeText={setDraft}
-          editable={!!photoUri && !analyzing && !recording}
-          placeholder={photoUri ? tx('এই ছবি নিয়ে প্রশ্ন করুন...', 'Ask about this image...') : tx('আগে ছবি সংযুক্ত করুন', 'Attach an image first')}
-          placeholderTextColor={colors.muted}
-          onSubmitEditing={sendFollowup}
-          multiline
-          textAlignVertical="top"
-        />
-        <Pressable style={[styles.apaInputIconButton, recording && styles.apaInputIconButtonActive, (!photoUri || analyzing) && styles.inputDisabled]} onPress={toggleImageVoice} disabled={!photoUri || analyzing}>
-          <Text style={styles.apaInputIcon}>🎙</Text>
-        </Pressable>
-        <Pressable style={[styles.apaSendButton, (!photoUri || analyzing) && styles.apaSendButtonDisabled]} onPress={sendFollowup} disabled={!photoUri || analyzing}>
-          <Text style={styles.apaSendText}>{analyzing ? '…' : '›'}</Text>
-        </Pressable>
-        </View>
-    </View>
+      <View style={[apaEntry.mic, locked && apaEntry.micLocked]}>
+        <Text style={apaEntry.micIcon}>🎙</Text>
+        {locked ? <View style={apaEntry.micBadge}><Text style={apaEntry.micBadgeText}>🔒</Text></View> : null}
+      </View>
+    </Pressable>
   );
 }
 
@@ -3489,9 +2910,7 @@ function BrandHeader({ setScreen }: { setScreen?: (screen: Screen) => void }) {
         <Text style={styles.brandTitle}>Shathi Sheba</Text>
       </View>
       <View style={styles.brandActions}>
-        <Pressable onPress={() => setScreen?.('shathiApa')} style={styles.brandIconButton}>
-          <Text style={styles.geminiIcon}>✦</Text>
-        </Pressable>
+        <ApaGlyphButton onPress={() => setScreen?.('shathiApa')} />
         <Pressable onPress={() => setScreen?.('notifications')} style={ui.bellWrap} hitSlop={8} accessibilityLabel="Notifications">
           <Text style={styles.brandActionIcon}>🔔</Text>
           {unread > 0 ? <View style={ui.bellBadge}><Text style={ui.bellBadgeText}>{unread > 9 ? '9+' : unread}</Text></View> : null}
@@ -4839,7 +4258,9 @@ function CattlePrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
     try {
       let mediaUrls: string[] = [];
       try {
-        mediaUrls = await Promise.all(draft.images.map((uri) => uploadImage(uri, 'sale-listings')));
+        mediaUrls = await Promise.all(
+          (await optimiseAll(draft.images, 'photo')).map((uri) => uploadImage(uri, 'sale-listings'))
+        );
       } catch {
         mediaUrls = draft.images; // fall back to local uris if upload fails
       }
@@ -5097,7 +4518,11 @@ function InputsPrice({ setScreen, draft, patchDraft, onSubmitted }: CattleStepPr
     setSubmitError('');
     try {
       let mediaUrls: string[] = [];
-      try { mediaUrls = await Promise.all(draft.images.map((uri) => uploadImage(uri, 'sale-listings'))); } catch { mediaUrls = draft.images; }
+      try {
+        mediaUrls = await Promise.all(
+          (await optimiseAll(draft.images, 'photo')).map((uri) => uploadImage(uri, 'sale-listings'))
+        );
+      } catch { mediaUrls = draft.images; }
       const listingCode = `INP-APP-${Date.now()}`;
       const response = await apiCreate('sale/listings', {
         listing_code: listingCode,
@@ -6590,6 +6015,7 @@ function TrainingArticle({ contentId, setScreen, openQuiz }: { contentId: string
   useEffect(() => {
     if (!contentId) return;
     learnFetch(`app/learning/content?content_id=${contentId}&user_id=${uid}`).then(setContent).catch(() => undefined);
+    return () => { void stopSpeech(); };
   }, [contentId, uid]);
 
   async function onFinish() {
@@ -6603,9 +6029,17 @@ function TrainingArticle({ contentId, setScreen, openQuiz }: { contentId: string
   }
 
   const body = localized(content, lang, 'body', '') || (content?.body_en ?? '');
+  // The whole article, title first, as one thing to listen to. Many farmers
+  // read Bangla slowly; an article nobody can hear is an article most of them
+  // will not finish. The phone's own engine says it, so this costs nothing and
+  // works with the signal off.
+  const spoken = [rowTitle(content || undefined, lang, ''), body].filter(Boolean).join('। ');
   return (
     <>
-      <Header title={tx('আর্টিকেল', 'Article')} onBack={() => setScreen('trainingModule')} />
+      <Header
+        title={tx('আর্টিকেল', 'Article')}
+        onBack={() => { void stopSpeech(); setScreen('trainingModule'); }}
+      />
       {content?.image_url ? <Image source={{ uri: String(content.image_url) }} style={styles.readerImage} /> : null}
       <View style={styles.readerBody}>
         <Text style={styles.readerKicker}>{String((lang === 'bn' ? content?.module_title_bn : content?.module_title) || '')}</Text>
@@ -6614,6 +6048,9 @@ function TrainingArticle({ contentId, setScreen, openQuiz }: { contentId: string
           <View style={styles.pointPill}><Ionicons name="star" size={12} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(content?.points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text></View>
           {content?.status === 'completed' ? <View style={styles.donePill}><Ionicons name="checkmark" size={12} color="#FFFFFF" /><Text style={styles.donePillText}>{tx('সম্পন্ন', 'Completed')}</Text></View> : null}
         </View>
+        {content && spoken ? (
+          <ListenStrip text={spoken} server={{ source: 'learning', id: String(content.id) }} />
+        ) : null}
         {content ? <MarkdownText text={body || tx('কনটেন্ট নেই।', 'No content.')} style={styles.readerText} strongStyle={styles.readerStrong} /> : <ActivityIndicator color={colors.maroon} />}
       </View>
       {content ? (
@@ -6645,7 +6082,7 @@ function TrainingVideoScreen({ contentId, setScreen }: { contentId: string | nul
       setContent(c);
       if (c?.status === 'completed') { setCompleted(true); reportedRef.current = true; }
     }).catch(() => undefined);
-    return () => { stopAiSpeech().catch(() => undefined); };
+    return () => { void stopSpeech(); };
   }, [contentId, uid]);
 
   const duration = Number(content?.duration_seconds) || 0;
@@ -6686,14 +6123,9 @@ function TrainingVideoScreen({ contentId, setScreen }: { contentId: string | nul
     } catch { setSummary(tx('সারাংশ তৈরি করা যায়নি।', 'Could not generate a summary.')); } finally { setSummarizing(false); }
   }
 
-  function toggleRead() {
-    if (speaking) { stopAiSpeech().finally(() => setSpeaking(false)); return; }
-    playAiSpeech(summary, lang, () => setSpeaking(true), () => setSpeaking(false)).catch(() => setSpeaking(false));
-  }
-
   return (
     <>
-      <Header title={tx('ভিডিও', 'Video')} onBack={() => { stopAiSpeech().catch(() => undefined); setScreen('trainingModule'); }} />
+      <Header title={tx('ভিডিও', 'Video')} onBack={() => { void stopSpeech(); setScreen('trainingModule'); }} />
       <View style={styles.videoFrame}>
         {content?.youtube_id ? (
           <YoutubePlayer ref={playerRef} height={210} play={false} videoId={String(content.youtube_id)} onChangeState={onChangeState} />
@@ -6708,7 +6140,17 @@ function TrainingVideoScreen({ contentId, setScreen }: { contentId: string | nul
           <View style={styles.pointPill}><Ionicons name="star" size={12} color={colors.gold} /><Text style={styles.pointPillText}>{num(Number(content?.points ?? 0), lang)} {tx('পয়েন্ট', 'pts')}</Text></View>
           {completed ? <View style={styles.donePill}><Ionicons name="checkmark" size={12} color="#FFFFFF" /><Text style={styles.donePillText}>{tx('সম্পন্ন', 'Completed')}</Text></View> : <Text style={styles.videoHint}>{tx('৯০% দেখলে সম্পন্ন হবে', 'Completes at 90% watched')}</Text>}
         </View>
-        {content?.body_en ? <Text style={styles.readerText}>{localized(content, lang, 'body', '') || content.body_en}</Text> : null}
+        {content?.body_en ? (
+          <>
+            <ListenStrip
+              text={[rowTitle(content || undefined, lang, ''), localized(content, lang, 'body', '') || content.body_en]
+                .filter(Boolean)
+                .join('। ')}
+              server={{ source: 'learning', id: String(content.id) }}
+            />
+            <Text style={styles.readerText}>{localized(content, lang, 'body', '') || content.body_en}</Text>
+          </>
+        ) : null}
 
         <Pressable onPress={onSummarize} disabled={summarizing} style={({ pressed }) => [styles.aiSummaryBtn, pressed && styles.pressed]}>
           <Ionicons name="sparkles" size={16} color={colors.maroon} />
@@ -6719,15 +6161,13 @@ function TrainingVideoScreen({ contentId, setScreen }: { contentId: string | nul
           <View style={styles.aiSummaryBlock}>
             <View style={styles.aiSummaryHead}>
               <Text style={styles.aiSummaryTitle}>{tx('সারাংশ', 'Summary')}</Text>
-              <Pressable onPress={toggleRead} hitSlop={8} style={styles.aiReadBtn}>
-                <Ionicons name={speaking ? 'stop-circle' : 'volume-high'} size={20} color={colors.maroon} />
-              </Pressable>
+              <ListenButton text={summary} onStateChange={setSpeaking} style={styles.aiReadBtn} />
             </View>
             <MarkdownText text={summary} style={styles.readerText} strongStyle={styles.readerStrong} />
           </View>
         ) : null}
       </View>
-      {content ? <AppButton title={tx('শেষ', 'Done')} onPress={() => { stopAiSpeech().catch(() => undefined); setScreen('trainingModule'); }} /> : null}
+      {content ? <AppButton title={tx('শেষ', 'Done')} onPress={() => { void stopSpeech(); setScreen('trainingModule'); }} /> : null}
     </>
   );
 }
@@ -7028,7 +6468,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
     setPostError('');
     try {
       let imageUrl: string | undefined;
-      if (postImage) imageUrl = await uploadImage(postImage, 'community');
+      if (postImage) imageUrl = await uploadImage((await optimiseImage(postImage, 'photo')).uri, 'community');
       await apiCreate('community/posts', {
         user_id: Number(user?.id) || undefined,
         scope: 'upazila',
@@ -8734,7 +8174,11 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
     if (!pickedUri) return;
     setError('');
     try {
-      const url = await uploadImage(pickedUri, 'kyc');
+      // The loosest budget of the four: a reviewer has to read a national ID
+      // number off this, and a document squeezed until the digits blur is a
+      // verification rejected for no reason. Still about a third of what the
+      // camera produced.
+      const url = await uploadImage((await optimiseImage(pickedUri, 'document')).uri, 'kyc');
       await apiCreate('app/kyc-documents', { user_id: user?.id, doc_type: docType, document_url: url });
       setPickedUri(null);
       load();

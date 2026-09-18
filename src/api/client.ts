@@ -68,7 +68,17 @@ export const WEATHERAPI_LOCATION =
 
 export const SERVER_FALLBACK_MESSAGE = 'We could not load this from current server.';
 
-export type ApiFailure = Error & { code?: string; status?: number };
+export type ApiFailure = Error & {
+  code?: string;
+  status?: number;
+  /**
+   * Some refusals carry the state the screen needs to render. Shathi Apa's
+   * 403 returns the whole unlock screen — which steps are done, what
+   * verification buys — so the app shows what the server decided rather than a
+   * hard-coded guess at it.
+   */
+  entitlement?: unknown;
+};
 
 /** The server's error code, if the failure carried one. */
 export function apiErrorCode(error: unknown): string | undefined {
@@ -185,13 +195,21 @@ export function authHeaders(): Record<string, string> {
  * re-fetched the finance summary and threw a full-screen loader over a page that
  * was already rendered.
  */
-export type ApiOptions = RequestInit & { silent?: boolean };
+export type ApiOptions = RequestInit & {
+  silent?: boolean;
+  /**
+   * Override the 15-second default. An AI answer that calls two grounding
+   * tools legitimately takes eighteen seconds, and aborting it at fifteen
+   * showed the farmer a timeout for a request that was about to succeed.
+   */
+  timeoutMs?: number;
+};
 
 export async function apiRequest<T = any>(resource: string, options?: ApiOptions): Promise<T> {
   const silent = options?.silent === true;
   if (!silent) loadingStore.begin();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), options?.timeoutMs ?? REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(apiUrl(resource), {
       headers: {
@@ -215,6 +233,7 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
       const failure = new Error(json.message || `Server responded with ${response.status}`) as ApiFailure;
       failure.code = typeof json.code === 'string' ? json.code : undefined;
       failure.status = response.status;
+      if (json.entitlement) failure.entitlement = json.entitlement;
       throw failure;
     }
     return json as T;
