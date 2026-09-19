@@ -263,42 +263,6 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
 }
 
 /**
- * Send a picture, through the native uploader rather than React Native's
- * FormData.
- *
- * Three attempts at this, and the first two both failed for reasons worth
- * writing down.
- *
- * **Attempt one** was React Native's legacy file part:
- *
- *     form.append('file', { uri, name, type })
- *
- * On React Native 0.86 with the New Architecture that reaches the native
- * networking module and throws `Unsupported FormDataPart implementation`, which
- * a farmer then read in the middle of a Bangla conversation about a sick cow.
- *
- * **Attempt two** read the bytes and appended a `Blob`, which is the shape a
- * plain multipart POST from Node uses successfully against this same endpoint.
- * It cannot work here: React Native's `Blob` accepts only strings and other
- * Blobs, and its constructor throws
- *
- *     Creating blobs from 'ArrayBuffer' and 'ArrayBufferView' are not supported
- *
- * That throw was caught and fell back to attempt one, so the upload stayed
- * broken and only the error message changed. The server was never at fault
- * through any of this — a real multipart POST returns 201 to S3.
- *
- * **What works** is not to build the request in JavaScript at all.
- * `expo-file-system` has a native uploader: it takes a file URI, does the
- * multipart assembly on the native side, and never constructs a JS `Blob` or a
- * `FormData` part. That is `file.upload(url, { uploadType: MULTIPART })`, and it
- * is the mechanism below.
- *
- * The old FormData path is kept as a last resort for a URI the file API cannot
- * open, because a farmer who cannot upload at all is worse off than one whose
- * upload takes an unusual route.
- */
-/**
  * A multipart/form-data body, built byte by byte.
  *
  * ## Why this is hand-rolled
