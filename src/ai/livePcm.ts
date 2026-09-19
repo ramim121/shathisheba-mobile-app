@@ -1,12 +1,51 @@
-import {
-  AudioBufferQueueSourceNode,
-  AudioContext,
-  AudioManager,
-  AudioRecorder,
-  decodePCMInBase64,
+import type {
+  AudioBufferQueueSourceNode as QueueNode,
+  AudioContext as Ctx,
+  AudioRecorder as Recorder,
 } from 'react-native-audio-api';
 
 import { bytesToBase64 } from './apa';
+
+/**
+ * The native audio module, loaded only when a live call actually starts.
+ *
+ * `react-native-audio-api` is a native module: it is in the binary only after
+ * `expo prebuild` and a fresh build, and an OTA update cannot add it. Imported
+ * at the top of this file it would be evaluated the moment anything reached
+ * `src/apa/screens.tsx` - which is the assistant's main screen - and on any
+ * build made before it was added, that evaluation throws and takes the whole
+ * screen down.
+ *
+ * A farmer on an older build should lose *live*, which she has never had, not
+ * the assistant she uses every day. So the import happens at the point of use
+ * and its absence is a feature being unavailable rather than a crash.
+ */
+type AudioApi = typeof import('react-native-audio-api');
+
+let audioApi: AudioApi | null = null;
+
+export async function loadAudioApi(): Promise<AudioApi> {
+  if (audioApi) return audioApi;
+  try {
+    audioApi = await import('react-native-audio-api');
+    return audioApi;
+  } catch (error) {
+    throw Object.assign(
+      new Error('LIVE_NATIVE_MISSING'),
+      { code: 'live_unavailable', detail: String(error) }
+    );
+  }
+}
+
+/** Whether this build can hold a live call at all. */
+export async function liveAudioAvailable(): Promise<boolean> {
+  try {
+    const api = await loadAudioApi();
+    return typeof api.AudioRecorder === 'function';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The microphone and the speaker, for live conversation only.
@@ -116,6 +155,7 @@ export type MicHandle = {
 
 export async function micPermitted(): Promise<boolean> {
   try {
+    const { AudioManager } = await loadAudioApi();
     const status = await AudioManager.checkRecordingPermissions();
     if (status === 'Granted') return true;
     return (await AudioManager.requestRecordingPermissions()) === 'Granted';
@@ -147,7 +187,8 @@ export async function captureUtterance(opts: {
   maxSeconds?: number;
   onMaxReached?: () => void;
 }): Promise<MicHandle> {
-  const recorder = new AudioRecorder();
+  const { AudioRecorder } = await loadAudioApi();
+  const recorder: Recorder = new AudioRecorder();
   const chunks: Uint8Array[] = [];
   let frames = 0;
   let cancelled = false;
@@ -233,9 +274,10 @@ export type PlayerHandle = {
  * order with no gap. `clearBuffers()` is what makes stopping instant, which
  * matters because the alternative is Apa talking over her.
  */
-export function createPlayer(): PlayerHandle {
-  const context = new AudioContext({ sampleRate: LIVE_OUTPUT_RATE });
-  const queue = new AudioBufferQueueSourceNode(context);
+export async function createPlayer(): Promise<PlayerHandle> {
+  const { AudioContext, AudioBufferQueueSourceNode, decodePCMInBase64 } = await loadAudioApi();
+  const context: Ctx = new AudioContext({ sampleRate: LIVE_OUTPUT_RATE });
+  const queue: QueueNode = new AudioBufferQueueSourceNode(context);
   queue.connect(context.destination);
   queue.start();
   let closed = false;
@@ -270,6 +312,7 @@ export function createPlayer(): PlayerHandle {
  */
 export async function prepareLiveSession(): Promise<void> {
   try {
+    const { AudioManager } = await loadAudioApi();
     AudioManager.setAudioSessionOptions({
       iosCategory: 'playAndRecord',
       iosMode: 'voiceChat',
@@ -284,6 +327,7 @@ export async function prepareLiveSession(): Promise<void> {
 
 export async function releaseLiveSession(): Promise<void> {
   try {
+    const { AudioManager } = await loadAudioApi();
     await AudioManager.setAudioSessionActivity(false);
   } catch {
     // Nothing to release.

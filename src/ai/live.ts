@@ -152,7 +152,7 @@ export async function openLive(input: {
   await prepareLiveSession();
 
   let ws: WebSocket | null = null;
-  let player: PlayerHandle | null = createPlayer();
+  let player: PlayerHandle | null = await createPlayer();
   let mic: MicHandle | null = null;
   let state: LiveState = 'connecting';
   let resumeHandle: string | null = null;

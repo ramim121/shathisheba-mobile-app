@@ -298,6 +298,99 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
  * open, because a farmer who cannot upload at all is worse off than one whose
  * upload takes an unusual route.
  */
+/**
+ * A multipart/form-data body, built byte by byte.
+ *
+ * ## Why this is hand-rolled
+ *
+ * Three earlier attempts to upload a photo from this app failed on a real
+ * handset, and each one failed inside a React Native abstraction rather than in
+ * our own logic:
+ *
+ *   1. `form.append('file', {uri, name, type})` - the legacy part shape - threw
+ *      "Unsupported FormDataPart implementation" on RN 0.86 with the New
+ *      Architecture.
+ *   2. Constructing a `Blob` from the file's bytes threw outright: RN's Blob
+ *      cannot be built from an ArrayBuffer or an ArrayBufferView.
+ *   3. `expo-file-system`'s native uploader typechecked, bundled, and still did
+ *      not deliver - and because the failure was caught and only warned in
+ *      __DEV__, nobody could see why.
+ *
+ * The common thread is that every one of them was chosen by reasoning about
+ * which API *ought* to work. So this one was chosen by testing the bytes: the
+ * exact body below was posted to the production endpoint from Node and returned
+ * 201 with an S3 URL, and the same body without a token returned 401, so the
+ * pass means something.
+ *
+ * Everything it depends on is now a checked fact rather than an assumption:
+ *
+ *   - `File(uri).bytes()` exists in expo-file-system 57 and reads through the
+ *     native layer, not through `fetch`.
+ *   - RN 0.86's `convertRequestBody` maps `ArrayBuffer.isView(body)` to
+ *     `{base64: ...}`, so a Uint8Array body reaches the wire as raw bytes and
+ *     is binary-safe. A string body would not be: UTF-8 would corrupt every
+ *     byte above 0x7F, which is most of a JPEG.
+ *
+ * Binary-safety is why the file bytes are copied in as bytes and never pass
+ * through a string on the way.
+ */
+export function buildMultipart(input: {
+  boundary: string;
+  fields: Record<string, string>;
+  file: { field: string; name: string; type: string; bytes: Uint8Array };
+}): Uint8Array {
+  const { boundary, fields, file } = input;
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(
+      encoder.encode(
+        `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="${name}"\r\n\r\n` +
+          `${value}\r\n`
+      )
+    );
+  }
+
+  chunks.push(
+    encoder.encode(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="${file.field}"; filename="${file.name}"\r\n` +
+        `Content-Type: ${file.type}\r\n\r\n`
+    )
+  );
+  chunks.push(file.bytes);
+  chunks.push(encoder.encode(`\r\n--${boundary}--\r\n`));
+
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const body = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    body.set(c, at);
+    at += c.length;
+  }
+  return body;
+}
+
+/**
+ * The bytes of a local file, read through the native file system.
+ *
+ * Deliberately not `fetch(uri)`. That is what the audio path used, and on
+ * RN 0.86 with the New Architecture `fetch` on a `file://` URI does not
+ * reliably return the file - which is why a recorded voice message showed
+ * "could not send" on a handset while every unit test passed.
+ */
+async function localFileBytes(uri: string): Promise<Uint8Array> {
+  const { File } = await import('expo-file-system');
+  const file = new File(uri);
+  if (!file.exists) {
+    throw Object.assign(new Error(`UPLOAD_FILE_MISSING: ${uri}`), { code: 'upload_no_file' });
+  }
+  return await file.bytes();
+}
+
 export async function uploadImage(uri: string, folder: string): Promise<string> {
   if (!uri || typeof uri !== 'string') {
     // Never reach the uploader with nothing: that is the path that produced an
@@ -316,57 +409,58 @@ export async function uploadImage(uri: string, folder: string): Promise<string> 
 
   loadingStore.begin();
   try {
-    /* --- the native uploader ------------------------------------------- */
-    try {
-      const { File, UploadType } = await import('expo-file-system');
-      const file = new File(uri);
-      if (file.exists) {
-        const result = await file.upload(endpoint, {
-          httpMethod: 'POST',
-          uploadType: UploadType.MULTIPART,
-          fieldName: 'file',
-          mimeType: type,
-          // The server reads `folder` off the same multipart body.
-          parameters: { folder },
-          headers: authHeaders(),
-        });
-        const json = safeParse(result.body);
-        if (result.status >= 200 && result.status < 300 && json.ok !== false) {
-          return json.path ? `${base}${json.path}` : String(json.url ?? '');
-        }
-        throw Object.assign(new Error(String(json.message ?? `UPLOAD_FAILED_${result.status}`)), {
-          code: 'upload_failed',
-          status: result.status,
-          retry_after: json.retry_after,
-        });
-      }
-    } catch (error) {
-      // A coded failure is the server's answer and must not be retried down
-      // the fallback path — only a *mechanism* failure should fall through.
-      if ((error as { code?: string } | null)?.code) throw error;
-      if (__DEV__) console.warn('[upload] native uploader unavailable:', error);
+    const bytes = await localFileBytes(uri);
+    if (!bytes.length) {
+      throw Object.assign(new Error('UPLOAD_FILE_EMPTY'), { code: 'upload_no_file' });
     }
 
-    /* --- last resort: the FormData path -------------------------------- */
-    const form = new FormData();
-    form.append('folder', folder);
-    form.append('file', { uri, name, type } as any);
+    const boundary = `----ShathiSheba${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    const body = buildMultipart({
+      boundary,
+      fields: { folder },
+      file: { field: 'file', name, type, bytes },
+    });
+
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: authHeaders(),
-      body: form as any,
+      headers: {
+        ...authHeaders(),
+        // The boundary has to be declared here, because nothing is generating
+        // it for us any more. That is the point.
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: body as unknown as BodyInit,
     });
-    const json = await response.json().catch(() => ({}) as Record<string, unknown>);
+
+    const text = await response.text();
+    const json = safeParse(text);
     if (!response.ok || json.ok === false) {
-      throw Object.assign(new Error(String(json.message ?? `UPLOAD_FAILED_${response.status}`)), {
-        code: 'upload_failed',
-        status: response.status,
-        retry_after: json.retry_after,
-      });
+      throw Object.assign(
+        new Error(String(json.message ?? `UPLOAD_FAILED_${response.status}`)),
+        {
+          code: 'upload_failed',
+          status: response.status,
+          retry_after: json.retry_after,
+          // The server's own words, for the console. Never shown to her.
+          detail: text.slice(0, 300),
+        }
+      );
     }
+
     // Built from the app's own base so the host is always reachable from the
     // device (the server's request origin can resolve to 0.0.0.0).
     return json.path ? `${base}${json.path}` : (json.url as string);
+  } catch (error) {
+    // Anything that is not already a coded failure is a mechanism failure, and
+    // the one thing that must not happen again is it vanishing. Three attempts
+    // were spent guessing because the real reason was swallowed.
+    const coded = error as { code?: string; message?: string } | null;
+    if (coded?.code) throw error;
+    if (__DEV__) console.error('[upload] mechanism failed:', error);
+    throw Object.assign(new Error(String(coded?.message ?? 'UPLOAD_FAILED')), {
+      code: 'upload_failed',
+      detail: String(coded?.message ?? error),
+    });
   } finally {
     loadingStore.end();
   }

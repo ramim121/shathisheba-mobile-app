@@ -479,13 +479,40 @@ export async function inlineForModel(uri: string): Promise<{ data: string; mimeT
   return uriToInlineData(out.uri, 'image/jpeg');
 }
 
+/**
+ * A local file as base64, read through the native file system.
+ *
+ * This used to be `fetch(uri)` and that is why voice messages showed
+ * "could not send" on a real handset while every test passed. On RN 0.86 with
+ * the New Architecture, `fetch` on a `file://` URI does not reliably return the
+ * file - and it fails by resolving to nothing rather than by throwing, so the
+ * base64 came back empty and the server rejected an empty recording.
+ *
+ * `File.base64()` goes through expo-file-system's native layer, which is the
+ * same layer that has always been able to read these files.
+ *
+ * The `fetch` path is kept for anything that is not a local file - a `content://`
+ * URI from a document picker, or a remote one - because those are the cases the
+ * file system cannot open and `fetch` can.
+ */
 export async function uriToInlineData(uri: string, fallbackMime = 'image/jpeg') {
+  const mimeType = mimeFromUri(uri, fallbackMime);
+
+  if (uri.startsWith('file://')) {
+    const { File } = await import('expo-file-system');
+    const file = new File(uri);
+    if (file.exists) {
+      const data = await file.base64();
+      if (data) return { data, mimeType };
+    }
+    // An empty read is a failure, not an empty file: falling through to fetch
+    // would send nothing and be told, unhelpfully, that nothing was heard.
+    throw Object.assign(new Error(`FILE_UNREADABLE: ${uri}`), { code: 'upload_no_file' });
+  }
+
   const response = await fetch(uri);
   const buffer = await response.arrayBuffer();
-  return {
-    data: bytesToBase64(new Uint8Array(buffer)),
-    mimeType: mimeFromUri(uri, fallbackMime),
-  };
+  return { data: bytesToBase64(new Uint8Array(buffer)), mimeType };
 }
 
 /* ---------------------------------------------------------------------------
