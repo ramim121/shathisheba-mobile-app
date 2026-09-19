@@ -13,6 +13,7 @@ import {
 } from '../theme/primitives';
 import { Ionicons } from '@expo/vector-icons';
 import { FailureCard } from '../ai/FailureCard';
+import { AnswerCallout, RichAnswer, ThinkingDots } from './RichAnswer';
 import {
   closeApaLive, clearApaHistory, getApaSettings, markApaLiveConnected,
   saveApaSettings, startApaLive,
@@ -302,10 +303,9 @@ function ApaBubble({
   if (turn.state === 'transcribing' || turn.state === 'thinking') {
     return (
       <View style={apa.status}>
-        <ActivityIndicator size="small" color={colors.maroon} />
-        <Text style={apa.statusText}>
-          {turn.state === 'transcribing' ? tx('লিখে নিচ্ছি…', 'Writing it down…') : tx('ভাবছি…', 'Thinking…')}
-        </Text>
+        <ThinkingDots
+          label={turn.state === 'transcribing' ? tx('লিখে নিচ্ছি…', 'Writing it down…') : tx('ভাবছি…', 'Thinking…')}
+        />
       </View>
     );
   }
@@ -327,7 +327,7 @@ function ApaBubble({
     <View style={apa.turnApaRow}>
       <View style={apa.turnApaMark}><ApaMark size={24} /></View>
       <View style={[apa.turnApa, failed && { borderColor: '#F6DFAE', backgroundColor: '#FEF6E7' }]}>
-        <MarkdownText text={turn.text} style={apa.turnText} strongStyle={apa.turnStrong} />
+        <RichAnswer text={turn.text} textStyle={apa.turnText} strongStyle={apa.turnStrong} />
 
         {/* She asked for more detail rather than guessing. Marked so it reads
             as a question to answer, not as a failure to work around. */}
@@ -338,10 +338,13 @@ function ApaBubble({
         ) : null}
 
         {turn.advice ? (
-          <View style={apa.advice}>
-            <Text style={apa.adviceTitle}>{turn.advice.title_bn}</Text>
-            <Text style={apa.adviceText}>{turn.advice.body}</Text>
-          </View>
+          <AnswerCallout
+            kind={turn.advice.kind === 'likely' ? 'likely' : 'advice'}
+            title={turn.advice.title_bn}
+            body={turn.advice.body}
+            textStyle={apa.adviceText}
+            strongStyle={apa.turnStrong}
+          />
         ) : null}
 
         {turn.caution ? (
