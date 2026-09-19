@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import type { ApiRow, Lang } from '../types';
+import { reportFailure, setReporter } from '../ai/report';
 
 // The app's HTTP transport: URL building, the single fetch wrapper, the bearer
 // token the server authenticates against, uploads, and the global loading and
@@ -191,6 +192,18 @@ export function setAuthExpiredHandler(handler: (() => void) | null) {
   onAuthExpired = handler;
 }
 
+// How src/ai/report.ts posts a failure. Injected rather than imported there,
+// because this file reports its own upload failures and a cycle between the
+// networking layer and its error reporter fails as an `undefined` at runtime.
+setReporter((payload) =>
+  apiRequest('app/apa/client-error', {
+    method: 'POST',
+    silent: true,
+    timeoutMs: 8000,
+    body: JSON.stringify(payload),
+  })
+);
+
 export function authHeaders(): Record<string, string> {
   return apiAuthToken ? { Authorization: `Bearer ${apiAuthToken}` } : {};
 }
@@ -347,13 +360,49 @@ export function buildMultipart(input: {
  * "could not send" on a handset while every unit test passed.
  */
 async function localFileBytes(uri: string): Promise<Uint8Array> {
+  // The scheme is the first thing worth knowing and the first thing that was
+  // never recorded: a content:// URI and a file:// URI fail here for entirely
+  // different reasons and produced the same message.
+  const scheme = uri.split(':')[0];
+
   if (uri.startsWith('file://')) {
-    const { File } = await import('expo-file-system');
-    const file = new File(uri);
-    if (!file.exists) {
-      throw Object.assign(new Error(`UPLOAD_FILE_MISSING: ${uri}`), { code: 'upload_no_file' });
+    let File: typeof import('expo-file-system').File;
+    try {
+      ({ File } = await import('expo-file-system'));
+    } catch (error) {
+      await reportFailure({ area: 'upload', stage: 'import_file_system', error, note: scheme });
+      throw Object.assign(new Error('UPLOAD_NO_FS'), { code: 'upload_failed' });
     }
-    return await file.bytes();
+
+    const file = new File(uri);
+    let exists = false;
+    let size: number | null = null;
+    try {
+      exists = file.exists;
+      size = exists ? (file.size ?? null) : null;
+    } catch (error) {
+      await reportFailure({ area: 'upload', stage: 'file_stat', error, note: `${scheme} ${uri.length}ch` });
+    }
+
+    if (!exists) {
+      const miss = Object.assign(new Error(`UPLOAD_FILE_MISSING: ${uri}`), { code: 'upload_no_file' });
+      await reportFailure({ area: 'upload', stage: 'file_missing', error: miss, note: `${scheme} ${uri.length}ch` });
+      throw miss;
+    }
+
+    try {
+      const bytes = await file.bytes();
+      if (!bytes.length) {
+        const empty = Object.assign(new Error('UPLOAD_FILE_EMPTY'), { code: 'upload_no_file' });
+        await reportFailure({ area: 'upload', stage: 'file_empty', error: empty, note: `size=${size}` });
+        throw empty;
+      }
+      return bytes;
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code) throw error;
+      await reportFailure({ area: 'upload', stage: 'file_bytes', error, note: `size=${size}` });
+      throw Object.assign(new Error('UPLOAD_READ_FAILED'), { code: 'upload_failed' });
+    }
   }
 
   // A `content://` URI from an OEM gallery that expo-image-manipulator could
@@ -361,13 +410,22 @@ async function localFileBytes(uri: string): Promise<Uint8Array> {
   // cannot open those, but Android's own resolver can and `fetch` goes through
   // it — which is the one case where `fetch` is the right tool rather than the
   // thing that broke voice messages.
-  const response = await fetch(uri);
-  if (!response.ok) {
-    throw Object.assign(new Error(`UPLOAD_FILE_UNREADABLE: ${response.status}`), {
-      code: 'upload_no_file',
-    });
+  try {
+    const response = await fetch(uri);
+    if (!response.ok) {
+      const bad = Object.assign(new Error(`UPLOAD_FILE_UNREADABLE: ${response.status}`), {
+        code: 'upload_no_file',
+        status: response.status,
+      });
+      await reportFailure({ area: 'upload', stage: 'content_uri_status', error: bad, note: scheme });
+      throw bad;
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code) throw error;
+    await reportFailure({ area: 'upload', stage: 'content_uri_fetch', error, note: scheme });
+    throw Object.assign(new Error('UPLOAD_READ_FAILED'), { code: 'upload_failed' });
   }
-  return new Uint8Array(await response.arrayBuffer());
 }
 
 export async function uploadImage(uri: string, folder: string): Promise<string> {
@@ -400,21 +458,34 @@ export async function uploadImage(uri: string, folder: string): Promise<string> 
       file: { field: 'file', name, type, bytes },
     });
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        ...authHeaders(),
-        // The boundary has to be declared here, because nothing is generating
-        // it for us any more. That is the point.
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      },
-      body: body as unknown as BodyInit,
-    });
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          ...authHeaders(),
+          // The boundary has to be declared here, because nothing is generating
+          // it for us any more. That is the point.
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: body as unknown as BodyInit,
+      });
+    } catch (error) {
+      // A transport failure, which is a different problem from the server
+      // refusing the body — and the two were indistinguishable before.
+      await reportFailure({
+        area: 'upload',
+        stage: 'post_multipart',
+        error,
+        note: `${body.length}B to ${endpoint}`,
+      });
+      throw Object.assign(new Error('UPLOAD_NO_NETWORK'), { code: 'upload_failed' });
+    }
 
     const text = await response.text();
     const json = safeParse(text);
     if (!response.ok || json.ok === false) {
-      throw Object.assign(
+      const failed = Object.assign(
         new Error(String(json.message ?? `UPLOAD_FAILED_${response.status}`)),
         {
           code: 'upload_failed',
@@ -424,6 +495,13 @@ export async function uploadImage(uri: string, folder: string): Promise<string> 
           detail: text.slice(0, 300),
         }
       );
+      await reportFailure({
+        area: 'upload',
+        stage: 'server_refused',
+        error: failed,
+        note: `${body.length}B ${type}`,
+      });
+      throw failed;
     }
 
     // Built from the app's own base so the host is always reachable from the

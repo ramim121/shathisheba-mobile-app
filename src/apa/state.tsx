@@ -6,7 +6,7 @@ import {
   type ApaAnswer, type ApaEntitlement, type ApaOfficer, type ApaSource,
 } from '../ai/apa';
 import {
-  INTRO_SOURCE, onSpeechChange, playClip, primeDeviceVoice, speak, stopSpeech,
+  INTRO_SOURCE, onSpeechChange, playClip, primeDeviceVoice, primeIntroAudio, speak, stopSpeech,
   type SpeechState,
 } from '../ai/speech';
 import { optimiseImage } from '../media/image';
@@ -157,7 +157,12 @@ export function ApaProvider({
   useEffect(() => {
     if (!authed) return;
     void primeDeviceVoice().catch(() => undefined);
-    void getApaSpeechConfig().catch(() => undefined);
+    // Awaited in order: the config carries the intro text and the speech mode,
+    // and priming the greeting before either is known would fetch the wrong
+    // thing or nothing at all.
+    void getApaSpeechConfig()
+      .then(() => primeIntroAudio())
+      .catch(() => undefined);
   }, [authed]);
 
   // Leaving Apa should not leave her phone talking.
@@ -387,7 +392,17 @@ export function ApaProvider({
         // The one spoken line with no message row behind it. Without a source
         // it fell to the phone's own engine, which is why the intro was read by
         // a man on most handsets.
-        speak({ text: turn.text, lang, token: turn.key, server: INTRO_SOURCE }).catch(() => undefined);
+        // alwaysServer: the greeting is Shathi Apa introducing herself, and it
+        // must be her voice rather than whichever engine the handset defaults
+        // to. See SpeakInput.alwaysServer for why a cost setting was able to
+        // make her sound like a man.
+        speak({
+          text: turn.text,
+          lang,
+          token: turn.key,
+          server: INTRO_SOURCE,
+          alwaysServer: true,
+        }).catch(() => undefined);
         return;
       }
       if (turn.role === 'apa' && turn.text) {

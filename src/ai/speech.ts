@@ -279,6 +279,52 @@ export function intro(): string {
   return introText;
 }
 
+/**
+ * Fetch the greeting's audio and put it on disk, without playing it.
+ *
+ * The greeting is the one clip whose latency is fully predictable: it is the
+ * same line for every farmer, it is the first thing on the screen, and she will
+ * press it within a second or two of arriving. Waiting until the press meant a
+ * spinner and about nine seconds the first time, which is long enough to look
+ * broken.
+ *
+ * Silent about failure on purpose. This is an optimisation; if it does not
+ * happen, `speak()` still works and simply takes as long as it used to.
+ */
+export async function primeIntroAudio(): Promise<void> {
+  try {
+    await primeSpeechUrls();
+    // Already on disk from a previous visit: nothing to do, and no request.
+    const known = rememberedUrl(INTRO_SOURCE);
+    if (known && heldLocally(known)) return;
+
+    const json = await apiRequest<{
+      result:
+        | { mode: 'device'; text: string }
+        | { mode: 'server'; url: string }
+        | { mode: 'none'; reason: string };
+    }>('app/ai/speak', {
+      method: 'POST',
+      body: JSON.stringify({
+        source: INTRO_SOURCE.source,
+        id: String(INTRO_SOURCE.id),
+        lang: 'bn',
+        // Always true here. The greeting is Apa introducing herself and must be
+        // her voice whatever apa_tts_mode says - see SpeakInput.alwaysServer.
+        needs_server: true,
+      }),
+      silent: true,
+      timeoutMs: 60_000,
+    });
+    if (json.result.mode !== 'server') return;
+    rememberUrl(INTRO_SOURCE, json.result.url);
+    // Pulls the bytes onto disk, so the press plays from the file system.
+    await localSpeech(json.result.url);
+  } catch {
+    // See above.
+  }
+}
+
 /** The source to hand `speak()` for the greeting. */
 export const INTRO_SOURCE: SpeechSource = { source: 'intro', id: 'intro' };
 
@@ -434,6 +480,16 @@ export type SpeakInput = {
   server?: SpeechSource | null;
   /** Distinguishes this button from the others on screen. */
   token?: string;
+  /**
+   * Use Gemini's voice whatever `apa_tts_mode` says.
+   *
+   * For the greeting only. Shathi Apa is a woman and the line introducing her
+   * is the first thing anyone hears, so it must not follow a cost setting down
+   * to the handset's default engine — which on most Android phones is male.
+   * One line of text for the whole product, synthesised once and then served
+   * from its content hash, so the exemption costs about $0.003 in total.
+   */
+  alwaysServer?: boolean;
   onStart?: () => void;
   onEnd?: () => void;
 };
@@ -478,7 +534,22 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
   // Gemini's voice first when that is the configured mode and the caller gave
   // us something the server can look up. A clip already on disk is played
   // without a request at all, so a replay costs nothing either way.
-  const wantsServer = mode === 'server' || (mode === 'device_then_server' && !(await primeDeviceVoice()));
+  //
+  // `alwaysServer` exists for the greeting, and it is not a preference.
+  // Shathi Apa is a woman, and the line that introduces her is the first thing
+  // anyone hears. Left to `apa_tts_mode`, moving that setting to
+  // `device_then_server` to cut the speech bill had a side effect nobody would
+  // predict from the setting's name: the intro fell through to the handset's
+  // default engine, which on most Android phones is male. She introduced
+  // herself in a man's voice.
+  //
+  // It costs nothing to exempt. The greeting is one line of text for the whole
+  // product, synthesised once at about $0.003 and then served from the content
+  // hash for every farmer for ever.
+  const wantsServer =
+    input.alwaysServer === true ||
+    mode === 'server' ||
+    (mode === 'device_then_server' && !(await primeDeviceVoice()));
   if (wantsServer && input.server) {
     try {
       await speakFromServer(input.server, input, token);

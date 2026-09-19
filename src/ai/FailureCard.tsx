@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { PressableScale, useLanguage, useReducedMotion } from '../theme/primitives';
 import { retryLine, type Failure } from './errors';
+import { lastFailureDetail } from './report';
 
 /**
  * What a farmer sees when something failed.
@@ -63,6 +64,8 @@ export function FailureCard({
   // number, so only this card can say when the button is worth pressing.
   const [left, setLeft] = useState(failure.retryAfter ?? 0);
   const [retrying, setRetrying] = useState(false);
+  // Revealed by a long press, never shown by default.
+  const [showDetail, setShowDetail] = useState(false);
 
   useEffect(() => {
     setLeft(failure.retryAfter ?? 0);
@@ -93,10 +96,35 @@ export function FailureCard({
       ]}
       accessibilityLiveRegion="polite"
     >
-      <View style={sheet.row}>
-        <Ionicons name={ICONS[failure.kind]} size={compact ? 18 : 20} color={tone.fg} />
-        <Text style={[sheet.message, { color: tone.fg }]}>{failure.message}</Text>
-      </View>
+      {/* Long-press reveals the technical reason.
+          Not a debug leftover, and not shown by default: a farmer must never
+          read a stack trace, which is the bug src/ai/errors.ts exists to
+          prevent. But a failure nobody can describe is the reason the photo
+          upload took four attempts and voice input three - each report arrived
+          as "still broken" with nothing attached, and each fix was a guess.
+          One long press turns an unactionable report into an actionable one.
+
+          It is also sent to the server (src/ai/report.ts), so this is the
+          copy for whoever is holding the phone right now. */}
+      <Pressable
+        onLongPress={() => setShowDetail((v) => !v)}
+        delayLongPress={600}
+        accessibilityHint={tx(
+          'কারণ দেখতে চেপে ধরে রাখুন',
+          'Press and hold to show the technical reason'
+        )}
+      >
+        <View style={sheet.row}>
+          <Ionicons name={ICONS[failure.kind]} size={compact ? 18 : 20} color={tone.fg} />
+          <Text style={[sheet.message, { color: tone.fg }]}>{failure.message}</Text>
+        </View>
+      </Pressable>
+
+      {showDetail ? (
+        <Text style={sheet.detail} selectable>
+          {failure.detail || lastFailureDetail() || tx('বিস্তারিত কিছু নেই', 'No further detail')}
+        </Text>
+      ) : null}
 
       {onRetry && failure.canRetry ? (
         <PressableScale
@@ -140,6 +168,15 @@ export function FailureCard({
 }
 
 const sheet = StyleSheet.create({
+  // Monospace and small: this is for whoever is debugging, not for her. Only
+  // ever visible after a deliberate long press.
+  detail: {
+    marginTop: 8,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 10,
+    lineHeight: 14,
+    color: colors.muted,
+  },
   card: {
     // No alignSelf or maxWidth: this sits inside a flex row and the parent
     // gives it its width. Constraining it here made it collapse to its

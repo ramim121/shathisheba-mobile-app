@@ -17,6 +17,10 @@ export const styles = StyleSheet.create({
   refreshScrollContent: { paddingBottom: 96 + androidNavigationInset },
   shellContentWithAccessory: { paddingBottom: 218 + androidNavigationInset },
   fixedAccessory: { position: 'absolute', left: 0, right: 0, bottom: 72 + androidNavigationInset, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12, backgroundColor: colors.cream },
+  // While the keyboard is up the bottom nav is hidden, so the accessory no
+  // longer has to clear it - and it gives back the padding, because half the
+  // screen is gone and every pixel of it should be her conversation.
+  fixedAccessoryLifted: { paddingTop: 4, paddingBottom: 4 },
   flex: { flex: 1 },
   pressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
   onboarding: {

@@ -5,6 +5,7 @@ import {
 } from './speech';
 import { optimiseImage, setAiImageMaxPx } from '../media/image';
 import type { CattleAiResult, Lang } from '../types';
+import { reportFailure } from './report';
 
 // Everything Shathi Apa needs from the server, and the audio plumbing that
 // plays what comes back.
@@ -501,10 +502,37 @@ export async function uriToInlineData(uri: string, fallbackMime = 'image/jpeg') 
   if (uri.startsWith('file://')) {
     const { File } = await import('expo-file-system');
     const file = new File(uri);
-    if (file.exists) {
-      const data = await file.base64();
-      if (data) return { data, mimeType };
+    let exists = false;
+    let size: number | null = null;
+    try {
+      exists = file.exists;
+      size = exists ? (file.size ?? null) : null;
+    } catch (error) {
+      await reportFailure({ area: 'voice', stage: 'file_stat', error, note: mimeType });
     }
+
+    if (exists) {
+      try {
+        const data = await file.base64();
+        if (data) return { data, mimeType };
+        await reportFailure({
+          area: 'voice',
+          stage: 'base64_empty',
+          error: new Error('FILE_READ_EMPTY'),
+          note: `size=${size} ${mimeType}`,
+        });
+      } catch (error) {
+        await reportFailure({ area: 'voice', stage: 'base64_failed', error, note: `size=${size} ${mimeType}` });
+      }
+    } else {
+      await reportFailure({
+        area: 'voice',
+        stage: 'file_missing',
+        error: new Error('FILE_MISSING'),
+        note: `${uri.length}ch ${mimeType}`,
+      });
+    }
+
     // An empty read is a failure, not an empty file: falling through to fetch
     // would send nothing and be told, unhelpfully, that nothing was heard.
     throw Object.assign(new Error(`FILE_UNREADABLE: ${uri}`), { code: 'upload_no_file' });

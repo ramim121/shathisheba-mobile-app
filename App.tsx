@@ -272,19 +272,37 @@ function useRefreshTick() {
 
 // True while the soft keyboard is visible — used to hide the bottom nav so it
 // stays at the device bottom (keyboard covers it) instead of floating up.
-function useKeyboardVisible() {
-  const [visible, setVisible] = useState(false);
+/**
+ * Whether the keyboard is up, and how tall it is.
+ *
+ * The height is the part that matters and the part that used to be missing.
+ * `android:windowSoftInputMode` is `adjustResize`, which historically meant the
+ * window shrank and anything at `bottom: 0` sat above the keyboard for free.
+ * Expo SDK 54 turned edge-to-edge on by default for Android, and under
+ * edge-to-edge the window is no longer resized — the app draws behind the
+ * system bars and has to account for insets itself. So `bottom: 0` became the
+ * true bottom of the screen, and the composer went under the keyboard with the
+ * text she was typing.
+ *
+ * `endCoordinates.height` is what to lift by. On iOS the `Will` events fire
+ * before the animation so the move is in step with it; on Android only the
+ * `Did` events exist.
+ */
+function useKeyboard(): { visible: boolean; height: number } {
+  const [state, setState] = useState({ visible: false, height: 0 });
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const show = Keyboard.addListener(showEvt, () => setVisible(true));
-    const hide = Keyboard.addListener(hideEvt, () => setVisible(false));
+    const show = Keyboard.addListener(showEvt, (event) => {
+      setState({ visible: true, height: event?.endCoordinates?.height ?? 0 });
+    });
+    const hide = Keyboard.addListener(hideEvt, () => setState({ visible: false, height: 0 }));
     return () => {
       show.remove();
       hide.remove();
     };
   }, []);
-  return visible;
+  return state;
 }
 
 function usePullRefresh() {
@@ -891,7 +909,7 @@ function Shell({
   ];
 
   const { refreshing, onRefresh } = usePullRefresh();
-  const keyboardVisible = useKeyboardVisible();
+  const { visible: keyboardVisible, height: keyboardHeight } = useKeyboard();
   return (
     <View style={styles.shell}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -923,9 +941,24 @@ function Shell({
           rather than as a seam. */}
       {brandBar ? (
         <View style={styles.brandHeaderFixed} pointerEvents="box-none">
-            </View>
+          <BrandHeader setScreen={setScreen} />
+        </View>
       ) : null}
-      {fixedAccessory ? <View style={styles.fixedAccessory}>{fixedAccessory}</View> : null}
+      {/* The composer sits above the keyboard rather than under it.
+          Lifted by the measured keyboard height because edge-to-edge stops the
+          window resizing (see useKeyboard), and tightened while the keyboard is
+          up: with half the screen gone the padding that reads as generous at
+          rest is just less of her conversation. */}
+      {fixedAccessory ? (
+        <View
+          style={[
+            styles.fixedAccessory,
+            keyboardVisible ? [styles.fixedAccessoryLifted, { bottom: keyboardHeight }] : null,
+          ]}
+        >
+          {fixedAccessory}
+        </View>
+      ) : null}
       {/* Bottom nav stays pinned at the device bottom; hidden while the keyboard
           is open so it never floats above the keyboard. */}
       {keyboardVisible ? null : (
