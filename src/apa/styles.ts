@@ -338,6 +338,54 @@ export const apa = StyleSheet.create({
   camBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 28, paddingTop: 16, paddingBottom: 30 },
   camSide: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
   camSideIcon: { fontSize: 20 },
-  camShutter: { width: 86, height: 86, borderRadius: 43, backgroundColor: '#fff', borderWidth: 5, borderColor: 'rgba(255,255,255,0.35)' },
+  // A ring around a disc, so the press animation has something to scale
+  // against. It was a solid white circle, which read as a blank button.
+  camShutter: {
+    width: 76, height: 76, borderRadius: 38, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 4, borderColor: 'rgba(255,255,255,0.45)',
+  },
   camPreview: { flex: 1, margin: 24, borderRadius: 18, resizeMode: 'cover' },
+
+  /* --- the photo screen, rebuilt ---------------------------------------- */
+  //
+  // Free text is gone: a farmer who has just photographed a sick animal is not
+  // in a position to compose a prompt, and what she typed was usually two words
+  // — the vaguest possible question, costing a full vision call. Five fixed
+  // questions instead, one tap each.
+
+  camAsk: { padding: 20, paddingBottom: 40, gap: 12, alignItems: 'stretch' },
+  camThumb: { width: '100%', height: 220, borderRadius: 16, backgroundColor: '#000' },
+  camChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  camChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 44,
+    paddingHorizontal: 14, borderRadius: 22, backgroundColor: '#fff',
+  },
+  camChipBusy: { opacity: 0.6 },
+  camChipText: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
+
+  camPrimary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    minHeight: 52, borderRadius: 26, backgroundColor: colors.maroon, paddingHorizontal: 18,
+  },
+  camPrimaryText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+
+  camSecondary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    minHeight: 48, borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)',
+  },
+  camSecondaryText: { color: '#fff', fontSize: 14.5, fontWeight: '700' },
+
+  camFoot: { color: 'rgba(255,255,255,0.6)', fontSize: 12, lineHeight: 18, textAlign: 'center' },
+
+  // A denied permission used to do nothing at all.
+  camNotice: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 24,
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  camNoticeText: { flex: 1, color: '#fff', fontSize: 13, lineHeight: 19 },
+
+  camShutterInner: {
+    width: 56, height: 56, borderRadius: 28, backgroundColor: '#fff',
+  },
 });

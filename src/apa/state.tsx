@@ -9,6 +9,7 @@ import {
   INTRO_SOURCE, onSpeechChange, primeDeviceVoice, speak, stopSpeech, type SpeechState,
 } from '../ai/speech';
 import { optimiseImage } from '../media/image';
+import { describeFailure, type Failure } from '../ai/errors';
 import { uploadImage } from '../api/client';
 import { useLanguage } from '../theme/primitives';
 import type { Screen } from '../types';
@@ -53,6 +54,16 @@ export type ApaTurn = {
   messageId?: string | null;
   vote?: 'up' | 'down' | null;
   voteReason?: string | null;
+  /**
+   * Why this turn failed, structured.
+   *
+   * The text used to be written into `text` as a red bubble, which is how a
+   * React Native internal ended up on screen. The card renders from this
+   * instead, and it carries the retry seconds so the card can count down.
+   */
+  failure?: Failure | null;
+  /** What to send again if she presses retry. */
+  retry?: { kind: 'text'; text: string } | { kind: 'photo'; uri: string; question: string } | null;
   refused?: boolean;
   askedClarification?: boolean;
   fromCache?: boolean;
@@ -71,6 +82,8 @@ type ApaValue = {
   askVoice: (uri: string, seconds: number) => Promise<void>;
   askPhoto: (uri: string, question: string) => Promise<void>;
   replay: (turn: ApaTurn) => void;
+  /** Re-send whatever a failed turn was carrying. */
+  retryTurn: (turn: ApaTurn) => void;
   /** Which turn is being read aloud, so only its own button shows playing. */
   speakingKey: string | null;
   /** What that button is doing — idle, loading, playing or paused. */
@@ -169,7 +182,9 @@ export function ApaProvider({
               // An install from before device read-aloud has megabytes of
               // base64 WAV in here. Dropped on the first read, which is what
               // frees the store rather than waiting for it to be overwritten.
-              const { audio, ...rest } = t as ApaTurn & { audio?: string | null };
+              // A countdown from a previous session is meaningless, and a
+              // retry button that fires an hour later is worse than none.
+              const { audio, failure, retry, ...rest } = t as ApaTurn & { audio?: string | null };
               // A turn stored mid-flight would come back as a spinner that
               // never resolves, so anything unfinished is written off as failed.
               return rest.state === 'done' || rest.state === 'unheard' ? rest : { ...rest, state: 'failed' as const };
@@ -252,7 +267,7 @@ export function ApaProvider({
   );
 
   const fail = useCallback(
-    (apaKey: string, e: unknown) => {
+    (apaKey: string, e: unknown, retry?: ApaTurn['retry']) => {
       const locked = (e as { code?: string; entitlement?: ApaEntitlement } | null) ?? {};
       if (locked.entitlement) setEntitlement(locked.entitlement);
       if (locked.code && locked.code.startsWith('apa_') && locked.code !== 'apa_busy' && locked.code !== 'apa_timeout' && locked.code !== 'apa_failed') {
@@ -262,7 +277,9 @@ export function ApaProvider({
         setTurns((current) => current.filter((t) => t.key !== apaKey));
         return;
       }
-      patch(apaKey, { text: friendlyAiError(e, lang), state: 'failed' });
+      // Structured, so the card can show an icon, a countdown and a retry
+      // button that is only pressable when pressing it would work.
+      patch(apaKey, { text: '', failure: describeFailure(e, lang), retry: retry ?? null, state: 'failed' });
     },
     [lang, patch]
   );
@@ -282,7 +299,7 @@ export function ApaProvider({
       try {
         land(apaKey, await askApaText(trimmed, conversationId), false);
       } catch (e) {
-        fail(apaKey, e);
+        fail(apaKey, e, { kind: 'text', text: trimmed });
       } finally {
         setBusy(false);
       }
@@ -319,6 +336,9 @@ export function ApaProvider({
         land(apaKey, result, true);
       } catch (e) {
         patch(userKey, { state: 'failed' });
+        // A voice clip is not resent automatically: re-uploading audio she
+        // cannot hear again would be guessing at what she said. The clip is
+        // still on the device and replayable.
         fail(apaKey, e);
       } finally {
         setBusy(false);
@@ -352,7 +372,7 @@ export function ApaProvider({
         land(apaKey, await askApaPhoto(url, question, conversationId), true);
       } catch (e) {
         patch(userKey, { state: 'failed' });
-        fail(apaKey, e);
+        fail(apaKey, e, { kind: 'photo', uri, question });
       } finally {
         setBusy(false);
       }
@@ -406,6 +426,23 @@ export function ApaProvider({
     [patch]
   );
 
+  /**
+   * Send again what failed.
+   *
+   * Drops the failed pair first, so a retry reads as the question being asked
+   * again rather than as a second attempt stacked under an error.
+   */
+  const retryTurn = useCallback(
+    (turn: ApaTurn) => {
+      const again = turn.retry;
+      if (!again) return;
+      setTurns((current) => current.filter((t) => t.key !== turn.key));
+      if (again.kind === 'text') void askText(again.text);
+      else void askPhoto(again.uri, again.question);
+    },
+    [askPhoto, askText]
+  );
+
   const clear = useCallback(() => {
     void stopSpeech();
     setTurns([]);
@@ -417,7 +454,7 @@ export function ApaProvider({
   const value = useMemo<ApaValue>(
     () => ({
       entitlement, turns, busy, wall, conversationId, error, reload,
-      askText, askVoice, askPhoto, replay, speakingKey, speakingState, vote, clear,
+      askText, askVoice, askPhoto, replay, retryTurn, speakingKey, speakingState, vote, clear,
       navigate: onNavigate, recording, setRecording, justUnlocked, dismissUnlocked,
     }),
     [entitlement, turns, busy, wall, conversationId, error, reload, askText, askVoice, askPhoto, replay, vote, clear, onNavigate, recording, justUnlocked, dismissUnlocked]

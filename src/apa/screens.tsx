@@ -12,6 +12,7 @@ import {
   AppButton, Header, MarkdownText, PressableScale, useLanguage, usePulse, useReducedMotion,
 } from '../theme/primitives';
 import { Ionicons } from '@expo/vector-icons';
+import { FailureCard } from '../ai/FailureCard';
 import {
   closeApaLive, clearApaHistory, getApaSettings, markApaLiveConnected,
   saveApaSettings, startApaLive,
@@ -104,7 +105,9 @@ function ApaMark({ size = 28 }: { size?: number }) {
 
 export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
-  const { entitlement, turns, busy, wall, error, askText, replay, speakingKey, vote, navigate } = useApa();
+  const {
+    entitlement, turns, busy, wall, error, askText, replay, retryTurn, speakingKey, vote, navigate,
+  } = useApa();
   const scroller = useRef<ScrollView>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -208,6 +211,7 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
               turn={turn}
               playing={speakingKey === turn.key}
               onReplay={() => replay(turn)}
+              onRetry={() => retryTurn(turn)}
               onSuggestion={askText}
               onVote={(v, reason) => vote(turn, v, reason)}
               onAction={(screen) => navigate(screen)}
@@ -238,6 +242,7 @@ function UserBubble({
   /** True only for the one bubble actually being read out. */
   playing?: boolean;
   onReplay: () => void;
+  onRetry?: () => void;
   lang: string;
   tx: (bnText: string, enText: string) => string;
 }) {
@@ -278,12 +283,14 @@ function UserBubble({
 /* --- her answer ---------------------------------------------------------- */
 
 function ApaBubble({
-  turn, playing = false, onReplay, onSuggestion, onVote, onAction, lang, tx,
+  turn, playing = false, onReplay, onRetry, onSuggestion, onVote, onAction, lang, tx,
 }: {
   turn: ApaTurn;
   /** True only for the one bubble actually being read out. */
   playing?: boolean;
   onReplay: () => void;
+  /** Absent where there is nothing to resend — the card then only explains. */
+  onRetry?: () => void;
   onSuggestion: (text: string) => void;
   onVote: (vote: 'up' | 'down', reason?: string) => void;
   onAction: (screen: Screen) => void;
@@ -304,6 +311,17 @@ function ApaBubble({
   }
 
   const failed = turn.state === 'failed';
+
+  // A failure gets its own card: an icon, one sentence written for her, and a
+  // retry button that stays disabled until retrying would actually work.
+  if (failed && turn.failure) {
+    return (
+      <View style={apa.turnApaRow}>
+        <View style={apa.turnApaMark}><ApaMark size={24} /></View>
+        <FailureCard failure={turn.failure} onRetry={turn.retry ? onRetry : undefined} />
+      </View>
+    );
+  }
 
   return (
     <View style={apa.turnApaRow}>
@@ -1449,79 +1467,238 @@ function Orb({
    Camera
    =========================================================================== */
 
+/**
+ * The questions a photograph can answer.
+ *
+ * Free text is gone from this screen, deliberately. A farmer who has just
+ * photographed a sick animal is not in a position to compose a good prompt, and
+ * what she typed was usually two words — which produced the vaguest possible
+ * answer and burned a vision call doing it. These five are the questions the
+ * photographs in this platform are actually about, they are one tap, and each
+ * one gives the model something specific to look for.
+ *
+ * They are written to fit a crop or an animal, because she photographs both and
+ * asking her to pick a category first is a step that buys nothing.
+ */
+const PHOTO_QUESTIONS: Array<{
+  id: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  bn: string;
+  en: string;
+  ask_bn: string;
+  ask_en: string;
+}> = [
+  {
+    id: 'disease',
+    icon: 'medkit-outline',
+    bn: 'কী রোগ হয়েছে?',
+    en: 'What disease is this?',
+    ask_bn: 'ছবিটা দেখে বলুন কী রোগ বা সমস্যা হয়েছে, আর কেন মনে হচ্ছে।',
+    ask_en: 'Look at this photo and tell me what disease or problem it is, and why you think so.',
+  },
+  {
+    id: 'healthy',
+    icon: 'heart-outline',
+    bn: 'সুস্থ আছে কি?',
+    en: 'Is it healthy?',
+    ask_bn: 'ছবিটা দেখে বলুন এটা সুস্থ দেখাচ্ছে কি না, আর কোন লক্ষণ দেখে বুঝলেন।',
+    ask_en: 'Looking at this photo, does it look healthy, and which signs tell you that?',
+  },
+  {
+    id: 'next',
+    icon: 'footsteps-outline',
+    bn: 'এখন কী করব?',
+    en: 'What should I do now?',
+    ask_bn: 'ছবিটা দেখে বলুন এখন আমার কী কী করা উচিত, ধাপে ধাপে।',
+    ask_en: 'Looking at this photo, what should I do now, step by step?',
+  },
+  {
+    id: 'care',
+    icon: 'leaf-outline',
+    bn: 'যত্ন কীভাবে নেব?',
+    en: 'How do I care for it?',
+    ask_bn: 'ছবিটা দেখে বলুন এর যত্ন, খাবার বা সার নিয়ে কী করা উচিত।',
+    ask_en: 'Looking at this photo, what should I do about its care, feed or fertiliser?',
+  },
+  {
+    id: 'spread',
+    icon: 'git-network-outline',
+    bn: 'ছড়িয়ে পড়বে কি?',
+    en: 'Will it spread?',
+    ask_bn: 'ছবিটা দেখে বলুন এটা অন্যগুলোতে ছড়াতে পারে কি না, আর ছড়ানো আটকাতে কী করব।',
+    ask_en: 'Looking at this photo, can this spread to the others, and how do I stop it?',
+  },
+];
+
 export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
-  const { tx } = useLanguage();
+  const { tx, lang } = useLanguage();
   const { askPhoto } = useApa();
   const [photo, setPhoto] = useState<string | null>(null);
-  const [question, setQuestion] = useState('');
+  const [sending, setSending] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string>('');
 
   async function shoot(fromLibrary: boolean) {
+    setNotice('');
     const permission = fromLibrary
       ? await ImagePicker.requestMediaLibraryPermissionsAsync()
       : await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) return;
+    if (!permission.granted) {
+      // Said rather than silently doing nothing, which is what happened before.
+      setNotice(
+        fromLibrary
+          ? tx('গ্যালারিতে ঢোকার অনুমতি দিলে ছবি বেছে নিতে পারবেন।', 'Allow gallery access to pick a photo.')
+          : tx('ক্যামেরার অনুমতি দিলে ছবি তোলা যাবে।', 'Allow the camera to take a photo.')
+      );
+      return;
+    }
     const result = fromLibrary
       ? await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.72 })
       : await ImagePicker.launchCameraAsync({ quality: 0.72 });
-    if (!result.canceled) setPhoto(result.assets[0].uri);
+    if (!result.canceled && result.assets?.[0]?.uri) setPhoto(result.assets[0].uri);
   }
 
-  function send() {
-    if (!photo) return;
-    void askPhoto(photo, question.trim() || tx('এটার কী হয়েছে?', 'What is wrong with this?'));
+  function ask(question: string, id: string) {
+    if (!photo || sending) return;
+    setSending(id);
+    void askPhoto(photo, question);
     setScreen('shathiApa');
   }
 
-  return (
-    <View style={apa.camScreen}>
-      <View style={apa.camHead}>
-        <Pressable onPress={() => setScreen('shathiApa')} style={apa.camClose} hitSlop={8}>
-          <Text style={apa.camCloseText}>✕</Text>
-        </Pressable>
-        <Text style={apa.camTitle}>{tx('ছবি তুলুন', 'Take a photo')}</Text>
-      </View>
+  /* --- nothing taken yet ------------------------------------------------- */
 
-      {photo ? (
-        <Image source={{ uri: photo }} style={apa.camPreview} />
-      ) : (
-        // Framing help in plain words, not a diagram — and a reminder she can
-        // talk instead of typing after the shot.
+  if (!photo) {
+    return (
+      <View style={apa.camScreen}>
+        <View style={apa.camHead}>
+          <PressableScale
+            onPress={() => setScreen('shathiApa')}
+            style={apa.camClose}
+            accessibilityLabel={tx('বন্ধ করুন', 'Close')}
+          >
+            <Ionicons name="close" size={22} color="#fff" />
+          </PressableScale>
+          <Text style={apa.camTitle}>{tx('ছবি তুলুন', 'Take a photo')}</Text>
+        </View>
+
+        {/* Framing help in plain words. A diagram would need reading. */}
         <View style={apa.camFrame}>
-          <Text style={apa.camGlyph}>🐄</Text>
-          <Text style={apa.camGuide}>{tx('পশুটির মাথা ও গলা যেন ছবিতে আসে', 'Get the head and neck in the frame')}</Text>
+          <Ionicons name="scan-outline" size={64} color="rgba(255,255,255,0.35)" />
+          <Text style={apa.camGuide}>
+            {tx('গাছের পাতা বা পশুর যে জায়গায় সমস্যা, সেটা ছবিতে আসুক', 'Get the affected leaf or the animal in the frame')}
+          </Text>
           <Text style={apa.camGuideSub}>
             {tx('আলো ভালো থাকলে আর কাছ থেকে তুললে আমি ভালো বুঝতে পারব।', 'Good light and a close shot help me see it properly.')}
           </Text>
         </View>
-      )}
 
-      {photo ? (
-        <View style={{ paddingHorizontal: 24, paddingBottom: 24, gap: 12 }}>
-          <TextInput
-            style={[apa.input, { backgroundColor: 'rgba(255,255,255,0.1)', borderColor: 'rgba(255,255,255,0.25)', color: '#fff' }]}
-            value={question}
-            onChangeText={setQuestion}
-            placeholder={tx('কী জানতে চান? (না লিখলেও চলবে)', 'What do you want to know? (optional)')}
-            placeholderTextColor="rgba(255,255,255,0.5)"
-            multiline
-          />
-          <AppButton title={tx('শাথী আপাকে দেখান', 'Show Shathi Apa')} onPress={send} />
-          <AppButton title={tx('আবার তুলুন', 'Retake')} variant="outline" onPress={() => setPhoto(null)} />
+        {notice ? (
+          <View style={apa.camNotice}>
+            <Ionicons name="information-circle-outline" size={18} color="#fff" />
+            <Text style={apa.camNoticeText}>{notice}</Text>
+          </View>
+        ) : null}
+
+        <View style={apa.camBar}>
+          <PressableScale
+            style={apa.camSide}
+            onPress={() => void shoot(true)}
+            accessibilityLabel={tx('গ্যালারি', 'Gallery')}
+          >
+            <Ionicons name="images-outline" size={24} color="#fff" />
+          </PressableScale>
+          <PressableScale
+            style={apa.camShutter}
+            onPress={() => void shoot(false)}
+            accessibilityLabel={tx('ছবি তুলুন', 'Take a photo')}
+            scaleTo={0.92}
+          >
+            <View style={apa.camShutterInner} />
+          </PressableScale>
+          <View style={apa.camSide} />
         </View>
-      ) : (
-        <>
-          <View style={apa.camTipPill}>
-            <Text style={apa.camTipText}>{tx('🎙 ছবি তুলে বলতেও পারবেন', '🎙 You can speak after the shot')}</Text>
-          </View>
-          <View style={apa.camBar}>
-            <Pressable style={apa.camSide} onPress={() => void shoot(true)} accessibilityLabel={tx('গ্যালারি', 'Gallery')}>
-              <Text style={apa.camSideIcon}>🖼</Text>
-            </Pressable>
-            <Pressable style={apa.camShutter} onPress={() => void shoot(false)} accessibilityLabel={tx('ছবি তুলুন', 'Take a photo')} />
-            <View style={apa.camSide} />
-          </View>
-        </>
-      )}
+      </View>
+    );
+  }
+
+  /* --- taken: pick a question -------------------------------------------- */
+
+  return (
+    <View style={apa.camScreen}>
+      <View style={apa.camHead}>
+        <PressableScale
+          onPress={() => setScreen('shathiApa')}
+          style={apa.camClose}
+          accessibilityLabel={tx('বন্ধ করুন', 'Close')}
+        >
+          <Ionicons name="close" size={22} color="#fff" />
+        </PressableScale>
+        <Text style={apa.camTitle}>{tx('কী জানতে চান?', 'What do you want to know?')}</Text>
+      </View>
+
+      <ScrollView contentContainerStyle={apa.camAsk} keyboardShouldPersistTaps="handled">
+        <Image source={{ uri: photo }} style={apa.camThumb} />
+
+        {/* One tap each. She has just photographed something that worries her;
+            composing a sentence is not the next thing to ask of her. */}
+        <View style={apa.camChips}>
+          {PHOTO_QUESTIONS.map((q) => (
+            <PressableScale
+              key={q.id}
+              style={[apa.camChip, sending === q.id && apa.camChipBusy]}
+              disabled={Boolean(sending)}
+              onPress={() => ask(lang === 'bn' ? q.ask_bn : q.ask_en, q.id)}
+              accessibilityLabel={lang === 'bn' ? q.bn : q.en}
+            >
+              {sending === q.id ? (
+                <ActivityIndicator size="small" color={colors.maroon} />
+              ) : (
+                <Ionicons name={q.icon} size={18} color={colors.maroon} />
+              )}
+              <Text style={apa.camChipText}>{lang === 'bn' ? q.bn : q.en}</Text>
+            </PressableScale>
+          ))}
+        </View>
+
+        <PressableScale
+          style={[apa.camPrimary, sending === 'overall' && apa.camChipBusy]}
+          disabled={Boolean(sending)}
+          onPress={() =>
+            ask(
+              lang === 'bn'
+                ? 'ছবিটা সব মিলিয়ে দেখে যা যা বোঝা যায় বলুন — কী সমস্যা, কেন, আর এখন কী করব।'
+                : 'Look at this photo overall and tell me what you can — the problem, why, and what to do now.',
+              'overall'
+            )
+          }
+          accessibilityLabel={tx('সব মিলিয়ে দেখে বলুন', 'Show Shathi Apa for overall analysis')}
+        >
+          {sending === 'overall' ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Ionicons name="sparkles" size={18} color="#fff" />
+          )}
+          <Text style={apa.camPrimaryText}>
+            {tx('সব মিলিয়ে দেখে বলুন', 'Show Shathi Apa for overall analysis')}
+          </Text>
+        </PressableScale>
+
+        <PressableScale
+          style={apa.camSecondary}
+          disabled={Boolean(sending)}
+          onPress={() => { setPhoto(null); setNotice(''); }}
+          accessibilityLabel={tx('আবার তুলুন', 'Retake')}
+        >
+          <Ionicons name="camera-reverse-outline" size={18} color="#fff" />
+          <Text style={apa.camSecondaryText}>{tx('আবার তুলুন', 'Retake')}</Text>
+        </PressableScale>
+
+        <Text style={apa.camFoot}>
+          {tx(
+            'ফসল বা পশুর ছবি না হলে শাথী আপা জানিয়ে দেবে — কিছু ভাঙবে না।',
+            'If it is not a crop or an animal, Shathi Apa will say so — nothing breaks.'
+          )}
+        </Text>
+      </ScrollView>
     </View>
   );
 }
