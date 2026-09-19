@@ -44,7 +44,9 @@ export const apa = StyleSheet.create({
   headKebab: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
   headKebabText: { color: colors.muted, fontSize: 20 },
 
-  thread: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10, gap: 12 },
+  // Bottom padding clears the composer above the nav bar. Ten was not
+  // enough and the last suggestion chip sat behind the panel.
+  thread: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 28, gap: 12 },
 
   turnUser: {
     alignSelf: 'flex-end', maxWidth: '86%', backgroundColor: colors.maroon,
@@ -151,27 +153,38 @@ export const apa = StyleSheet.create({
 
   /* --- composer ---------------------------------------------------------- */
 
+  // Was two stacked rows — a full-width live pill above the tools — which made
+  // this panel about 180px tall and 200px while recording, pushing the answer
+  // it belongs under off the screen. One row of four now, about 96px.
   composer: {
-    paddingHorizontal: 24, paddingTop: 10, paddingBottom: 16, gap: 10,
+    paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8, gap: 6,
     backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.line,
   },
-  liveRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  livePill: {
-    flex: 1, height: 44, borderRadius: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 8, backgroundColor: colors.rose,
+
+  tools: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 4 },
+  toolSlot: { alignItems: 'center', gap: 3, flex: 1 },
+  toolBtn: {
+    width: 46, height: 46, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.rose,
   },
-  livePillLocked: { backgroundColor: colors.cream, borderWidth: 1, borderColor: colors.line },
-  livePillText: { color: colors.maroon, fontSize: 14.5, fontWeight: '800' },
-  livePillTextLocked: { color: colors.muted },
-  liveQuota: { color: colors.muted, fontSize: 11.5, fontWeight: '600' },
+  toolBtnActive: { backgroundColor: colors.maroon },
+  toolBtnOff: { backgroundColor: '#F4EEF1' },
+  toolLabel: { color: colors.maroon, fontSize: 10.5, fontWeight: '700' },
+  // The live minutes left, on the button rather than in a sentence beside it.
+  toolBadge: {
+    position: 'absolute', top: -3, right: -5, minWidth: 17, height: 17, borderRadius: 9,
+    paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: APA_GREEN, borderWidth: 1.5, borderColor: colors.card,
+  },
+  toolBadgeText: { color: '#fff', fontSize: 9.5, fontWeight: '800' },
 
-  tools: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12 },
-  toolBtn: { width: 56, height: 56, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.rose },
-  toolBtnOff: { backgroundColor: '#F2ECEF' },
-  toolIcon: { fontSize: 20 },
-
-  mic: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
-  micRecording: { width: 92, height: 92, borderRadius: 46, backgroundColor: APA_GREEN },
+  // The mic keeps its footprint while recording. It used to grow 72 -> 92,
+  // which re-laid out the whole row under the farmer's finger.
+  micSlot: { alignItems: 'center', gap: 3, flex: 1.2 },
+  micWrap: { width: 60, height: 60, alignItems: 'center', justifyContent: 'center' },
+  mic: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
+  micRing: { position: 'absolute', width: 60, height: 60, borderRadius: 30, backgroundColor: APA_GREEN },
+  micRecording: { backgroundColor: APA_GREEN },
   micLocked: { backgroundColor: APA_GREEN },
   micOff: { backgroundColor: '#B9A3AE' },
   micIcon: { fontSize: 26 },
@@ -181,7 +194,9 @@ export const apa = StyleSheet.create({
     borderWidth: 1, borderColor: colors.line,
   },
   micBadgeText: { fontSize: 11 },
-  micBars: { flexDirection: 'row', alignItems: 'center', gap: 3, height: 34 },
+  // Nine bars at 2px with a 2px gap is 34px across, which fits a 60px
+  // circle. Eighteen at 3px needed 87px and overflowed it.
+  micBars: { flexDirection: 'row', alignItems: 'center', gap: 2, height: 26 },
   micBar: { width: 4, borderRadius: 2, backgroundColor: '#fff' },
 
   hint: { color: colors.muted, fontSize: 12, textAlign: 'center' },

@@ -6,7 +6,7 @@ import {
   type ApaAnswer, type ApaEntitlement, type ApaOfficer, type ApaSource,
 } from '../ai/apa';
 import {
-  onSpeechChange, primeDeviceVoice, speak, stopSpeech, type SpeechState,
+  INTRO_SOURCE, onSpeechChange, primeDeviceVoice, speak, stopSpeech, type SpeechState,
 } from '../ai/speech';
 import { optimiseImage } from '../media/image';
 import { uploadImage } from '../api/client';
@@ -362,6 +362,13 @@ export function ApaProvider({
 
   const replay = useCallback(
     (turn: ApaTurn) => {
+      if (turn.key === 'greeting') {
+        // The one spoken line with no message row behind it. Without a source
+        // it fell to the phone's own engine, which is why the intro was read by
+        // a man on most handsets.
+        speak({ text: turn.text, lang, token: turn.key, server: INTRO_SOURCE }).catch(() => undefined);
+        return;
+      }
       if (turn.role === 'apa' && turn.text) {
         // Spoken by the phone, from text it already has — so this works with
         // no signal at all, which is most of the point of keeping the history.

@@ -255,7 +255,32 @@ export function rateValue(rate: string | null | undefined): number {
 export type SpeechSource =
   | { source: 'apa_message'; id: string | number }
   | { source: 'learning'; id: string | number }
-  | { source: 'market_update'; id: string | number };
+  | { source: 'market_update'; id: string | number }
+  /**
+   * The opening greeting. Identical for every farmer, so the server
+   * synthesises it once and serves it from cache forever after — and it is
+   * spoken in Shathi Apa's own voice rather than the phone's default, which on
+   * most handsets is male.
+   */
+  | { source: 'intro'; id: string | number };
+
+/**
+ * The greeting text, as the server holds it.
+ *
+ * Kept here so the chat renders byte-for-byte what will be spoken: the speech
+ * cache is keyed on the text, and a greeting differing by a full stop would
+ * synthesise a second clip.
+ */
+let introText = '';
+export function setIntroText(text: string) {
+  if (text && text.trim()) introText = text.trim();
+}
+export function intro(): string {
+  return introText;
+}
+
+/** The source to hand `speak()` for the greeting. */
+export const INTRO_SOURCE: SpeechSource = { source: 'intro', id: 'intro' };
 
 export type SpeechMode = 'device' | 'server';
 

@@ -8,13 +8,18 @@ import * as Network from 'expo-network';
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { colors } from '../theme/colors';
 import { styles } from '../theme/styles';
-import { AppButton, Header, MarkdownText, useLanguage } from '../theme/primitives';
+import {
+  AppButton, Header, MarkdownText, PressableScale, useLanguage, usePulse, useReducedMotion,
+} from '../theme/primitives';
+import { Ionicons } from '@expo/vector-icons';
 import {
   closeApaLive, clearApaHistory, getApaSettings, markApaLiveConnected,
   saveApaSettings, startApaLive,
   type ApaEntitlement, type ApaLiveReceipt, type ApaUserSettings,
 } from '../ai/apa';
-import { deviceVoiceName, primeDeviceVoice, speechAvailability, speechMode, stopSpeech } from '../ai/speech';
+import {
+  deviceVoiceName, intro as introText, primeDeviceVoice, speechAvailability, speechMode, stopSpeech,
+} from '../ai/speech';
 import { clear as clearAudioCache, stats as audioCacheStats } from '../media/audioCache';
 import { ListenButton } from '../ai/ListenButton';
 import { APA_AMBER, APA_END, APA_GREEN, apa } from './styles';
@@ -56,26 +61,7 @@ import type { Screen } from '../types';
  */
 const LIVE_CLIENT_READY = false;
 
-/**
- * Whether the farmer has asked the system to stop things moving.
- *
- * The live orb breathes, the waveform scrolls and the composer pulses. For
- * someone with a vestibular disorder that is not decoration, it is nausea — and
- * Android has had a system switch for it since Android 10. Honouring it costs
- * one hook and makes the difference between usable and unusable.
- */
-function useReducedMotion(): boolean {
-  const [reduce, setReduce] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    AccessibilityInfo.isReduceMotionEnabled()
-      .then((on) => { if (alive) setReduce(Boolean(on)); })
-      .catch(() => undefined);
-    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', (on) => setReduce(Boolean(on)));
-    return () => { alive = false; sub?.remove?.(); };
-  }, []);
-  return reduce;
-}
+
 
 /**
  * What a live conversation sounds like, for the screen that cannot hold one yet.
@@ -137,10 +123,16 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
   // than failing silently on a handset with no Bangla voice.
   useEffect(() => { void primeDeviceVoice().catch(() => undefined); }, []);
 
-  const greeting = tx(
-    'আসসালামু আলাইকুম। আমি শাথী আপা। ফসল, গবাদি পশু, আবহাওয়া বা বাজারদর — যা জানতে চান, মাইক চেপে ধরে বলুন।',
-    'Assalamu alaikum. I am Shathi Apa. Crops, livestock, weather or market rates — hold the mic and ask.'
-  );
+  // The server's copy where it has answered, so the text on screen is exactly
+  // the text that gets spoken — the speech cache is keyed on it, and a greeting
+  // differing by a full stop would synthesise a second clip for every farmer.
+  const greeting =
+    lang === 'bn' && introText()
+      ? introText()
+      : tx(
+          'আসসালামু আলাইকুম। আমি শাথী আপা। ফসল, গবাদি পশু, আবহাওয়া বা বাজারদর — যা জানতে চান, মাইক চেপে ধরে বলুন।',
+          'Assalamu alaikum. I am Shathi Apa. Crops, livestock, weather or market rates — hold the mic and ask.'
+        );
 
   return (
     <>
@@ -538,7 +530,9 @@ function SoftWall({
    =========================================================================== */
 
 const CANCEL_DISTANCE = 70;
-const BAR_COUNT = 18;
+// Nine bars fit the 60px microphone. Eighteen were drawn for a 92px one
+// that no longer exists, and overflowed the circle.
+const BAR_COUNT = 9;
 
 export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
@@ -549,7 +543,7 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
   const [cancelArmed, setCancelArmed] = useState(false);
   const [micDenied, setMicDenied] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [levels, setLevels] = useState<number[]>(() => Array(BAR_COUNT).fill(4));
+  const [levels, setLevels] = useState<number[]>(() => Array(BAR_COUNT).fill(3));
 
   const startedAt = useRef(0);
   const cancelRef = useRef(false);
@@ -572,7 +566,9 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
       // -160 dB is silence and 0 dB is clipping. Mapped to a bar height so she
       // can see the phone is hearing her, which is this waveform's whole job.
       const db = recorder.getStatus().metering;
-      const level = Math.max(4, Math.min(30, (((typeof db === 'number' ? db : -60) + 60) / 60) * 30));
+      // Capped at the bar container's height so a loud farmer does not push
+      // the waveform outside the circle.
+      const level = Math.max(3, Math.min(24, (((typeof db === 'number' ? db : -60) + 60) / 60) * 24));
       setLevels((current) => [...current.slice(1), level]);
     }, 90);
     return () => clearInterval(timer);
@@ -607,7 +603,7 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
     startedAt.current = Date.now();
     cancelRef.current = false;
     setElapsed(0);
-    setLevels(Array(BAR_COUNT).fill(4));
+    setLevels(Array(BAR_COUNT).fill(3));
     setRec(true);
     setRecording(true);
   }, [busy, canVoice, recorder, setRecording]);
@@ -678,26 +674,6 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
 
   return (
     <View style={apa.composer}>
-      {/* Live is an opt-in that spends her data, so it keeps its own row and
-          says what is left before she taps it. */}
-      <View style={apa.liveRow}>
-        <Pressable
-          style={[apa.livePill, !canLive && apa.livePillLocked]}
-          onPress={() => setScreen('apaVoice')}
-        >
-          <Text style={[apa.livePillText, !canLive && apa.livePillTextLocked]}>
-            {tx('📞 লাইভ কথা বলুন', '📞 Talk live')}
-          </Text>
-        </Pressable>
-        <Text style={apa.liveQuota}>
-          {canLive
-            ? lang === 'bn' ? `ফ্রি · ${bn(liveMinutes)} মিনিট বাকি` : `Free · ${liveMinutes} min left`
-            : entitlement?.live.mic_enabled === false
-              ? tx('পরের আপডেটে', 'Next update')
-              : tx('যাচাই করলে', 'After verifying')}
-        </Text>
-      </View>
-
       {typing ? (
         <View style={apa.inputRow}>
           <TextInput
@@ -711,63 +687,58 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
             editable={!busy}
             onSubmitEditing={send}
           />
-          <Pressable style={[apa.send, (!draft.trim() || busy) && apa.sendOff]} onPress={send} disabled={!draft.trim() || busy}>
-            <Text style={apa.sendIcon}>›</Text>
-          </Pressable>
+          <PressableScale
+            style={[apa.send, (!draft.trim() || busy) && apa.sendOff]}
+            onPress={send}
+            disabled={!draft.trim() || busy}
+            accessibilityLabel={tx('পাঠান', 'Send')}
+          >
+            <Ionicons name="arrow-up" size={20} color="#fff" />
+          </PressableScale>
         </View>
       ) : null}
 
+      {/* One row, four controls. This used to be two stacked rows — a
+          full-width live pill above the tools — which made the panel about a
+          hundred and eighty pixels tall and pushed the answer off the screen.
+          Live belongs beside the other ways of asking, not above them. */}
       <View style={apa.tools}>
-        <Pressable
-          style={[apa.toolBtn, (busy || recording) && apa.toolBtnOff]}
+        <ToolButton
+          icon="camera"
+          label={tx('ছবি', 'Photo')}
           onPress={() => void pickPhoto()}
           disabled={busy || recording}
-          accessibilityLabel={tx('ছবি তুলুন', 'Take a photo')}
-        >
-          <Text style={apa.toolIcon}>📷</Text>
-        </Pressable>
+        />
 
-        {/* The mic is the largest element on the screen, and there is no text
-            field at rest: for a farmer who cannot read, an input box in the
-            middle is dead space in the most valuable position (V6). */}
-        <View {...pan.panHandlers}>
-          <View
-            style={[
-              apa.mic,
-              recording && apa.micRecording,
-              (busy || !canVoice) && apa.micOff,
-              cancelArmed && { backgroundColor: APA_END },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel={
-              latchedOn
-                ? tx('পাঠাতে আবার চাপুন', 'Tap again to send')
-                : tx('চেপে ধরে বলুন, বা একবার চাপুন', 'Hold to talk, or tap once')
-            }
-          >
-            {recording ? (
-              cancelArmed ? (
-                <Text style={[apa.micIcon, { color: '#fff' }]}>✕</Text>
-              ) : (
-                <View style={apa.micBars}>
-                  {levels.map((h, i) => <View key={i} style={[apa.micBar, { height: h }]} />)}
-                </View>
-              )
-            ) : (
-              <Text style={apa.micIcon}>🎙</Text>
-            )}
-            {!canVoice ? <View style={apa.micBadge}><Text style={apa.micBadgeText}>🔒</Text></View> : null}
-          </View>
-        </View>
+        <MicButton
+          pan={pan}
+          recording={recording}
+          latched={latchedOn}
+          cancelArmed={cancelArmed}
+          levels={levels}
+          disabled={busy || !canVoice}
+          locked={!canVoice}
+          tx={tx}
+        />
 
-        <Pressable
-          style={[apa.toolBtn, recording && apa.toolBtnOff]}
+        <ToolButton
+          icon="create-outline"
+          label={tx('লিখুন', 'Type')}
           onPress={() => setTyping((v) => !v)}
           disabled={recording}
-          accessibilityLabel={tx('লিখে জিজ্ঞাসা করুন', 'Type instead')}
-        >
-          <Text style={apa.toolIcon}>⌨</Text>
-        </Pressable>
+          active={typing}
+        />
+
+        {/* The same sparkle as the top navigation, so "this is the AI one" is
+            one symbol across the app rather than a different idea per screen. */}
+        <ToolButton
+          icon="sparkles"
+          label={tx('লাইভ', 'Live')}
+          onPress={() => setScreen('apaVoice')}
+          disabled={recording}
+          dimmed={!canLive}
+          badge={canLive ? (lang === 'bn' ? bn(liveMinutes) : String(liveMinutes)) : null}
+        />
       </View>
 
       <Text style={[apa.hint, recording && !cancelArmed && apa.hintLive, cancelArmed && apa.hintCancel]}>
@@ -784,6 +755,131 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
                     ? `${clock(elapsed, lang === 'bn' ? 'bn' : 'en')} · ${tx('বলে শেষ হলে আবার চাপুন', 'tap again when you are done')}`
                     : `${clock(elapsed, lang === 'bn' ? 'bn' : 'en')} · ${tx('ছেড়ে দিন পাঠাতে · উপরে তুলে বাতিল', 'release to send · slide up to cancel')}`
                 : tx('চেপে ধরে বলুন, বা একবার চাপুন', 'Hold and speak, or tap once')}
+      </Text>
+    </View>
+  );
+}
+
+/* --- the four controls --------------------------------------------------- */
+
+/**
+ * One of the three small buttons flanking the microphone.
+ *
+ * Ionicons rather than emoji: an emoji is rendered by whatever font the handset
+ * ships, so 📷 and ⌨ were a different weight, size and colour on every phone,
+ * and on some Android builds the keyboard glyph did not render at all.
+ */
+function ToolButton({
+  icon, label, onPress, disabled, active, dimmed, badge,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  active?: boolean;
+  /** Present but not yet available — readable, not hidden. */
+  dimmed?: boolean;
+  badge?: string | null;
+}) {
+  return (
+    <View style={apa.toolSlot}>
+      <PressableScale
+        style={[apa.toolBtn, active && apa.toolBtnActive, (disabled || dimmed) && apa.toolBtnOff]}
+        onPress={onPress}
+        disabled={disabled}
+        accessibilityLabel={label}
+        accessibilityState={{ selected: Boolean(active), disabled: Boolean(disabled) }}
+      >
+        <Ionicons
+          name={icon}
+          size={22}
+          color={dimmed ? colors.muted : active ? '#fff' : colors.maroon}
+        />
+        {badge ? (
+          <View style={apa.toolBadge}>
+            <Text style={apa.toolBadgeText}>{badge}</Text>
+          </View>
+        ) : null}
+      </PressableScale>
+      <Text style={[apa.toolLabel, dimmed && { color: colors.muted }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * The microphone, which keeps its footprint.
+ *
+ * It used to grow from 72 to 92 pixels while recording, which moved every
+ * control beside it and re-laid out the panel at the exact moment the farmer
+ * was holding a finger on it. The size is fixed now and a ring pulses behind
+ * it instead — the same information, none of the movement.
+ */
+function MicButton({
+  pan, recording, latched, cancelArmed, levels, disabled, locked, tx,
+}: {
+  pan: ReturnType<typeof PanResponder.create>;
+  recording: boolean;
+  latched: boolean;
+  cancelArmed: boolean;
+  levels: number[];
+  disabled?: boolean;
+  locked?: boolean;
+  tx: (bnText: string, enText: string) => string;
+}) {
+  const pulse = usePulse(recording && !cancelArmed);
+  const reduce = useReducedMotion();
+  const ringScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.28] });
+  const ringOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0] });
+
+  return (
+    <View style={apa.micSlot}>
+      <View {...pan.panHandlers}>
+        <View style={apa.micWrap}>
+          {recording && !cancelArmed && !reduce ? (
+            <Animated.View
+              pointerEvents="none"
+              style={[apa.micRing, { transform: [{ scale: ringScale }], opacity: ringOpacity }]}
+            />
+          ) : null}
+          <View
+            style={[
+              apa.mic,
+              recording && apa.micRecording,
+              disabled && apa.micOff,
+              cancelArmed && { backgroundColor: APA_END },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={
+              latched
+                ? tx('পাঠাতে আবার চাপুন', 'Tap again to send')
+                : tx('চেপে ধরে বলুন, বা একবার চাপুন', 'Hold to talk, or tap once')
+            }
+          >
+            {recording ? (
+              cancelArmed ? (
+                <Ionicons name="close" size={26} color="#fff" />
+              ) : (
+                <View style={apa.micBars}>
+                  {levels.map((h, i) => (
+                    <View key={i} style={[apa.micBar, { height: h }]} />
+                  ))}
+                </View>
+              )
+            ) : (
+              <Ionicons name="mic" size={28} color="#fff" />
+            )}
+            {locked ? (
+              <View style={apa.micBadge}>
+                <Ionicons name="lock-closed" size={11} color={colors.muted} />
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </View>
+      <Text style={apa.toolLabel} numberOfLines={1}>
+        {recording ? tx('শুনছি', 'Listening') : tx('বলুন', 'Speak')}
       </Text>
     </View>
   );
