@@ -312,7 +312,7 @@ export const styles = StyleSheet.create({
   prefSelectHint: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 8, minHeight: 16 },
   brandHeader: {
     height: 62,
-    backgroundColor: 'white',
+    backgroundColor: 'rgba(255,255,255,0.94)',
     paddingHorizontal: 18,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1331,4 +1331,17 @@ export const styles = StyleSheet.create({
   logoutIcon: { color: colors.danger, fontSize: 24 },
   logoutTitle: { color: colors.danger, fontWeight: '700', fontSize: 16 },
   version: { color: colors.muted, fontSize: 11, textAlign: 'center', marginVertical: 16 },
+
+  // The brand bar as a fixed overlay. It was the first child of each tab
+  // screen's content, so the logo, the assistant button and the notification
+  // bell all scrolled off the top of the screen she uses most.
+  brandHeaderFixed: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 20,
+  },
+  // Clears the bar's height. The content still scrolls behind it.
+  shellContentUnderBar: { paddingTop: 62 },
 });

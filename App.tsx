@@ -50,6 +50,7 @@ import { stopSpeech } from './src/ai/speech';
 import { ListenButton, ListenStrip } from './src/ai/ListenButton';
 import { optimiseAll, optimiseImage } from './src/media/image';
 import { ApaProvider, useApa } from './src/apa/state';
+import { useReducedMotion } from './src/theme/primitives';
 import {
   ApaCameraScreen, ApaComposer, ApaLiveScreen, ApaSettingsScreen, ApaUnlockScreen, ShathiApaScreen,
 } from './src/apa/screens';
@@ -818,16 +819,65 @@ function Tile({
   );
 }
 
+/**
+ * A screen change, as a change rather than a cut.
+ *
+ * Every navigation was an instant swap: the old screen vanished and the new one
+ * appeared fully formed in the same frame. That reads as a page reload rather
+ * than as movement, and it is most of why the app felt less finished than it
+ * is. A short fade with a few pixels of rise costs nothing and makes the
+ * difference between "the screen replaced itself" and "I went somewhere".
+ *
+ * Deliberately not a horizontal slide: this is a tab bar, not a stack, and
+ * sliding sideways would imply a direction that the navigation does not have.
+ *
+ * Honours reduce-motion, where it becomes the instant swap it used to be —
+ * which for someone with a vestibular disorder is the correct behaviour rather
+ * than a degradation.
+ */
+function ScreenFade({ screen, children }: { screen: Screen; children: React.ReactNode }) {
+  const reduce = useReducedMotion();
+  const progress = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (reduce) { progress.setValue(1); return; }
+    progress.setValue(0);
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [progress, reduce, screen]);
+
+  if (reduce) return <>{children}</>;
+
+  return (
+    <Animated.View
+      style={{
+        flex: 1,
+        opacity: progress,
+        transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }],
+      }}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
 function Shell({
   children,
   activeTab,
   setScreen,
   fixedAccessory,
+  brandBar,
 }: {
   children: React.ReactNode;
   activeTab: MainTab;
   setScreen: (screen: Screen) => void;
   fixedAccessory?: React.ReactNode;
+  /** Show the fixed brand bar. True on the tab screens that used to draw it. */
+  brandBar?: boolean;
 }) {
   const { tx } = useLanguage();
   const { user } = useAuth();
@@ -847,7 +897,14 @@ function Shell({
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <StaleBanner />
         <ScrollView
-          contentContainerStyle={[styles.shellContent, fixedAccessory ? styles.shellContentWithAccessory : null]}
+          contentContainerStyle={[
+            styles.shellContent,
+            // Clears the fixed bar rather than starting under it. The content
+            // still scrolls *behind* the bar, which is the point — it used to
+            // scroll the bar itself off the top of the screen.
+            brandBar ? styles.shellContentUnderBar : null,
+            fixedAccessory ? styles.shellContentWithAccessory : null,
+          ]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
@@ -856,6 +913,18 @@ function Shell({
           {children}
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* The brand bar, fixed.
+          It used to be the first child of each tab screen's content, so it
+          scrolled away with everything else — the logo, the assistant button
+          and the notification bell all disappeared the moment she scrolled,
+          on the screen she spends most of her time on. It is an overlay now,
+          slightly translucent so the content passing behind it reads as depth
+          rather than as a seam. */}
+      {brandBar ? (
+        <View style={styles.brandHeaderFixed} pointerEvents="box-none">
+            </View>
+      ) : null}
       {fixedAccessory ? <View style={styles.fixedAccessory}>{fixedAccessory}</View> : null}
       {/* Bottom nav stays pinned at the device bottom; hidden while the keyboard
           is open so it never floats above the keyboard. */}
@@ -1658,8 +1727,16 @@ export default function App() {
             </KeyboardAvoidingView>
           ) : (
             <AccessoryContext.Provider value={setScreenAccessory}>
-              <Shell activeTab={activeTab} setScreen={go} fixedAccessory={screen === 'shathiApa' ? <ApaComposer setScreen={go} /> : screenAccessory ?? undefined}>
-                <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
+              <Shell
+                activeTab={activeTab}
+                setScreen={go}
+                // The three screens that used to draw the bar themselves.
+                brandBar={screen === 'home' || screen === 'community' || screen === 'projects'}
+                fixedAccessory={screen === 'shathiApa' ? <ApaComposer setScreen={go} /> : screenAccessory ?? undefined}
+              >
+                <ScreenFade screen={screen}>
+                  <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>
+                </ScreenFade>
               </Shell>
             </AccessoryContext.Provider>
           )}
@@ -2598,7 +2675,6 @@ function Home({ setScreen, openProjects, openBuy }: { setScreen: (screen: Screen
   const location = liveWeather.data?.location?.name;
   return (
     <>
-      <BrandHeader setScreen={setScreen} />
       <Card style={styles.heroCard}>
         <Text style={styles.heroGreeting} numberOfLines={1}>
           <Text style={styles.heroSmall}>{tx('আসসালামু আলাইকুম, ', 'Assalamu Alaikum, ')}</Text>
@@ -6489,7 +6565,6 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const visiblePosts = [...localPosts, ...postRows];
   return (
     <>
-      <BrandHeader setScreen={setScreen} />
       <View style={styles.communityHero}>
         <View style={styles.communityHeroIcon}>
           <Ionicons name="people" size={24} color="#FFFFFF" />
@@ -6836,7 +6911,6 @@ function Projects({ setScreen, onApply, onOpenApplication, initialTab = 'area' }
   ];
   return (
     <>
-      <BrandHeader setScreen={setScreen} />
       <View style={styles.projectHero}>
         <View style={styles.projectHeroIcon}><Ionicons name="briefcase" size={24} color="#FFFFFF" /></View>
         <View style={styles.flex}>
