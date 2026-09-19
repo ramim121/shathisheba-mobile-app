@@ -260,30 +260,44 @@ export type SpeechSource =
 export type SpeechMode = 'device' | 'server';
 
 /**
- * Whatever is speaking now, if anything.
+ * What the speaker button is doing, per button.
  *
- * A single token rather than a boolean because several speaker buttons are on
- * screen at once — a chat has one per answer — and each needs to know whether
- * *it* is the one playing. Without this they all showed "playing" together.
+ * A boolean was not enough and the gap showed. Fetching a clip takes a second
+ * or two — it may be a download, it may be a synthesis — and during that the
+ * button looked idle, so a farmer pressed it again. Each press started another
+ * playback, and she heard the answer twice, overlapping.
+ *
+ * So there are four states, one active token, and a guard: a press while
+ * `loading` is ignored, and a press while `playing` stops. That is how every
+ * other audio player on her phone behaves.
  */
+export type SpeechState = 'idle' | 'loading' | 'playing' | 'paused';
+
 let playingToken: string | null = null;
+let state: SpeechState = 'idle';
+/**
+ * Set for the whole of an in-flight `speak()`, so a second press cannot start a
+ * second one even before the first has announced itself.
+ */
+let starting: string | null = null;
 /** Bumped on every stop so a queued chunk from a cancelled job never starts. */
 let generation = 0;
 let player: AudioPlayer | null = null;
 
-type Listener = (token: string | null) => void;
+type Listener = (token: string | null, state: SpeechState) => void;
 const listeners = new Set<Listener>();
 
-/** Subscribe to "who is speaking". Returns the unsubscribe. */
+/** Subscribe to what is speaking and what it is doing. Returns the unsubscribe. */
 export function onSpeechChange(fn: Listener): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
 
-function announce(token: string | null) {
+function announce(token: string | null, next: SpeechState) {
   playingToken = token;
+  state = next;
   for (const fn of listeners) {
-    try { fn(token); } catch { /* a listener must not break playback */ }
+    try { fn(token, next); } catch { /* a listener must not break playback */ }
   }
 }
 
@@ -291,8 +305,20 @@ export function speakingToken(): string | null {
   return playingToken;
 }
 
+export function speechState(token?: string): SpeechState {
+  if (!token) return state;
+  if (starting === token && state === 'idle') return 'loading';
+  return playingToken === token ? state : 'idle';
+}
+
 export function isSpeaking(token?: string): boolean {
-  return token ? playingToken === token : playingToken !== null;
+  return token ? playingToken === token && state === 'playing' : state === 'playing';
+}
+
+/** True while a clip is being fetched or synthesised for this button. */
+export function isLoading(token?: string): boolean {
+  if (!token) return state === 'loading';
+  return (starting === token || playingToken === token) && state === 'loading';
 }
 
 /**
@@ -335,6 +361,7 @@ function rememberUrl(where: SpeechSource, url: string) {
 /** Stop whatever is speaking, on either path. Safe to call when nothing is. */
 export async function stopSpeech(): Promise<void> {
   generation += 1;
+  starting = null;
   if (player) {
     const dying = player;
     player = null;
@@ -342,7 +369,27 @@ export async function stopSpeech(): Promise<void> {
     try { dying.remove(); } catch { /* already released */ }
   }
   try { await Speech.stop(); } catch { /* nothing was speaking */ }
-  if (playingToken !== null) announce(null);
+  if (playingToken !== null || state !== 'idle') announce(null, 'idle');
+}
+
+/**
+ * Pause a server clip, or stop a device utterance.
+ *
+ * The device engine cannot resume mid-sentence reliably on Android, so a pause
+ * there is a stop — and the button says so by returning to idle rather than
+ * showing a resume arrow it cannot honour.
+ */
+export async function pauseSpeech(): Promise<void> {
+  if (player && state === 'playing') {
+    try { player.pause(); announce(playingToken, 'paused'); return; } catch { /* fall through */ }
+  }
+  await stopSpeech();
+}
+
+export async function resumeSpeech(): Promise<void> {
+  if (player && state === 'paused') {
+    try { player.play(); announce(playingToken, 'playing'); } catch { await stopSpeech(); }
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -375,12 +422,20 @@ export type SpeakInput = {
  */
 export async function speak(input: SpeakInput): Promise<SpeechMode> {
   const token = input.token ?? 'one';
-  // A second tap on the button that is already playing means stop.
-  if (playingToken === token) {
+
+  // Already fetching for this button: ignore. Without this, the two seconds a
+  // download takes were two seconds in which every press queued another
+  // playback, and she heard the answer three times at once.
+  if (starting === token) return 'device';
+
+  // A press on the button that is already going means stop, as it does in every
+  // other player on her phone.
+  if (playingToken === token && (state === 'playing' || state === 'paused')) {
     await stopSpeech();
     input.onEnd?.();
     return 'device';
   }
+
   await stopSpeech();
 
   const body = speakable(input.text);
@@ -388,6 +443,12 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
     input.onEnd?.();
     return 'device';
   }
+
+  // Announced before any await, so the button shows a spinner for the whole
+  // wait rather than staying idle until audio actually starts.
+  starting = token;
+  announce(token, 'loading');
+  input.onStart?.();
 
   // Gemini's voice first when that is the configured mode and the caller gave
   // us something the server can look up. A clip already on disk is played
@@ -398,6 +459,7 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
       await speakFromServer(input.server, input, token);
       return 'server';
     } catch (error) {
+      starting = null;
       // The server could not or would not produce audio — out of quota, out of
       // signal, or nothing to read. Her own phone is the answer to all three.
       if (await primeDeviceVoice()) {
@@ -426,18 +488,18 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
 /** The device path: chunked, rate-applied, cancellable. */
 async function speakOnDevice(body: string, input: SpeakInput, token: string): Promise<void> {
   const mine = generation;
+  starting = null;
   const limit = Math.max(200, (Speech.maxSpeechInputLength || 4000) - 40);
   const pieces = chunk(body, limit);
   const language = input.lang === 'en' ? 'en-US' : picked?.language ?? 'bn-BD';
   const rate = rateValue(input.rate);
 
-  announce(token);
-  input.onStart?.();
+  announce(token, 'playing');
 
   let index = 0;
   const finish = () => {
     if (mine !== generation) return;
-    announce(null);
+    announce(null, 'idle');
     input.onEnd?.();
   };
 
@@ -469,8 +531,6 @@ async function speakOnDevice(body: string, input: SpeakInput, token: string): Pr
 
 /** The server path, for a handset with no Bangla voice of its own. */
 async function speakFromServer(where: SpeechSource, input: SpeakInput, token: string): Promise<void> {
-  announce(token);
-  input.onStart?.();
   try {
     // A clip we already hold for this exact source needs no request at all.
     // Keyed by source and id rather than by URL, because the URL is what the
@@ -513,7 +573,8 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
     rememberUrl(where, result.url);
     await playUrl(result.url, input, token);
   } catch (error) {
-    if (playingToken === token) announce(null);
+    starting = null;
+    if (playingToken === token) announce(null, 'idle');
     input.onEnd?.();
     throw error;
   }
@@ -535,12 +596,16 @@ async function playUrl(url: string, input: SpeakInput, token: string): Promise<v
     return;
   }
   player = next;
+  starting = null;
   next.addListener('playbackStatusUpdate', (status) => {
     if (status.didJustFinish && player === next) {
       void stopSpeech().finally(() => input.onEnd?.());
     }
   });
   next.play();
+  // Only now is it genuinely playing. Everything before this was the wait the
+  // spinner exists to cover.
+  announce(token, 'playing');
 }
 
 /**

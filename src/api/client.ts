@@ -78,6 +78,14 @@ export type ApiFailure = Error & {
    * hard-coded guess at it.
    */
   entitlement?: unknown;
+  /**
+   * Seconds until a retry is worth making, where the upstream said so.
+   *
+   * A per-minute rate limit is a pause, not a fault. The screen can only count
+   * it down and re-enable its retry button at the right moment if the number
+   * survives the throw.
+   */
+  retry_after?: number;
 };
 
 /** The server's error code, if the failure carried one. */
@@ -233,6 +241,11 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
       const failure = new Error(json.message || `Server responded with ${response.status}`) as ApiFailure;
       failure.code = typeof json.code === 'string' ? json.code : undefined;
       failure.status = response.status;
+      // How long the upstream said to wait. A per-minute rate limit is a pause,
+      // not a fault, and the screen can only count it down if the number
+      // survives this far.
+      const wait = Number(json.retry_after ?? response.headers.get('Retry-After') ?? NaN);
+      if (Number.isFinite(wait) && wait > 0) failure.retry_after = Math.ceil(wait);
       if (json.entitlement) failure.entitlement = json.entitlement;
       throw failure;
     }
@@ -249,15 +262,64 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
   }
 }
 
+/**
+ * Send a picture, as bytes rather than as a URI.
+ *
+ * The old version appended React Native's legacy file part —
+ * `form.append('file', { uri, name, type })` — and on React Native 0.86 with
+ * the New Architecture that produced, in the middle of a Bangla conversation
+ * about a sick cow:
+ *
+ *     Unsupported FormDataPart implementation
+ *
+ * That error comes from the native networking module when a part has neither a
+ * string nor a usable `uri`, and a URI that the manipulator or the picker
+ * handed back in a shape the bridge did not accept was enough to trigger it.
+ * The failure was also invisible in testing because the server side is fine —
+ * a plain multipart POST with a real `Blob` returns 201.
+ *
+ * So the bytes are read on the device and appended as a `Blob`, which is the
+ * shape that was verified against this endpoint directly. The legacy part shape
+ * remains as a fallback for a URI the file API cannot open — some OEM gallery
+ * `content://` URIs among them — so this is strictly more capable than what it
+ * replaces, not a swap.
+ */
 export async function uploadImage(uri: string, folder: string): Promise<string> {
-  const name = uri.split('/').pop() || `photo-${Date.now()}.jpg`;
-  const match = /\.(\w+)$/.exec(name);
+  if (!uri || typeof uri !== 'string') {
+    // Never reach FormData with nothing: that is the path that produced an
+    // internal error string on a farmer's screen.
+    throw Object.assign(new Error('UPLOAD_NO_FILE'), { code: 'upload_no_file' });
+  }
+
+  const rawName = uri.split('?')[0].split('/').pop() || '';
+  const match = /\.(\w+)$/.exec(rawName);
   const ext = (match ? match[1] : 'jpg').toLowerCase();
   const type = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+  // A name with an extension, always — the server keys its own naming off it.
+  const name = match ? rawName : `photo-${Date.now()}.${ext}`;
+
   const form = new FormData();
   form.append('folder', folder);
-  // React Native FormData file shape.
-  form.append('file', { uri, name, type } as any);
+
+  let appended = false;
+  try {
+    const { File } = await import('expo-file-system');
+    const file = new File(uri);
+    if (file.exists) {
+      const bytes = await file.bytes();
+      if (bytes?.length) {
+        form.append('file', new Blob([bytes as unknown as BlobPart], { type }), name);
+        appended = true;
+      }
+    }
+  } catch {
+    /* fall through to the legacy part shape below */
+  }
+  if (!appended) {
+    // React Native's own file part. Reached for a URI the file API cannot open.
+    form.append('file', { uri, name, type } as any);
+  }
+
   loadingStore.begin();
   try {
     const base = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
@@ -268,7 +330,14 @@ export async function uploadImage(uri: string, folder: string): Promise<string> 
     });
     const json = await response.json().catch(() => ({}));
     if (!response.ok || json.ok === false) {
-      throw new Error(json.message || `Upload failed (${response.status})`);
+      // Coded, so describeFailure() classifies it as an upload problem and
+      // shows her "the photo could not be sent — take it again" rather than
+      // whatever the server or the bridge happened to say.
+      throw Object.assign(new Error(json.message || `UPLOAD_FAILED_${response.status}`), {
+        code: 'upload_failed',
+        status: response.status,
+        retry_after: json.retry_after,
+      });
     }
     // Build the URL from the app's own base so the host is always reachable
     // from the device (the server's request origin can resolve to 0.0.0.0).

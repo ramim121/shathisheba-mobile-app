@@ -3,7 +3,10 @@ import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'rea
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { useLanguage } from '../theme/primitives';
-import { isSpeaking, onSpeechChange, speak, speechAvailability, stopSpeech, type SpeechSource } from './speech';
+import {
+  isSpeaking, onSpeechChange, speak, speechAvailability, speechState, stopSpeech,
+  type SpeechSource, type SpeechState,
+} from './speech';
 
 /**
  * "Read this to me", on anything.
@@ -42,15 +45,18 @@ export function ListenButton({
 }) {
   const { tx, lang } = useLanguage();
   const mine = useRef(`listen-${(token += 1)}`).current;
-  const [playing, setPlaying] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // One state rather than two booleans: the engine owns it, and a button that
+  // derived its own could disagree with what was actually playing.
+  const [state, setState] = useState<SpeechState>('idle');
+  const playing = state === 'playing' || state === 'paused';
+  const busy = state === 'loading';
 
   useEffect(
     () =>
       onSpeechChange((active) => {
-        const now = active === mine;
-        setPlaying(now);
-        onStateChange?.(now);
+        const next = speechState(mine);
+        setState(next);
+        onStateChange?.(active === mine && next === 'playing');
       }),
     [mine, onStateChange]
   );
@@ -59,9 +65,11 @@ export function ListenButton({
   useEffect(() => () => { if (isSpeaking(mine)) void stopSpeech(); }, [mine]);
 
   const onPress = useCallback(async () => {
+    // A press while it is fetching does nothing. `speak()` guards this too, but
+    // the button should also not flicker as though it accepted the press.
+    if (busy) return;
     if (playing) { await stopSpeech(); return; }
     if (!text.trim()) return;
-    setBusy(true);
     try {
       await speak({ text, lang, rate, server, token: mine });
     } catch (error) {
@@ -80,10 +88,8 @@ export function ListenButton({
       } else {
         Alert.alert('', tx('এখন পড়ে শোনানো যাচ্ছে না।', 'Cannot read that aloud right now.'));
       }
-    } finally {
-      setBusy(false);
     }
-  }, [lang, mine, playing, rate, server, text, tx]);
+  }, [busy, lang, mine, playing, rate, server, text, tx]);
 
   return (
     <Pressable
@@ -91,17 +97,35 @@ export function ListenButton({
       hitSlop={10}
       accessibilityRole="button"
       accessibilityLabel={
-        playing ? tx('পড়া বন্ধ করুন', 'Stop reading') : tx('পড়ে শোনান', 'Read aloud')
+        busy
+          ? tx('কণ্ঠ আনা হচ্ছে', 'Getting the voice')
+          : playing
+            ? tx('পড়া বন্ধ করুন', 'Stop reading')
+            : tx('পড়ে শোনান', 'Read aloud')
       }
-      accessibilityState={{ selected: playing }}
+      accessibilityState={{ selected: playing, busy }}
       style={({ pressed }) => [sheet.button, label ? sheet.withLabel : null, pressed && sheet.pressed, style]}
     >
-      {busy && !playing ? (
+      {busy ? (
         <ActivityIndicator size="small" color={colors.maroon} />
       ) : (
-        <Ionicons name={playing ? 'stop-circle' : 'volume-high'} size={size} color={colors.maroon} />
+        <Ionicons
+          name={state === 'playing' ? 'pause-circle' : state === 'paused' ? 'play-circle' : 'volume-high'}
+          size={size}
+          color={colors.maroon}
+        />
       )}
-      {label ? <Text style={sheet.label}>{playing ? tx('বন্ধ করুন', 'Stop') : label}</Text> : null}
+      {label ? (
+        <Text style={sheet.label}>
+          {busy
+            ? tx('আনা হচ্ছে…', 'Loading…')
+            : state === 'playing'
+              ? tx('থামান', 'Pause')
+              : state === 'paused'
+                ? tx('চালান', 'Play')
+                : label}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }

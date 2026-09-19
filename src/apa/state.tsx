@@ -5,7 +5,9 @@ import {
   sendApaFeedback,
   type ApaAnswer, type ApaEntitlement, type ApaOfficer, type ApaSource,
 } from '../ai/apa';
-import { onSpeechChange, primeDeviceVoice, speak, stopSpeech } from '../ai/speech';
+import {
+  onSpeechChange, primeDeviceVoice, speak, stopSpeech, type SpeechState,
+} from '../ai/speech';
 import { optimiseImage } from '../media/image';
 import { uploadImage } from '../api/client';
 import { useLanguage } from '../theme/primitives';
@@ -71,6 +73,8 @@ type ApaValue = {
   replay: (turn: ApaTurn) => void;
   /** Which turn is being read aloud, so only its own button shows playing. */
   speakingKey: string | null;
+  /** What that button is doing — idle, loading, playing or paused. */
+  speakingState: SpeechState;
   vote: (turn: ApaTurn, vote: 'up' | 'down', reason?: string) => void;
   clear: () => void;
   navigate: (screen: Screen) => void;
@@ -119,11 +123,19 @@ export function ApaProvider({
   const [tick, setTick] = useState(0);
   const [justUnlocked, setJustUnlocked] = useState(false);
   const [speakingKey, setSpeakingKey] = useState<string | null>(null);
+  const [speakingState, setSpeakingState] = useState<SpeechState>('idle');
   const hydrated = useRef(false);
 
   // One place knows what is speaking, so a second speaker button cannot show
   // "playing" while the first one actually is.
-  useEffect(() => onSpeechChange(setSpeakingKey), []);
+  useEffect(
+    () =>
+      onSpeechChange((token, next) => {
+        setSpeakingKey(token);
+        setSpeakingState(next);
+      }),
+    []
+  );
 
   // Looked up once, ahead of the first question: the server needs to know
   // whether this phone can read aloud by itself before it decides whether to
@@ -398,7 +410,7 @@ export function ApaProvider({
   const value = useMemo<ApaValue>(
     () => ({
       entitlement, turns, busy, wall, conversationId, error, reload,
-      askText, askVoice, askPhoto, replay, speakingKey, vote, clear,
+      askText, askVoice, askPhoto, replay, speakingKey, speakingState, vote, clear,
       navigate: onNavigate, recording, setRecording, justUnlocked, dismissUnlocked,
     }),
     [entitlement, turns, busy, wall, conversationId, error, reload, askText, askVoice, askPhoto, replay, vote, clear, onNavigate, recording, justUnlocked, dismissUnlocked]

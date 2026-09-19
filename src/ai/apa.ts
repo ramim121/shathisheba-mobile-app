@@ -1,4 +1,5 @@
 import { apiRequest } from '../api/client';
+import { friendlyError } from './errors';
 import { needsServerSpeech, primeDeviceVoice, primeSpeechUrls, setDefaultRate, setSpeechMode } from './speech';
 import { optimiseImage, setAiImageMaxPx } from '../media/image';
 import type { CattleAiResult, Lang } from '../types';
@@ -493,29 +494,10 @@ export async function uriToInlineData(uri: string, fallbackMime = 'image/jpeg') 
  * cannot see: the request never left the phone.
  */
 export function friendlyAiError(error: unknown, lang: Lang) {
-  const message = error instanceof Error ? error.message : String(error);
-  const code = (error as ApaLocked | null)?.code;
-
-  if (code === 'apa_busy' || code === 'apa_timeout' || code === 'apa_failed' || code === 'apa_unconfigured') {
-    return message;
-  }
-  if (/^TIMEOUT|timed out|took too long/i.test(message)) {
-    return lang === 'bn'
-      ? 'উত্তর আসতে দেরি হচ্ছে। আরেকবার চেষ্টা করুন।'
-      : 'The answer is taking too long. Try once more.';
-  }
-  if (/network request failed|failed to fetch|load failed/i.test(message)) {
-    return lang === 'bn'
-      ? 'ইন্টারনেট ছাড়া নতুন প্রশ্ন পাঠানো যাবে না। আগের উত্তরগুলো পড়তে ও শুনতে পারবেন।'
-      : 'A new question needs internet. You can still read and play the earlier answers.';
-  }
-  if (/SESSION_EXPIRED/i.test(message)) {
-    return lang === 'bn' ? 'আবার লগ ইন করুন।' : 'Please sign in again.';
-  }
-  if (/TOO_LONG/.test(message)) {
-    return lang === 'bn'
-      ? 'উত্তরটা পড়ে শোনানোর জন্য একটু বড়। পড়ে নিতে পারেন।'
-      : 'That answer is a little long to read aloud. You can read it instead.';
-  }
-  return message;
+  // Delegates to the mask in ./errors.ts. It used to end with `return message`,
+  // which meant any failure nobody had anticipated reached the farmer verbatim
+  // — "Unsupported FormDataPart implementation" among them. Nothing is shown
+  // now unless it was written for her.
+  return friendlyError(error, lang);
 }
+
