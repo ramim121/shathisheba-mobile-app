@@ -383,12 +383,27 @@ export function buildMultipart(input: {
  * "could not send" on a handset while every unit test passed.
  */
 async function localFileBytes(uri: string): Promise<Uint8Array> {
-  const { File } = await import('expo-file-system');
-  const file = new File(uri);
-  if (!file.exists) {
-    throw Object.assign(new Error(`UPLOAD_FILE_MISSING: ${uri}`), { code: 'upload_no_file' });
+  if (uri.startsWith('file://')) {
+    const { File } = await import('expo-file-system');
+    const file = new File(uri);
+    if (!file.exists) {
+      throw Object.assign(new Error(`UPLOAD_FILE_MISSING: ${uri}`), { code: 'upload_no_file' });
+    }
+    return await file.bytes();
   }
-  return await file.bytes();
+
+  // A `content://` URI from an OEM gallery that expo-image-manipulator could
+  // not decode, so `optimiseImage` handed back the original. The file system
+  // cannot open those, but Android's own resolver can and `fetch` goes through
+  // it — which is the one case where `fetch` is the right tool rather than the
+  // thing that broke voice messages.
+  const response = await fetch(uri);
+  if (!response.ok) {
+    throw Object.assign(new Error(`UPLOAD_FILE_UNREADABLE: ${response.status}`), {
+      code: 'upload_no_file',
+    });
+  }
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 export async function uploadImage(uri: string, folder: string): Promise<string> {
