@@ -318,31 +318,37 @@ export const apa = StyleSheet.create({
 
   /* --- camera ------------------------------------------------------------ */
 
-  camScreen: { flex: 1, backgroundColor: '#1B0E16' },
+  camScreen: { flex: 1, backgroundColor: colors.cream },
   camHead: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14 },
-  camClose: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
+  camClose: {
+    width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.rose,
+  },
   camCloseText: { color: '#fff', fontSize: 17 },
-  camTitle: { flex: 1, color: '#fff', fontSize: 16.5, fontWeight: '800' },
+  camTitle: { flex: 1, color: colors.ink, fontSize: 16.5, fontWeight: '800' },
   camFrame: {
     flex: 1, margin: 24, borderRadius: 18, borderWidth: 2, borderStyle: 'dashed',
     borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 20,
   },
   camGlyph: { fontSize: 44 },
-  camGuide: { color: '#fff', fontSize: 14.5, fontWeight: '700', textAlign: 'center' },
-  camGuideSub: { color: 'rgba(255,255,255,0.65)', fontSize: 12.5, textAlign: 'center', lineHeight: 18 },
+  camGuide: { color: colors.ink, fontSize: 14.5, fontWeight: '700', textAlign: 'center' },
+  camGuideSub: { color: colors.muted, fontSize: 12.5, textAlign: 'center', lineHeight: 18 },
   camTipPill: {
     alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6, height: 34,
     paddingHorizontal: 14, borderRadius: 17, backgroundColor: 'rgba(255,255,255,0.14)',
   },
   camTipText: { color: '#fff', fontSize: 12.5, fontWeight: '600' },
   camBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 28, paddingTop: 16, paddingBottom: 30 },
-  camSide: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
+  camSide: {
+    width: 52, height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.rose,
+  },
   camSideIcon: { fontSize: 20 },
   // A ring around a disc, so the press animation has something to scale
   // against. It was a solid white circle, which read as a blank button.
   camShutter: {
     width: 76, height: 76, borderRadius: 38, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 4, borderColor: 'rgba(255,255,255,0.45)',
+    borderWidth: 4, borderColor: colors.rose,
   },
   camPreview: { flex: 1, margin: 24, borderRadius: 18, resizeMode: 'cover' },
 
@@ -357,8 +363,9 @@ export const apa = StyleSheet.create({
   camThumb: { width: '100%', height: 220, borderRadius: 16, backgroundColor: '#000' },
   camChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   camChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 44,
-    paddingHorizontal: 14, borderRadius: 22, backgroundColor: '#fff',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, minHeight: 46,
+    paddingHorizontal: 15, borderRadius: 23, backgroundColor: colors.card,
+    borderWidth: 1, borderColor: colors.line,
   },
   camChipBusy: { opacity: 0.6 },
   camChipText: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
@@ -371,21 +378,39 @@ export const apa = StyleSheet.create({
 
   camSecondary: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    minHeight: 48, borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)',
+    minHeight: 50, borderRadius: 25, borderWidth: 1.5, borderColor: colors.line,
+    backgroundColor: colors.card,
   },
-  camSecondaryText: { color: '#fff', fontSize: 14.5, fontWeight: '700' },
+  camSecondaryText: { color: colors.maroon, fontSize: 14.5, fontWeight: '700' },
 
-  camFoot: { color: 'rgba(255,255,255,0.6)', fontSize: 12, lineHeight: 18, textAlign: 'center' },
+  camFoot: { color: colors.muted, fontSize: 12, lineHeight: 18, textAlign: 'center' },
 
   // A denied permission used to do nothing at all.
   camNotice: {
-    flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 24,
+    flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 20,
     paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: '#FEF6E7', borderWidth: 1, borderColor: '#F6DFAE',
   },
-  camNoticeText: { flex: 1, color: '#fff', fontSize: 13, lineHeight: 19 },
+  camNoticeText: { flex: 1, color: '#8A5A06', fontSize: 13, lineHeight: 19 },
 
   camShutterInner: {
-    width: 56, height: 56, borderRadius: 28, backgroundColor: '#fff',
+    width: 54, height: 54, borderRadius: 27, backgroundColor: colors.maroon,
   },
+
+  /* --- her own voice message -------------------------------------------- */
+  turnUserPhoto: { width: 168, height: 132, borderRadius: 10 },
+  // The transcript sits under the clip, slightly quieter than a typed message:
+  // it is a read-back of what was heard, not something she wrote.
+  turnUserTranscript: { fontSize: 14.5, fontWeight: '500', opacity: 0.95 },
+  clipBarIdle: { opacity: 0.45 },
+
+  /* --- the composer while she is typing --------------------------------- */
+  // The row opens in the middle rather than growing a second row above itself.
+  toolSlotCompact: { flex: 0 },
+  inputInline: { flex: 1, minHeight: 46, maxHeight: 96, marginHorizontal: 8 },
+  typingBack: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
+    alignSelf: 'center', minHeight: 26, paddingHorizontal: 10, borderRadius: 13,
+  },
+  typingBackText: { color: colors.maroon, fontSize: 11.5, fontWeight: '700' },
 });

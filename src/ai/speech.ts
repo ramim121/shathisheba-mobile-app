@@ -606,6 +606,59 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
 }
 
 /**
+ * Play a recording the farmer made herself.
+ *
+ * Her own voice message was played with a bare `createAudioPlayer(...).play()`
+ * and nothing else: no state, no way to stop it, no sign it had started, and a
+ * second tap stacked another playback on the first. It goes through the same
+ * four states as everything else now, so the control under her clip behaves
+ * exactly like the one under Shathi Apa's answer — which matters, because they
+ * sit two lines apart.
+ *
+ * No network and no model: this is a local file she recorded.
+ */
+export async function playClip(input: {
+  uri: string;
+  token: string;
+  onEnd?: () => void;
+}): Promise<void> {
+  const token = input.token;
+
+  if (starting === token) return;
+  if (playingToken === token && (state === 'playing' || state === 'paused')) {
+    await stopSpeech();
+    input.onEnd?.();
+    return;
+  }
+  await stopSpeech();
+
+  starting = token;
+  announce(token, 'loading');
+  const mine = generation;
+  try {
+    const next = createAudioPlayer({ uri: input.uri });
+    if (mine !== generation) {
+      try { next.remove(); } catch { /* already gone */ }
+      return;
+    }
+    player = next;
+    starting = null;
+    next.addListener('playbackStatusUpdate', (status) => {
+      if (status.didJustFinish && player === next) {
+        void stopSpeech().finally(() => input.onEnd?.());
+      }
+    });
+    next.play();
+    announce(token, 'playing');
+  } catch (error) {
+    starting = null;
+    if (playingToken === token) announce(null, 'idle');
+    input.onEnd?.();
+    throw error;
+  }
+}
+
+/**
  * Play a clip the server produced — from disk if we already have it.
  *
  * The first listen downloads and keeps it; every listen after that is a local

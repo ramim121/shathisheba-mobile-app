@@ -141,8 +141,10 @@ export function FailureCard({
 
 const sheet = StyleSheet.create({
   card: {
-    alignSelf: 'flex-start',
-    maxWidth: '92%',
+    // No alignSelf or maxWidth: this sits inside a flex row and the parent
+    // gives it its width. Constraining it here made it collapse to its
+    // narrowest possible size — one word per line.
+    alignSelf: 'stretch',
     borderWidth: 1,
     borderRadius: 14,
     paddingHorizontal: 12,

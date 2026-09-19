@@ -197,6 +197,14 @@ export function PressableScale({
       bounciness: 4,
     }).start();
 
+  // The style goes on the Animated.View, not on the Pressable.
+  //
+  // It used to go on the Pressable, with the children inside an unstyled
+  // Animated.View — so a `flexDirection: 'row'` meant for the children landed
+  // on their grandparent and they stacked in a column instead. Every pill built
+  // with this rendered its icon above its label rather than beside it, which
+  // read as a broken button. The layout and the children have to be on the same
+  // element.
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
@@ -208,9 +216,18 @@ export function PressableScale({
       accessibilityRole={accessibilityRole}
       accessibilityLabel={accessibilityLabel}
       accessibilityState={{ disabled: Boolean(disabled), ...accessibilityState }}
-      style={({ pressed }) => [style, pressed && reduce ? { opacity: 0.6 } : null]}
     >
-      <Animated.View style={reduce ? undefined : { transform: [{ scale }] }}>{children}</Animated.View>
+      {({ pressed }) => (
+        <Animated.View
+          style={[
+            style,
+            reduce ? null : { transform: [{ scale }] },
+            pressed && reduce ? { opacity: 0.6 } : null,
+          ]}
+        >
+          {children}
+        </Animated.View>
+      )}
     </Pressable>
   );
 }

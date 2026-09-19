@@ -263,30 +263,44 @@ export async function apiRequest<T = any>(resource: string, options?: ApiOptions
 }
 
 /**
- * Send a picture, as bytes rather than as a URI.
+ * Send a picture, through the native uploader rather than React Native's
+ * FormData.
  *
- * The old version appended React Native's legacy file part —
- * `form.append('file', { uri, name, type })` — and on React Native 0.86 with
- * the New Architecture that produced, in the middle of a Bangla conversation
- * about a sick cow:
+ * Three attempts at this, and the first two both failed for reasons worth
+ * writing down.
  *
- *     Unsupported FormDataPart implementation
+ * **Attempt one** was React Native's legacy file part:
  *
- * That error comes from the native networking module when a part has neither a
- * string nor a usable `uri`, and a URI that the manipulator or the picker
- * handed back in a shape the bridge did not accept was enough to trigger it.
- * The failure was also invisible in testing because the server side is fine —
- * a plain multipart POST with a real `Blob` returns 201.
+ *     form.append('file', { uri, name, type })
  *
- * So the bytes are read on the device and appended as a `Blob`, which is the
- * shape that was verified against this endpoint directly. The legacy part shape
- * remains as a fallback for a URI the file API cannot open — some OEM gallery
- * `content://` URIs among them — so this is strictly more capable than what it
- * replaces, not a swap.
+ * On React Native 0.86 with the New Architecture that reaches the native
+ * networking module and throws `Unsupported FormDataPart implementation`, which
+ * a farmer then read in the middle of a Bangla conversation about a sick cow.
+ *
+ * **Attempt two** read the bytes and appended a `Blob`, which is the shape a
+ * plain multipart POST from Node uses successfully against this same endpoint.
+ * It cannot work here: React Native's `Blob` accepts only strings and other
+ * Blobs, and its constructor throws
+ *
+ *     Creating blobs from 'ArrayBuffer' and 'ArrayBufferView' are not supported
+ *
+ * That throw was caught and fell back to attempt one, so the upload stayed
+ * broken and only the error message changed. The server was never at fault
+ * through any of this — a real multipart POST returns 201 to S3.
+ *
+ * **What works** is not to build the request in JavaScript at all.
+ * `expo-file-system` has a native uploader: it takes a file URI, does the
+ * multipart assembly on the native side, and never constructs a JS `Blob` or a
+ * `FormData` part. That is `file.upload(url, { uploadType: MULTIPART })`, and it
+ * is the mechanism below.
+ *
+ * The old FormData path is kept as a last resort for a URI the file API cannot
+ * open, because a farmer who cannot upload at all is worse off than one whose
+ * upload takes an unusual route.
  */
 export async function uploadImage(uri: string, folder: string): Promise<string> {
   if (!uri || typeof uri !== 'string') {
-    // Never reach FormData with nothing: that is the path that produced an
+    // Never reach the uploader with nothing: that is the path that produced an
     // internal error string on a farmer's screen.
     throw Object.assign(new Error('UPLOAD_NO_FILE'), { code: 'upload_no_file' });
   }
@@ -295,57 +309,77 @@ export async function uploadImage(uri: string, folder: string): Promise<string> 
   const match = /\.(\w+)$/.exec(rawName);
   const ext = (match ? match[1] : 'jpg').toLowerCase();
   const type = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-  // A name with an extension, always — the server keys its own naming off it.
   const name = match ? rawName : `photo-${Date.now()}.${ext}`;
 
-  const form = new FormData();
-  form.append('folder', folder);
-
-  let appended = false;
-  try {
-    const { File } = await import('expo-file-system');
-    const file = new File(uri);
-    if (file.exists) {
-      const bytes = await file.bytes();
-      if (bytes?.length) {
-        form.append('file', new Blob([bytes as unknown as BlobPart], { type }), name);
-        appended = true;
-      }
-    }
-  } catch {
-    /* fall through to the legacy part shape below */
-  }
-  if (!appended) {
-    // React Native's own file part. Reached for a URI the file API cannot open.
-    form.append('file', { uri, name, type } as any);
-  }
+  const base = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
+  const endpoint = `${base}/api/upload`;
 
   loadingStore.begin();
   try {
-    const base = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
-    const response = await fetch(`${base}/api/upload`, {
+    /* --- the native uploader ------------------------------------------- */
+    try {
+      const { File, UploadType } = await import('expo-file-system');
+      const file = new File(uri);
+      if (file.exists) {
+        const result = await file.upload(endpoint, {
+          httpMethod: 'POST',
+          uploadType: UploadType.MULTIPART,
+          fieldName: 'file',
+          mimeType: type,
+          // The server reads `folder` off the same multipart body.
+          parameters: { folder },
+          headers: authHeaders(),
+        });
+        const json = safeParse(result.body);
+        if (result.status >= 200 && result.status < 300 && json.ok !== false) {
+          return json.path ? `${base}${json.path}` : String(json.url ?? '');
+        }
+        throw Object.assign(new Error(String(json.message ?? `UPLOAD_FAILED_${result.status}`)), {
+          code: 'upload_failed',
+          status: result.status,
+          retry_after: json.retry_after,
+        });
+      }
+    } catch (error) {
+      // A coded failure is the server's answer and must not be retried down
+      // the fallback path — only a *mechanism* failure should fall through.
+      if ((error as { code?: string } | null)?.code) throw error;
+      if (__DEV__) console.warn('[upload] native uploader unavailable:', error);
+    }
+
+    /* --- last resort: the FormData path -------------------------------- */
+    const form = new FormData();
+    form.append('folder', folder);
+    form.append('file', { uri, name, type } as any);
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: authHeaders(),
       body: form as any,
     });
-    const json = await response.json().catch(() => ({}));
+    const json = await response.json().catch(() => ({}) as Record<string, unknown>);
     if (!response.ok || json.ok === false) {
-      // Coded, so describeFailure() classifies it as an upload problem and
-      // shows her "the photo could not be sent — take it again" rather than
-      // whatever the server or the bridge happened to say.
-      throw Object.assign(new Error(json.message || `UPLOAD_FAILED_${response.status}`), {
+      throw Object.assign(new Error(String(json.message ?? `UPLOAD_FAILED_${response.status}`)), {
         code: 'upload_failed',
         status: response.status,
         retry_after: json.retry_after,
       });
     }
-    // Build the URL from the app's own base so the host is always reachable
-    // from the device (the server's request origin can resolve to 0.0.0.0).
+    // Built from the app's own base so the host is always reachable from the
+    // device (the server's request origin can resolve to 0.0.0.0).
     return json.path ? `${base}${json.path}` : (json.url as string);
   } finally {
     loadingStore.end();
   }
 }
+
+function safeParse(body: string): Record<string, any> {
+  try {
+    return JSON.parse(body) as Record<string, any>;
+  } catch {
+    return {};
+  }
+}
+
 
 
 export async function apiList<T = ApiRow>(resource: string): Promise<T[]> {

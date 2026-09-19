@@ -6,7 +6,8 @@ import {
   type ApaAnswer, type ApaEntitlement, type ApaOfficer, type ApaSource,
 } from '../ai/apa';
 import {
-  INTRO_SOURCE, onSpeechChange, primeDeviceVoice, speak, stopSpeech, type SpeechState,
+  INTRO_SOURCE, onSpeechChange, playClip, primeDeviceVoice, speak, stopSpeech,
+  type SpeechState,
 } from '../ai/speech';
 import { optimiseImage } from '../media/image';
 import { describeFailure, type Failure } from '../ai/errors';
@@ -402,13 +403,10 @@ export function ApaProvider({
         return;
       }
       if (turn.clipUri) {
-        // Her own recording, played back from the file it was captured to.
-        import('expo-audio')
-          .then(({ createAudioPlayer }) => {
-            void stopSpeech();
-            createAudioPlayer({ uri: turn.clipUri! }).play();
-          })
-          .catch(() => undefined);
+        // Her own recording, through the same player and the same four states
+        // as an answer — so the control under her clip behaves like the one two
+        // lines below it, rather than firing once and giving no feedback.
+        void playClip({ uri: turn.clipUri, token: turn.key }).catch(() => undefined);
       }
     },
     [entitlement, lang]

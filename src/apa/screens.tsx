@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AccessibilityInfo, ActivityIndicator, Animated, Easing, Image, Linking, PanResponder,
-  Pressable, ScrollView, Text, TextInput, View,
+  AccessibilityInfo, ActivityIndicator, Animated, Easing, Image, LayoutAnimation, Linking,
+  PanResponder, Pressable, ScrollView, Text, TextInput, View,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Network from 'expo-network';
@@ -107,7 +107,8 @@ function ApaMark({ size = 28 }: { size?: number }) {
 export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { tx, lang } = useLanguage();
   const {
-    entitlement, turns, busy, wall, error, askText, replay, retryTurn, speakingKey, vote, navigate,
+    entitlement, turns, busy, wall, error, askText, clear, replay, retryTurn,
+    speakingKey, speakingState, vote, navigate,
   } = useApa();
   const scroller = useRef<ScrollView>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -171,10 +172,42 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
 
       {menuOpen ? (
         <View style={{ backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.line }}>
-          <Pressable style={apa.row} onPress={() => { setMenuOpen(false); setScreen('apaSettings'); }}>
-            <View style={apa.rowIcon}><Text style={apa.rowIconText}>⚙</Text></View>
-            <View style={apa.rowBody}><Text style={apa.rowTitle}>{tx('শাথী আপার সেটিংস', 'Shathi Apa settings')}</Text></View>
-          </Pressable>
+          {/* Starting again was only possible by deleting every conversation
+              from settings, which is a different and much larger thing. */}
+          <PressableScale
+            style={apa.row}
+            onPress={() => {
+              setMenuOpen(false);
+              void stopSpeech();
+              clear();
+            }}
+            disabled={!turns.length}
+            accessibilityLabel={tx('নতুন আলাপ শুরু করুন', 'Start a new conversation')}
+          >
+            <View style={apa.rowIcon}>
+              <Ionicons name="add-circle-outline" size={18} color={colors.maroon} />
+            </View>
+            <View style={apa.rowBody}>
+              <Text style={[apa.rowTitle, !turns.length && { color: colors.muted }]}>
+                {tx('নতুন আলাপ শুরু করুন', 'Start a new conversation')}
+              </Text>
+              <Text style={apa.rowDetail}>
+                {tx('আগের আলাপ সেটিংসে জমা থাকবে', 'The earlier one stays saved in settings')}
+              </Text>
+            </View>
+          </PressableScale>
+          <PressableScale
+            style={apa.row}
+            onPress={() => { setMenuOpen(false); setScreen('apaSettings'); }}
+            accessibilityLabel={tx('শাথী আপার সেটিংস', 'Shathi Apa settings')}
+          >
+            <View style={apa.rowIcon}>
+              <Ionicons name="settings-outline" size={18} color={colors.maroon} />
+            </View>
+            <View style={apa.rowBody}>
+              <Text style={apa.rowTitle}>{tx('শাথী আপার সেটিংস', 'Shathi Apa settings')}</Text>
+            </View>
+          </PressableScale>
         </View>
       ) : null}
 
@@ -205,7 +238,15 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
 
         {turns.map((turn) =>
           turn.role === 'user' ? (
-            <UserBubble key={turn.key} turn={turn} onReplay={() => replay(turn)} lang={lang} tx={tx} />
+            <UserBubble
+              key={turn.key}
+              turn={turn}
+              playing={speakingKey === turn.key && speakingState === 'playing'}
+              loading={speakingKey === turn.key && speakingState === 'loading'}
+              onReplay={() => replay(turn)}
+              lang={lang}
+              tx={tx}
+            />
           ) : (
             <ApaBubble
               key={turn.key}
@@ -237,34 +278,67 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
 /* --- her turn ------------------------------------------------------------ */
 
 function UserBubble({
-  turn, onReplay, lang, tx,
+  turn, playing = false, loading = false, onReplay, lang, tx,
 }: {
   turn: ApaTurn;
-  /** True only for the one bubble actually being read out. */
+  /** True only for the one clip actually playing. */
   playing?: boolean;
+  /** True while the clip is being opened. */
+  loading?: boolean;
   onReplay: () => void;
-  onRetry?: () => void;
   lang: string;
   tx: (bnText: string, enText: string) => string;
 }) {
-  const bars = useMemo(() => Array.from({ length: 22 }, (_, i) => 5 + ((i * 7) % 12)), []);
+  const bars = useMemo(() => Array.from({ length: 20 }, (_, i) => 5 + ((i * 7) % 12)), []);
   return (
     <View style={apa.turnUser}>
       {turn.imageUri ? (
-        <Image source={{ uri: turn.imageUri }} style={{ width: 168, height: 132, borderRadius: 10 }} />
+        <Image source={{ uri: turn.imageUri }} style={apa.turnUserPhoto} />
       ) : null}
 
+      {/* Her own recording, with the same play/pause control as Shathi Apa's
+          answer two lines below. It used to be a strip of static bars that
+          fired playback once and gave no sign of it: no icon change, no way to
+          stop, and a second tap stacked a second playback on the first. */}
       {turn.clipUri ? (
-        <Pressable style={apa.clip} onPress={onReplay} accessibilityLabel={tx('রেকর্ডিং শুনুন', 'Play recording')}>
-          <Text style={apa.clipTime}>🎙</Text>
+        <PressableScale
+          style={apa.clip}
+          onPress={onReplay}
+          accessibilityLabel={
+            playing ? tx('থামান', 'Stop') : tx('আপনার রেকর্ডিং শুনুন', 'Play your recording')
+          }
+          accessibilityState={{ selected: playing, busy: loading }}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Ionicons name={playing ? 'pause' : 'play'} size={16} color="#fff" />
+          )}
           <View style={apa.clipBars}>
-            {bars.map((h, i) => <View key={i} style={[apa.clipBar, { height: h }]} />)}
+            {bars.map((h, i) => (
+              <View
+                key={i}
+                style={[
+                  apa.clipBar,
+                  { height: h },
+                  // Played-through bars stay solid; the rest dim. Not a real
+                  // progress bar — expo-audio reports position on the player,
+                  // not per-bar — but it distinguishes playing from idle, which
+                  // is what the control was missing.
+                  playing ? null : apa.clipBarIdle,
+                ]}
+              />
+            ))}
           </View>
           <Text style={apa.clipTime}>{clock(turn.clipSeconds ?? 0, lang === 'bn' ? 'bn' : 'en')}</Text>
-        </Pressable>
+        </PressableScale>
       ) : null}
 
-      {turn.text ? <Text style={apa.turnUserText}>{turn.text}</Text> : null}
+      {/* The transcript, under her clip. She asked by voice; seeing what was
+          heard is how she catches a mis-hearing before acting on the answer. */}
+      {turn.text ? (
+        <Text style={[apa.turnUserText, turn.clipUri && apa.turnUserTranscript]}>{turn.text}</Text>
+      ) : null}
 
       {turn.state === 'sending' ? (
         <Text style={apa.turnUserNote}>{tx('পাঠানো হচ্ছে…', 'Sending…')}</Text>
@@ -318,7 +392,9 @@ function ApaBubble({
     return (
       <View style={apa.turnApaRow}>
         <View style={apa.turnApaMark}><ApaMark size={24} /></View>
-        <FailureCard failure={turn.failure} onRetry={turn.retry ? onRetry : undefined} />
+        <View style={{ flex: 1 }}>
+          <FailureCard failure={turn.failure} onRetry={turn.retry ? onRetry : undefined} />
+        </View>
       </View>
     );
   }
@@ -577,6 +653,7 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
   const [latchedOn, setLatchedOn] = useState(false);
 
   const recorder = useAudioRecorder({ ...RecordingPresets.HIGH_QUALITY, isMeteringEnabled: true });
+  const reduceMotion = useReducedMotion();
 
   // The waveform is read from the recorder rather than from the status
   // listener: `metering` is on RecorderState (getStatus), not on the
@@ -693,90 +770,124 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
     void askText(text);
   }
 
+  // The row changes shape rather than growing a second one above itself.
+  // LayoutAnimation because the balance of the row comes from flex, and
+  // animating widths by hand would fight it.
+  const setTypingAnimated = useCallback(
+    (next: boolean) => {
+      if (!reduceMotion) {
+        LayoutAnimation.configureNext({
+          duration: 220,
+          create: { type: 'easeInEaseOut', property: 'opacity' },
+          update: { type: 'easeInEaseOut' },
+          delete: { type: 'easeInEaseOut', property: 'opacity' },
+        });
+      }
+      setTyping(next);
+    },
+    [reduceMotion]
+  );
+
   return (
     <View style={apa.composer}>
-      {typing ? (
-        <View style={apa.inputRow}>
-          <TextInput
-            style={[apa.input, { flex: 1 }]}
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={tx('লিখে জিজ্ঞাসা করুন…', 'Type your question…')}
-            placeholderTextColor={colors.muted}
-            multiline
-            autoFocus
-            editable={!busy}
-            onSubmitEditing={send}
-          />
-          <PressableScale
-            style={[apa.send, (!draft.trim() || busy) && apa.sendOff]}
-            onPress={send}
-            disabled={!draft.trim() || busy}
-            accessibilityLabel={tx('পাঠান', 'Send')}
-          >
-            <Ionicons name="arrow-up" size={20} color="#fff" />
-          </PressableScale>
-        </View>
-      ) : null}
-
-      {/* One row, four controls. This used to be two stacked rows — a
-          full-width live pill above the tools — which made the panel about a
-          hundred and eighty pixels tall and pushed the answer off the screen.
-          Live belongs beside the other ways of asking, not above them. */}
       <View style={apa.tools}>
+        {/* Photo stays on the left in both states, so one control never moves. */}
         <ToolButton
           icon="camera"
           label={tx('ছবি', 'Photo')}
           onPress={() => void pickPhoto()}
           disabled={busy || recording}
+          compact={typing}
         />
 
-        <MicButton
-          pan={pan}
-          recording={recording}
-          latched={latchedOn}
-          cancelArmed={cancelArmed}
-          levels={levels}
-          disabled={busy || !canVoice}
-          locked={!canVoice}
-          tx={tx}
-        />
+        {typing ? (
+          <>
+            {/* The middle opens. The input used to appear as a whole extra row
+                above the tools, which pushed the panel taller at the exact
+                moment she needed to see what she was replying to. */}
+            <TextInput
+              style={[apa.input, apa.inputInline]}
+              value={draft}
+              onChangeText={setDraft}
+              placeholder={tx('লিখে জিজ্ঞাসা করুন…', 'Type your question…')}
+              placeholderTextColor={colors.muted}
+              multiline
+              autoFocus
+              editable={!busy}
+              onSubmitEditing={send}
+              onBlur={() => { if (!draft.trim()) setTypingAnimated(false); }}
+            />
+            <PressableScale
+              style={[apa.send, (!draft.trim() || busy) && apa.sendOff]}
+              onPress={send}
+              disabled={!draft.trim() || busy}
+              accessibilityLabel={tx('পাঠান', 'Send')}
+            >
+              <Ionicons name="arrow-up" size={20} color="#fff" />
+            </PressableScale>
+          </>
+        ) : (
+          <>
+            {/* Typing is second, where she reaches for it — it was third, past
+                the microphone, which is the control she is trying not to use. */}
+            <ToolButton
+              icon="create-outline"
+              label={tx('লিখুন', 'Type')}
+              onPress={() => setTypingAnimated(true)}
+              disabled={recording}
+            />
 
-        <ToolButton
-          icon="create-outline"
-          label={tx('লিখুন', 'Type')}
-          onPress={() => setTyping((v) => !v)}
-          disabled={recording}
-          active={typing}
-        />
+            <MicButton
+              pan={pan}
+              recording={recording}
+              latched={latchedOn}
+              cancelArmed={cancelArmed}
+              levels={levels}
+              disabled={busy || !canVoice}
+              locked={!canVoice}
+              tx={tx}
+            />
 
-        {/* The same sparkle as the top navigation, so "this is the AI one" is
-            one symbol across the app rather than a different idea per screen. */}
-        <ToolButton
-          icon="sparkles"
-          label={tx('লাইভ', 'Live')}
-          onPress={() => setScreen('apaVoice')}
-          disabled={recording}
-          dimmed={!canLive}
-          badge={canLive ? (lang === 'bn' ? bn(liveMinutes) : String(liveMinutes)) : null}
-        />
+            {/* The same sparkle as the top navigation, so "this is the AI one"
+                is one symbol across the app. */}
+            <ToolButton
+              icon="sparkles"
+              label={tx('লাইভ', 'Live')}
+              onPress={() => setScreen('apaVoice')}
+              disabled={recording}
+              dimmed={!canLive}
+              badge={canLive ? (lang === 'bn' ? bn(liveMinutes) : String(liveMinutes)) : null}
+            />
+          </>
+        )}
       </View>
 
-      <Text style={[apa.hint, recording && !cancelArmed && apa.hintLive, cancelArmed && apa.hintCancel]}>
-        {micDenied
-          ? tx('অনুমতি দিয়ে চালু করুন, নাহলে লিখে প্রশ্ন করুন', 'Allow the mic, or type instead')
-          : busy
-            ? tx('একটু অপেক্ষা করুন', 'One moment')
-            : !canVoice
-              ? tx('পরিচয় যাচাই করলে খুলে যাবে', 'Unlocks after verification')
-              : recording
-                ? cancelArmed
-                  ? tx('ছেড়ে দিলে বাতিল — রেকর্ডিং থেকে যাবে', 'Release to cancel — the clip is kept')
-                  : latchedOn
-                    ? `${clock(elapsed, lang === 'bn' ? 'bn' : 'en')} · ${tx('বলে শেষ হলে আবার চাপুন', 'tap again when you are done')}`
-                    : `${clock(elapsed, lang === 'bn' ? 'bn' : 'en')} · ${tx('ছেড়ে দিন পাঠাতে · উপরে তুলে বাতিল', 'release to send · slide up to cancel')}`
-                : tx('চেপে ধরে বলুন, বা একবার চাপুন', 'Hold and speak, or tap once')}
-      </Text>
+      {typing ? (
+        <PressableScale
+          style={apa.typingBack}
+          onPress={() => { setDraft(''); setTypingAnimated(false); }}
+          accessibilityLabel={tx('বলে জিজ্ঞাসা করুন', 'Ask by voice instead')}
+        >
+          <Ionicons name="mic-outline" size={14} color={colors.maroon} />
+          <Text style={apa.typingBackText}>{tx('বলে জিজ্ঞাসা করি', 'Ask by voice instead')}</Text>
+        </PressableScale>
+      ) : (
+        <Text style={[apa.hint, recording && !cancelArmed && apa.hintLive, cancelArmed && apa.hintCancel]}>
+          {micDenied
+            ? tx('অনুমতি দিয়ে চালু করুন, নাহলে লিখে প্রশ্ন করুন', 'Allow the mic, or type instead')
+            : busy
+              ? tx('একটু অপেক্ষা করুন', 'One moment')
+              : !canVoice
+                ? tx('পরিচয় যাচাই করলে খুলে যাবে', 'Unlocks after verification')
+                : recording
+                  ? cancelArmed
+                    ? tx('ছেড়ে দিলে বাতিল — রেকর্ডিং থেকে যাবে', 'Release to cancel — the clip is kept')
+                    : latchedOn
+                      ? `${clock(elapsed, lang === 'bn' ? 'bn' : 'en')} · ${tx('বলে শেষ হলে আবার চাপুন', 'tap again when you are done')}`
+                      : `${clock(elapsed, lang === 'bn' ? 'bn' : 'en')} · ${tx('ছেড়ে দিন পাঠাতে · উপরে তুলে বাতিল', 'release to send · slide up to cancel')}`
+                  : tx('চেপে ধরে বলুন, বা একবার চাপুন', 'Hold and speak, or tap once')}
+        </Text>
+      )}
     </View>
   );
 }
@@ -791,7 +902,7 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
  * and on some Android builds the keyboard glyph did not render at all.
  */
 function ToolButton({
-  icon, label, onPress, disabled, active, dimmed, badge,
+  icon, label, onPress, disabled, active, dimmed, badge, compact,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
@@ -801,9 +912,11 @@ function ToolButton({
   /** Present but not yet available — readable, not hidden. */
   dimmed?: boolean;
   badge?: string | null;
+  /** Drops the caption while the input has the row, to make space for it. */
+  compact?: boolean;
 }) {
   return (
-    <View style={apa.toolSlot}>
+    <View style={[apa.toolSlot, compact && apa.toolSlotCompact]}>
       <PressableScale
         style={[apa.toolBtn, active && apa.toolBtnActive, (disabled || dimmed) && apa.toolBtnOff]}
         onPress={onPress}
@@ -822,9 +935,11 @@ function ToolButton({
           </View>
         ) : null}
       </PressableScale>
-      <Text style={[apa.toolLabel, dimmed && { color: colors.muted }]} numberOfLines={1}>
-        {label}
-      </Text>
+      {compact ? null : (
+        <Text style={[apa.toolLabel, dimmed && { color: colors.muted }]} numberOfLines={1}>
+          {label}
+        </Text>
+      )}
     </View>
   );
 }
@@ -1578,14 +1693,14 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
             style={apa.camClose}
             accessibilityLabel={tx('বন্ধ করুন', 'Close')}
           >
-            <Ionicons name="close" size={22} color="#fff" />
+            <Ionicons name="close" size={22} color={colors.maroon} />
           </PressableScale>
           <Text style={apa.camTitle}>{tx('ছবি তুলুন', 'Take a photo')}</Text>
         </View>
 
         {/* Framing help in plain words. A diagram would need reading. */}
         <View style={apa.camFrame}>
-          <Ionicons name="scan-outline" size={64} color="rgba(255,255,255,0.35)" />
+          <Ionicons name="scan-outline" size={64} color={colors.line} />
           <Text style={apa.camGuide}>
             {tx('গাছের পাতা বা পশুর যে জায়গায় সমস্যা, সেটা ছবিতে আসুক', 'Get the affected leaf or the animal in the frame')}
           </Text>
@@ -1596,7 +1711,7 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
 
         {notice ? (
           <View style={apa.camNotice}>
-            <Ionicons name="information-circle-outline" size={18} color="#fff" />
+            <Ionicons name="information-circle-outline" size={18} color="#8A5A06" />
             <Text style={apa.camNoticeText}>{notice}</Text>
           </View>
         ) : null}
@@ -1607,7 +1722,7 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
             onPress={() => void shoot(true)}
             accessibilityLabel={tx('গ্যালারি', 'Gallery')}
           >
-            <Ionicons name="images-outline" size={24} color="#fff" />
+            <Ionicons name="images-outline" size={24} color={colors.maroon} />
           </PressableScale>
           <PressableScale
             style={apa.camShutter}
@@ -1633,7 +1748,7 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
           style={apa.camClose}
           accessibilityLabel={tx('বন্ধ করুন', 'Close')}
         >
-          <Ionicons name="close" size={22} color="#fff" />
+          <Ionicons name="close" size={22} color={colors.maroon} />
         </PressableScale>
         <Text style={apa.camTitle}>{tx('কী জানতে চান?', 'What do you want to know?')}</Text>
       </View>
@@ -1691,7 +1806,7 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
           onPress={() => { setPhoto(null); setNotice(''); }}
           accessibilityLabel={tx('আবার তুলুন', 'Retake')}
         >
-          <Ionicons name="camera-reverse-outline" size={18} color="#fff" />
+          <Ionicons name="camera-reverse-outline" size={18} color={colors.maroon} />
           <Text style={apa.camSecondaryText}>{tx('আবার তুলুন', 'Retake')}</Text>
         </PressableScale>
 
