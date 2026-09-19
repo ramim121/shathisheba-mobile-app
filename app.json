@@ -55,6 +55,12 @@
           "sizeMB": 20
         }
       ],
+      [
+        "./plugins/withShortNativeObjectPaths",
+        {
+          "max": 200
+        }
+      ],
       "react-native-audio-api"
     ]
   }
