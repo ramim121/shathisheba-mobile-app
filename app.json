@@ -54,7 +54,8 @@
         {
           "sizeMB": 20
         }
-      ]
+      ],
+      "react-native-audio-api"
     ]
   }
 }

@@ -26,6 +26,7 @@ import { clear as clearAudioCache, stats as audioCacheStats } from '../media/aud
 import { ListenButton } from '../ai/ListenButton';
 import { APA_AMBER, APA_END, APA_GREEN, apa } from './styles';
 import { bn, clock, screenFromAction, useApa, type ApaTurn } from './state';
+import { openLive, type LiveHandle } from '../ai/live';
 import type { Screen } from '../types';
 
 // Every Shathi Apa screen: the chat, the composer that feeds it, the unlock
@@ -45,23 +46,30 @@ import type { Screen } from '../types';
 /**
  * Whether this app build can actually hold a live conversation.
  *
- * Two things have to be true for live to work, and they are not the same
- * thing. `apa_live_mic_enabled` on the server says the platform is willing to
- * pay for it. This constant says the app in the farmer's hand can do its half:
- * capture microphone audio as PCM16 at 16 kHz and stream it up the socket.
+ * Two things have to be true, and they are not the same thing.
+ * `apa_live_mic_enabled` on the server says the platform is willing to pay for
+ * it. This constant says the app in the farmer's hand can do its half: capture
+ * microphone audio as linear PCM and send it up the socket.
  *
- * It cannot yet. expo-audio exposes linear-PCM recording on iOS only — on
- * Android `RecordingOptionsAndroid` offers MediaRecorder formats and nothing
- * raw — so PCM16 capture needs a native module and a new APK. The socket
- * itself is a plain WebSocket to the URL the server mints and needs no new
- * dependency; it is the microphone that is missing.
+ * It now can. `react-native-audio-api` provides the PCM recorder that
+ * `expo-audio` cannot on Android — see src/ai/livePcm.ts for why no
+ * configuration of expo-audio would have done, and
+ * Resources/apa-probes/live-format.cjs for the measurement behind that.
  *
- * This is a separate flag rather than leaning on the server switch because
- * turning that switch on by itself would otherwise produce a screen showing a
- * green "listening" orb with no socket behind it — which is worse than a
- * screen that says it is not ready, and much harder to notice.
+ * ## This is still a build flag, and it still matters
+ *
+ * `react-native-audio-api` is a NATIVE module. It is in package.json and
+ * registered in app.json, but it is only in the binary after `expo prebuild`
+ * and a fresh build. An OTA update cannot add it. So on a build made before
+ * 2026-09-19 this screen would offer a working-looking conversation and then
+ * throw on the first press.
+ *
+ * Kept separate from the server switch for the same reason as before: turning
+ * that switch on alone would otherwise draw a green "listening" orb with no
+ * microphone behind it, which is worse than an honest "not ready" and much
+ * harder to notice.
  */
-const LIVE_CLIENT_READY = false;
+const LIVE_CLIENT_READY = true;
 
 
 
@@ -1180,11 +1188,15 @@ export function ApaLiveScreen({ setScreen }: { setScreen: (screen: Screen) => vo
   const [orb, setOrb] = useState<OrbState>('connecting');
   const [session, setSession] = useState<{ id: number; allowed: number } | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  const [muted, setMuted] = useState(false);
   const [receipt, setReceipt] = useState<ApaLiveReceipt | null>(null);
   const [message, setMessage] = useState('');
   const [strip, setStrip] = useState<{ who: 'me' | 'apa'; text: string }[]>([]);
   const reduceMotion = useReducedMotion();
+  // True while her finger is down. Live on this key is press-to-talk, not an
+  // open microphone — see src/ai/live.ts for the measurement that forced that.
+  const [talking, setTalking] = useState(false);
+  const [endingSoon, setEndingSoon] = useState(false);
+  const live = useRef<LiveHandle | null>(null);
 
   const mbPerMinute = entitlement?.live.data_mb_per_minute ?? 2;
   const minutesLeft = Math.floor((entitlement?.live.seconds_left ?? 0) / 60);
@@ -1222,6 +1234,10 @@ export function ApaLiveScreen({ setScreen }: { setScreen: (screen: Screen) => vo
     if (stage === 'blocked' && canStart) setStage('notice');
   }, [canStart, stage]);
 
+  // A screen that unmounts with the socket open keeps the microphone and keeps
+  // being billed. Back-swiping out of a call must cost nothing more.
+  useEffect(() => () => { void live.current?.close('farmer_hung_up'); live.current = null; }, []);
+
   // The clock stops when paused or reconnecting: a dropped line must never
   // spend her quota, and she has to be able to see that it is not spending.
   useEffect(() => {
@@ -1232,15 +1248,69 @@ export function ApaLiveScreen({ setScreen }: { setScreen: (screen: Screen) => vo
 
   const close = useCallback(
     async (reason: string) => {
+      // The socket first, so the microphone is released and nothing more is
+      // billed while the receipt is being fetched.
+      const spent = live.current?.seconds() ?? elapsed;
+      await live.current?.close('farmer_hung_up');
+      live.current = null;
       if (!session) { setScreen('shathiApa'); return; }
       try {
-        setReceipt(await closeApaLive({ sessionId: session.id, seconds: elapsed, reason }));
+        setReceipt(await closeApaLive({ sessionId: session.id, seconds: spent || elapsed, reason }));
         setStage('receipt');
       } catch {
         setScreen('shathiApa');
       }
     },
     [elapsed, session, setScreen]
+  );
+
+  /**
+   * Everything the socket says, turned into what she sees.
+   *
+   * One place, because the orb has six states and the temptation is to set them
+   * from wherever is convenient — which is how a screen ends up claiming to
+   * listen while the socket is reconnecting.
+   */
+  const onLiveEvent = useCallback(
+    (event: Parameters<Parameters<typeof openLive>[0]['onEvent']>[0]) => {
+      switch (event.type) {
+        case 'state':
+          setOrb(event.state as OrbState);
+          break;
+        case 'said':
+          setStrip((lines) => [...lines, { who: 'apa', text: event.text }]);
+          break;
+        case 'asked':
+          // No text, deliberately. This path returns no transcript of her own
+          // words — the live model understands the audio but sends no
+          // inputTranscription for a clientContent turn — so writing one would
+          // be a guess printed as a quote. The duration is honest and is enough
+          // to show that her turn landed.
+          setStrip((lines) => [
+            ...lines,
+            {
+              who: 'me',
+              text: tx(
+                `আপনি বললেন · ${bn(Math.round(event.seconds))} সেকেন্ড`,
+                `You spoke · ${Math.round(event.seconds)}s`
+              ),
+            },
+          ]);
+          break;
+        case 'ending':
+          setEndingSoon(true);
+          break;
+        case 'error':
+          // Already a sentence a farmer can read — src/ai/live.ts never passes
+          // a socket code through.
+          setMessage(event.message);
+          break;
+        case 'closed':
+          if (event.reason !== 'farmer_hung_up') void close(event.reason);
+          break;
+      }
+    },
+    [close, tx]
   );
 
   async function start() {
@@ -1250,12 +1320,25 @@ export function ApaLiveScreen({ setScreen }: { setScreen: (screen: Screen) => vo
       setSession({ id: started.session_id, allowed: started.allowed_seconds });
       setStage('live');
       setOrb('connecting');
+      // Opened before the connected mark, so a socket that refuses is never
+      // recorded as a call she had.
+      live.current = await openLive({
+        url: started.token.url,
+        allowedSeconds: started.allowed_seconds,
+        onEvent: onLiveEvent,
+      });
       await markApaLiveConnected(started.session_id);
-      setOrb('listening');
     } catch (e) {
       // The server re-checks the entitlement at mint time, so this is also the
-      // path for a quota that ran out between opening the screen and tapping.
-      setMessage(e instanceof Error ? e.message : tx('লাইভ কথা এখন চালু করা যাচ্ছে না।', 'Live cannot start right now.'));
+      // path for a quota that ran out between opening the screen and tapping,
+      // and for the budget ceiling closing live.
+      await live.current?.close('failed');
+      live.current = null;
+      setMessage(
+        e instanceof Error
+          ? e.message
+          : tx('লাইভ কথা এখন শুরু করা যাছ্ছে না।', 'Live cannot start right now.')
+      );
       setStage('blocked');
     }
   }
@@ -1488,6 +1571,18 @@ export function ApaLiveScreen({ setScreen }: { setScreen: (screen: Screen) => vo
           <Text style={apa.liveLabel}>{lang === 'bn' ? spec.label_bn : spec.label_en}</Text>
           <Text style={apa.liveSecondary}>{lang === 'bn' ? spec.hint_bn : spec.hint_en}</Text>
         </View>
+        {/* The instruction belongs here rather than only in the orb's own hint
+            text: "press and hold" is the one thing she has to know, and the
+            orb's label changes underneath it. */}
+        {orb === 'listening' && !talking ? (
+          <Text style={apa.liveSecondary}>
+            {tx('নিচের মাইক চেপে ধরে বলুন', 'Hold the microphone below and speak')}
+          </Text>
+        ) : null}
+        {endingSoon ? (
+          <Text style={apa.liveSecondary}>{tx('আর প্রায় দুই মিনিট আছে', 'About two minutes left')}</Text>
+        ) : null}
+        {message ? <Text style={[apa.liveSecondary, { color: APA_END }]}>{message}</Text> : null}
         {strip.length ? (
           <View style={apa.strip}>
             {strip.slice(-2).map((line, i) => (
@@ -1500,19 +1595,61 @@ export function ApaLiveScreen({ setScreen }: { setScreen: (screen: Screen) => vo
         ) : null}
       </View>
 
+      {/* Press-to-talk, not mute.
+          A mute button belongs on an open microphone, and there is no open
+          microphone here: the streaming input path is accepted by the API and
+          then ignored (src/ai/live.ts). Offering mute would imply Apa is
+          listening the rest of the time, which she is not.
+
+          While she is being answered the middle button stops the reply
+          instead. That is not barge-in — it drops audio already sent rather
+          than interrupting generation — but it is the part of barge-in she
+          actually reaches for: making Apa stop. */}
       <View style={apa.liveControls}>
-        <Pressable style={[apa.liveSide, muted && apa.liveSideOn]} onPress={() => setMuted((v) => !v)} accessibilityLabel={tx('মাইক বন্ধ', 'Mute')}>
-          <Text style={apa.liveSideIcon}>{muted ? '🔇' : '🎙'}</Text>
-        </Pressable>
         <Pressable
-          style={apa.liveMain}
-          onPress={() => setOrb((s) => (s === 'paused' ? 'listening' : 'paused'))}
+          style={[apa.liveSide, orb === 'paused' && apa.liveSideOn]}
+          onPress={() => {
+            if (orb === 'paused') { live.current?.resume(); setOrb('listening'); }
+            else { live.current?.pause(); setOrb('paused'); }
+          }}
           accessibilityLabel={orb === 'paused' ? tx('চালু করুন', 'Resume') : tx('বিরতি', 'Pause')}
         >
-          <Text style={apa.liveMainIcon}>{orb === 'paused' ? '▶' : '❚❚'}</Text>
+          <Text style={apa.liveSideIcon}>{orb === 'paused' ? '▶' : '❚❚'}</Text>
         </Pressable>
-        <Pressable style={[apa.liveSide, { backgroundColor: APA_END }]} onPress={() => void close('ended')} accessibilityLabel={tx('শেষ করুন', 'End')}>
-          <Text style={[apa.liveSideIcon, { color: '#fff' }]}>■</Text>
+
+        {orb === 'speaking' ? (
+          <Pressable
+            style={apa.liveMain}
+            onPress={() => live.current?.hush()}
+            accessibilityLabel={tx('থামান', 'Stop')}
+          >
+            <Text style={apa.liveMainIcon}>{'❚❚'}</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            style={apa.liveMain}
+            disabled={orb === 'connecting' || orb === 'reconnecting' || orb === 'paused' || orb === 'thinking'}
+            onPressIn={() => {
+              setMessage('');
+              setTalking(true);
+              void live.current?.startTalking();
+            }}
+            onPressOut={() => {
+              setTalking(false);
+              void live.current?.stopTalking();
+            }}
+            accessibilityLabel={tx('চেপে ধরে বলুন', 'Hold to speak')}
+          >
+            <Text style={apa.liveMainIcon}>{talking ? '●' : '🎙'}</Text>
+          </Pressable>
+        )}
+
+        <Pressable
+          style={[apa.liveSide, { backgroundColor: APA_END }]}
+          onPress={() => void close('ended')}
+          accessibilityLabel={tx('শেষ করুন', 'End')}
+        >
+          <Text style={[apa.liveSideIcon, { color: '#fff' }]}>{'■'}</Text>
         </Pressable>
       </View>
     </View>
