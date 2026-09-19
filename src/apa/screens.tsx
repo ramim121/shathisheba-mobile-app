@@ -13,6 +13,8 @@ import {
 } from '../theme/primitives';
 import { Ionicons } from '@expo/vector-icons';
 import { FailureCard } from '../ai/FailureCard';
+import { SpeechBar, useSpeechProgress } from '../ai/SpeechBar';
+import type { SpeechState } from '../ai/speech';
 import { AnswerCallout, RichAnswer, ThinkingDots } from './RichAnswer';
 import {
   closeApaLive, clearApaHistory, getApaSettings, markApaLiveConnected,
@@ -223,6 +225,7 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
         <ApaBubble
           turn={{ key: 'greeting', role: 'apa', text: greeting, state: 'done' }}
           playing={speakingKey === 'greeting'}
+          speechState={speakingKey === 'greeting' ? speakingState : 'idle'}
           onReplay={() => replay({ key: 'greeting', role: 'apa', text: greeting, state: 'done' })}
           onSuggestion={askText}
           onVote={() => undefined}
@@ -251,6 +254,7 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
               turn={turn}
               playing={speakingKey === turn.key && speakingState === 'playing'}
               loading={speakingKey === turn.key && speakingState === 'loading'}
+              speechState={speakingKey === turn.key ? speakingState : 'idle'}
               onReplay={() => replay(turn)}
               lang={lang}
               tx={tx}
@@ -286,18 +290,28 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
 /* --- her turn ------------------------------------------------------------ */
 
 function UserBubble({
-  turn, playing = false, loading = false, onReplay, lang, tx,
+  turn, playing = false, loading = false, speechState = 'idle', onReplay, lang, tx,
 }: {
   turn: ApaTurn;
   /** True only for the one clip actually playing. */
   playing?: boolean;
   /** True while the clip is being opened. */
   loading?: boolean;
+  /**
+   * The same four states as Shathi Apa's player, so her own recording and the
+   * answer two lines below behave identically. `playing` and `loading` are kept
+   * because the waveform reads them; this drives the control.
+   */
+  speechState?: SpeechState;
   onReplay: () => void;
   lang: string;
   tx: (bnText: string, enText: string) => string;
 }) {
   const bars = useMemo(() => Array.from({ length: 20 }, (_, i) => 5 + ((i * 7) % 12)), []);
+  // Real position now, so the waveform fills as it plays instead of switching
+  // wholesale between dim and solid. The comment below used to say expo-audio
+  // could not report this; it can, through speechProgress().
+  const heard = useSpeechProgress(playing);
   return (
     <View style={apa.turnUser}>
       {turn.imageUri ? (
@@ -329,11 +343,12 @@ function UserBubble({
                 style={[
                   apa.clipBar,
                   { height: h },
-                  // Played-through bars stay solid; the rest dim. Not a real
-                  // progress bar — expo-audio reports position on the player,
-                  // not per-bar — but it distinguishes playing from idle, which
-                  // is what the control was missing.
-                  playing ? null : apa.clipBarIdle,
+                  // The bars she has heard stay solid and the rest dim, from
+                  // the player's actual position. It was all-or-nothing before,
+                  // on the belief that position was not available per bar — it
+                  // is, via speechProgress(), so twenty bars is twenty steps of
+                  // resolution and enough to see it moving.
+                  playing && i / bars.length <= heard ? null : apa.clipBarIdle,
                 ]}
               />
             ))}
@@ -366,11 +381,16 @@ function UserBubble({
 /* --- her answer ---------------------------------------------------------- */
 
 function ApaBubble({
-  turn, playing = false, onReplay, onRetry, onSuggestion, onVote, onAction, lang, tx,
+  turn, playing = false, speechState = 'idle', onReplay, onRetry, onSuggestion, onVote, onAction, lang, tx,
 }: {
   turn: ApaTurn;
   /** True only for the one bubble actually being read out. */
   playing?: boolean;
+  /**
+   * What that bubble's player is doing. A boolean could not express "fetching",
+   * which is the second or two that used to look like an ignored press.
+   */
+  speechState?: SpeechState;
   onReplay: () => void;
   /** Absent where there is nothing to resend — the card then only explains. */
   onRetry?: () => void;
@@ -461,17 +481,14 @@ function ApaBubble({
             The phone's own voice says it, so it is instant and works offline. */}
         {turn.text ? (
           <View style={apa.speaker}>
-            <Pressable
-              style={[apa.speakerBtn, !playing && apa.speakerBtnIdle]}
-              onPress={onReplay}
-              accessibilityRole="button"
-              accessibilityState={{ selected: playing }}
-              accessibilityLabel={playing ? tx('পড়া বন্ধ করুন', 'Stop reading') : tx('পড়ে শোনান', 'Read aloud')}
-            >
-              <Text style={playing ? apa.speakerIcon : apa.speakerIconIdle}>{playing ? '❚❚' : '▶'}</Text>
-            </Pressable>
-            <View style={apa.speakerTrack}>{playing ? <View style={[apa.speakerFill, { width: '35%' }]} /> : null}</View>
-            <Text style={apa.speakerHint}>{playing ? tx('পড়ে শোনানো হচ্ছে', 'Reading') : tx('পড়ে শোনান', 'Read aloud')}</Text>
+            {/* The row this replaces had a play glyph, a track whose fill was a
+                constant `width: '35%'`, and a caption. The bar reported nothing
+                while looking like it did, which is worse than no bar at all:
+                one that never moves reads as a stuck download. There was also
+                no loading state, so the second or two spent fetching a clip
+                looked like an ignored press, and no way back to the start of an
+                answer she only half heard. SpeechBar is all three. */}
+            <SpeechBar state={speechState} onToggle={onReplay} />
             {turn.messageId ? (
               <>
                 <Pressable

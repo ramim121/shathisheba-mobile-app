@@ -359,6 +359,54 @@ type Listener = (token: string | null, state: SpeechState) => void;
 const listeners = new Set<Listener>();
 
 /** Subscribe to what is speaking and what it is doing. Returns the unsubscribe. */
+/**
+ * Where playback has got to, for the progress bar.
+ *
+ * The bar was `width: '35%'` — a fixed value, so it looked like a progress bar
+ * and told her nothing. Worse than none: a bar that never moves reads as a
+ * stuck download.
+ *
+ * Read from the player on demand rather than pushed, because a position
+ * changes sixty times a second and nothing on screen needs to know that often.
+ * The caller samples it a few times a second and animates between samples.
+ *
+ * Returns null when nothing is playing, which is the signal to hide the bar
+ * rather than show an empty one.
+ */
+export function speechProgress(): { position: number; duration: number } | null {
+  if (!player) return null;
+  try {
+    const duration = Number(player.duration ?? 0);
+    const position = Number(player.currentTime ?? 0);
+    if (!Number.isFinite(duration) || duration <= 0) return null;
+    return { position: Math.max(0, Math.min(position, duration)), duration };
+  } catch {
+    // The player was torn down between the check and the read.
+    return null;
+  }
+}
+
+/**
+ * Back to the beginning, without re-fetching anything.
+ *
+ * `seekTo(0)` rather than stop-and-speak-again: the clip is already in memory,
+ * so a restart should be instant and should cost neither a request nor the
+ * two-second wait that made the original press feel slow.
+ */
+export async function restartSpeech(): Promise<boolean> {
+  if (!player) return false;
+  try {
+    await player.seekTo(0);
+    if (state !== 'playing') {
+      player.play();
+      announce(playingToken, 'playing');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function onSpeechChange(fn: Listener): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
