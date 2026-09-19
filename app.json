@@ -55,6 +55,12 @@
           "sizeMB": 20
         }
       ],
+      [
+        "./plugins/withFastBuilds",
+        {
+          "architectures": "arm64-v8a"
+        }
+      ],
       "react-native-audio-api"
     ]
   }

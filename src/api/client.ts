@@ -428,6 +428,54 @@ async function localFileBytes(uri: string): Promise<Uint8Array> {
   }
 }
 
+/**
+ * Which of the two URLs the server hands back is the one to use.
+ *
+ * This is where the photo upload actually failed, after three rounds of looking
+ * at the wrong layer. The upload always succeeded. What failed was the *next*
+ * request, and it failed on the server with a sentence that only became visible
+ * once the app started reporting its failures:
+ *
+ *     Only images stored by this console can be analysed.
+ *
+ * `/api/upload` returns both a `path` and a `url`, and on S3 they are not two
+ * spellings of one thing:
+ *
+ *     path    /apa/1789814972348-6fbf3fb7f501.jpg          <- a bucket key
+ *     url     https://shathi-sheba.s3.../apa/1789...jpg    <- the public URL
+ *     storage s3
+ *
+ * This used to prefer `path` and prefix the app's own host, producing
+ * `https://shathisheba.digigramventures.com/apa/1789...jpg` — a URL that
+ * resolves to nothing and, more to the point, is not the bucket. `resolveImage`
+ * on the server will only read an absolute URL back if it starts with the
+ * configured bucket base, because the alternative is a model that fetches any
+ * address a request names. So it refused, correctly, and the refusal was about
+ * a URL the app had invented.
+ *
+ * The original reason for preferring `path` still holds for local storage: the
+ * server builds `url` from the request's Host header, which can be an address
+ * the phone cannot reach. So the rule is by storage, not by preference — the
+ * bucket URL when there is a bucket, the app's own host when the file is on the
+ * app's own disk.
+ */
+function uploadedUrl(json: Record<string, any>, base: string): string {
+  const url = typeof json.url === 'string' ? json.url : '';
+  const path = typeof json.path === 'string' ? json.path : '';
+
+  // On S3 the absolute URL is the only acceptable form: it is public, and it is
+  // what the server matches against its bucket base.
+  if (json.storage === 's3' && /^https?:\/\//i.test(url)) return url;
+
+  // Local disk: `path` is `/uploads/...`, which the server accepts as a path,
+  // and prefixing our own base keeps it reachable from the handset.
+  if (path) return `${base}${path}`;
+
+  // Neither shape recognised. Returning the server's url unchanged is better
+  // than an empty string, which would fail later as "no image".
+  return url;
+}
+
 export async function uploadImage(uri: string, folder: string): Promise<string> {
   if (!uri || typeof uri !== 'string') {
     // Never reach the uploader with nothing: that is the path that produced an
@@ -504,9 +552,7 @@ export async function uploadImage(uri: string, folder: string): Promise<string> 
       throw failed;
     }
 
-    // Built from the app's own base so the host is always reachable from the
-    // device (the server's request origin can resolve to 0.0.0.0).
-    return json.path ? `${base}${json.path}` : (json.url as string);
+    return uploadedUrl(json, base);
   } catch (error) {
     // Anything that is not already a coded failure is a mechanism failure, and
     // the one thing that must not happen again is it vanishing. Three attempts
