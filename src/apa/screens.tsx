@@ -1020,40 +1020,56 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
   return (
     <View style={apa.composer}>
       {typing ? (
-        /* Typing: one rounded field with its controls inside it.
-           The camera and microphone used to stay outside as separate pills
-           while a third box appeared between them, so three things moved at
-           once and the panel grew taller at the moment she most needed to see
-           what she was replying to. Inside the field they are where they are on
-           every messaging app she already uses, the row keeps one height, and
-           only the middle changes width. */
-        <View style={apa.field}>
-          <Pressable
+        /* Typing: the same two tiles, with a field grown between them.
+           Two earlier attempts got this wrong in opposite directions. The
+           first opened a third box *between* the camera and the microphone, so
+           three things moved at once. The second put both controls inside the
+           field, which fixed the movement but replaced the row with a control
+           she had never seen — the tile language of the closed panel vanished
+           the moment she tapped "লিখুন", which is the one moment it should
+           have stayed put.
+
+           Now nothing changes shape or size. The middle changes width. */
+        <View style={apa.fieldRow}>
+          <PressableScale
+            style={apa.toolBtn}
             onPress={() => void pickPhoto()}
             disabled={busy}
-            hitSlop={6}
-            style={({ pressed }) => [apa.fieldIcon, pressed && { opacity: 0.6 }]}
             accessibilityLabel={tx('ছবি তুলুন', 'Add a photo')}
           >
-            <Ionicons name="camera-outline" size={20} color={colors.maroon} />
-          </Pressable>
+            <Ionicons name="camera" size={22} color={colors.maroon} />
+          </PressableScale>
 
-          <TextInput
-            style={apa.fieldInput}
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={tx('লিখে জিজ্ঞাসা করুন…', 'Type your question…')}
-            placeholderTextColor={colors.muted}
-            multiline
-            autoFocus
-            editable={!busy}
-            onSubmitEditing={send}
-            onBlur={() => { if (!draft.trim()) setTypingAnimated(false); }}
-          />
+          <View style={apa.field}>
+            <TextInput
+              style={apa.fieldInput}
+              value={draft}
+              onChangeText={setDraft}
+              placeholder={tx('লিখে জিজ্ঞাসা করুন…', 'Type your question…')}
+              placeholderTextColor={colors.muted}
+              multiline
+              autoFocus
+              editable={!busy}
+              onSubmitEditing={send}
+            />
 
-          {/* Back to voice, in the place the send button will take once she
-              has typed something — so the right-hand slot always holds
-              "the thing that happens next". */}
+            {/* One control for the whole detour: it clears what she has
+                typed, and with nothing left to clear it closes the field. */}
+            <Pressable
+              onPress={() => {
+                if (draft) { setDraft(''); return; }
+                setTypingAnimated(false);
+              }}
+              hitSlop={8}
+              style={({ pressed }) => [apa.fieldClear, pressed && { opacity: 0.5 }]}
+              accessibilityLabel={draft ? tx('মুছে ফেলুন', 'Clear') : tx('বন্ধ করুন', 'Close')}
+            >
+              <Ionicons name="close" size={19} color={colors.muted} />
+            </Pressable>
+          </View>
+
+          {/* The right-hand tile always holds the thing that happens next:
+              the microphone until she has typed something, send after. */}
           {draft.trim() ? (
             <PressableScale
               style={[apa.fieldSend, busy && apa.sendOff]}
@@ -1061,26 +1077,27 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
               disabled={busy}
               accessibilityLabel={tx('পাঠান', 'Send')}
             >
-              <Ionicons name="arrow-up" size={18} color="#fff" />
+              <Ionicons name="arrow-up" size={22} color="#fff" />
             </PressableScale>
           ) : (
-            <Pressable
+            <PressableScale
+              style={apa.fieldSend}
               onPress={() => { setDraft(''); setTypingAnimated(false); }}
-              hitSlop={6}
-              style={({ pressed }) => [apa.fieldIcon, pressed && { opacity: 0.6 }]}
               accessibilityLabel={tx('বলে জিজ্ঞাসা করুন', 'Ask by voice instead')}
             >
-              <Ionicons name="mic-outline" size={20} color={colors.maroon} />
-            </Pressable>
+              <Ionicons name="mic" size={22} color="#fff" />
+            </PressableScale>
           )}
         </View>
       ) : (
-        /* Closed: one rounded panel, the four controls centred in it.
-           They were flush against the panel edges with the row's height set by
-           whichever label wrapped, so nothing lined up vertically. */
+        /* Closed: four equal tiles, centred in a floating rounded panel.
+           The microphone was a 60px circle among three 46px squares — the odd
+           one out twice over, bigger *and* a different shape — and the taller
+           slot pushed its own caption below the other three, so nothing on the
+           row lined up. Emphasis comes from which tile is filled. */
         <View style={apa.tools}>
-          {/* While she is recording, the camera is disabled anyway — so the
-              slot carries the way out instead. Swiping up while holding still
+          {/* While she is recording the camera is disabled anyway, so the slot
+              carries the way out instead. Swiping up while holding still
               cancels, but a tap-to-talk recording had no cancel at all, and
               tapping again was the send. */}
           {recording ? (
@@ -1284,7 +1301,7 @@ function MicButton({
           >
             {recording ? (
               cancelArmed ? (
-                <Ionicons name="close" size={26} color="#fff" />
+                <Ionicons name="close" size={22} color="#fff" />
               ) : (
                 <View style={apa.micBars}>
                   {levels.map((h, i) => (
@@ -1293,7 +1310,9 @@ function MicButton({
                 </View>
               )
             ) : (
-              <Ionicons name="mic" size={28} color="#fff" />
+              // The same 22 as its three neighbours. It was 28, which made the
+              // mic look bigger even once the tile stopped being bigger.
+              <Ionicons name="mic" size={22} color="#fff" />
             )}
             {locked ? (
               <View style={apa.micBadge}>

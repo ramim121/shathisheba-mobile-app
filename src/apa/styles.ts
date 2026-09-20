@@ -18,6 +18,14 @@ export const APA_GREEN = colors.green;
 export const APA_END = '#B4443C';
 export const APA_AMBER = colors.gold;
 
+/**
+ * One tile, for every control in the composer.
+ *
+ * Four equal squircles is the whole design of that panel: the emphasis comes
+ * from which one is filled, never from which one is bigger.
+ */
+const TILE = 54;
+
 export const apa = StyleSheet.create({
   /* --- chat screen ------------------------------------------------------- */
 
@@ -189,22 +197,24 @@ export const apa = StyleSheet.create({
      this was the one square one. It sits inside the shell's own 16px gutter,
      so all four corners are on cream and all four are rounded. */
   composer: {
-    paddingHorizontal: 8, paddingTop: 8, paddingBottom: 8, gap: 6,
-    backgroundColor: colors.card, borderRadius: 24,
-    borderWidth: 1, borderColor: colors.line,
-    shadowColor: '#2B0B1E', shadowOpacity: 0.07, shadowRadius: 12,
-    shadowOffset: { width: 0, height: 3 }, elevation: 6,
+    paddingHorizontal: 12, paddingTop: 12, paddingBottom: 12, gap: 6,
+    backgroundColor: colors.card, borderRadius: 30,
+    shadowColor: '#2B0B1E', shadowOpacity: 0.08, shadowRadius: 14,
+    shadowOffset: { width: 0, height: 4 }, elevation: 6,
   },
 
-  // flex-end, not flex-start: the microphone is 60px and the other three are
-  // 46px, so aligning tops put the mic's caption fourteen pixels below the
-  // rest and nothing on the row lined up. Aligned at the bottom, all four
-  // captions sit on one baseline and the mic rises above them, which is
-  // where the emphasis belongs anyway.
-  tools: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 4 },
-  toolSlot: { alignItems: 'center', justifyContent: 'flex-end', gap: 4, flex: 1 },
+  /* Four equal tiles.
+     The microphone used to be a 60px circle among three 46px squares, which
+     made it the odd one out twice over — bigger *and* a different shape — and
+     nothing on the row lined up, because the taller slot pushed its own
+     caption below the other three. It is the same tile as its neighbours now
+     and says "this is the main one" by being filled rather than by being
+     larger. It still grows, but only under a finger, and by a transform that
+     the layout does not see. */
+  tools: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 },
+  toolSlot: { alignItems: 'center', justifyContent: 'center', gap: 6, flex: 1 },
   toolBtn: {
-    width: 46, height: 46, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
+    width: TILE, height: TILE, borderRadius: 18, alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.rose,
   },
   toolBtnActive: { backgroundColor: colors.maroon },
@@ -224,24 +234,27 @@ export const apa = StyleSheet.create({
 
   // The mic keeps its footprint while recording. It used to grow 72 -> 92,
   // which re-laid out the whole row under the farmer's finger.
-  micSlot: { alignItems: 'center', gap: 3, flex: 1.2 },
-  micWrap: { width: 60, height: 60, alignItems: 'center', justifyContent: 'center' },
-  mic: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
-  micRing: { position: 'absolute', width: 60, height: 60, borderRadius: 30, backgroundColor: APA_GREEN },
+  micSlot: { alignItems: 'center', justifyContent: 'center', gap: 6, flex: 1 },
+  micWrap: { width: TILE, height: TILE, alignItems: 'center', justifyContent: 'center' },
+  mic: {
+    width: TILE, height: TILE, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon,
+  },
+  micRing: { position: 'absolute', width: TILE, height: TILE, borderRadius: 18, backgroundColor: APA_GREEN },
   micRecording: { backgroundColor: APA_GREEN },
   micLocked: { backgroundColor: APA_GREEN },
   micOff: { backgroundColor: '#B9A3AE' },
   micIcon: { fontSize: 26 },
   micBadge: {
-    position: 'absolute', right: -2, bottom: -2, width: 22, height: 22, borderRadius: 11,
+    position: 'absolute', right: -3, bottom: -3, width: 20, height: 20, borderRadius: 10,
     alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card,
     borderWidth: 1, borderColor: colors.line,
   },
   micBadgeText: { fontSize: 11 },
-  // Nine bars at 2px with a 2px gap is 34px across, which fits a 60px
-  // circle. Eighteen at 3px needed 87px and overflowed it.
-  micBars: { flexDirection: 'row', alignItems: 'center', gap: 2, height: 26 },
-  micBar: { width: 4, borderRadius: 2, backgroundColor: '#fff' },
+  // Nine bars at 3px with a 2px gap is 43px across, which fits the 54px tile
+  // with a margin either side. Four-wide bars needed 52 and touched the edges.
+  micBars: { flexDirection: 'row', alignItems: 'center', gap: 2, height: 22 },
+  micBar: { width: 3, borderRadius: 2, backgroundColor: '#fff' },
 
   hint: { color: colors.muted, fontSize: 12, textAlign: 'center' },
   hintCancel: { color: APA_END, fontWeight: '700' },
@@ -253,31 +266,43 @@ export const apa = StyleSheet.create({
     color: colors.ink, fontSize: 15.5,
   },
 
-  /* One rounded field with its controls inside it.
-     The camera and the microphone used to stay outside as separate pills
-     while a third box appeared between them, so three things moved at once
-     and the panel grew taller at the moment she most needed to see the answer
-     she was replying to. Inside the field they are where they are on every
-     messaging app she already uses: the row keeps one height and only the
-     middle changes width.
+  /* Typing: the same two tiles, with a field between them.
+     Two earlier attempts got this wrong in opposite directions. The first grew
+     a third box *between* the camera and the microphone, so three things moved
+     at once. The second put both controls inside the field, which fixed the
+     movement but replaced the row with a control she had never seen — the tile
+     language of the closed panel simply vanished the moment she tapped
+     "লিখুন".
 
-     alignItems is flex-end so that a question long enough to wrap grows
-     upward while the two controls stay on the bottom line, beside the last
-     line of her text rather than floating in the middle of the block. */
+     This keeps the tiles exactly where they were, at exactly the size they
+     were, and grows the field between them. Nothing changes shape; the middle
+     changes width. */
+  fieldRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   field: {
-    flexDirection: 'row', alignItems: 'flex-end', gap: 2,
-    minHeight: 52, borderRadius: 26, borderWidth: 1, borderColor: colors.line,
-    backgroundColor: colors.cream, paddingHorizontal: 5, paddingVertical: 5,
+    flex: 1, flexDirection: 'row', alignItems: 'flex-end', gap: 4,
+    minHeight: TILE, borderRadius: TILE / 2,
+    borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card,
+    paddingLeft: 16, paddingRight: 6, paddingVertical: 4,
   },
-  fieldIcon: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  // maxHeight caps it at about five lines; past that the field would eat the
+  // maxHeight caps it at about four lines; past that the field would eat the
   // answer it is a reply to.
   fieldInput: {
-    flex: 1, minHeight: 42, maxHeight: 120,
-    paddingHorizontal: 6, paddingTop: 11, paddingBottom: 11,
+    flex: 1, minHeight: TILE - 8, maxHeight: 108,
+    paddingTop: 12, paddingBottom: 12, paddingRight: 2,
     color: colors.ink, fontSize: 15.5,
   },
-  fieldSend: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
+  // Clears what she has typed, and closes the field when there is nothing left
+  // to clear — so one control undoes the whole detour in at most two presses.
+  fieldClear: {
+    width: 32, height: 32, borderRadius: 16, marginBottom: 5,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  // Send takes the microphone's tile rather than appearing beside it: the
+  // right-hand tile always holds the thing that happens next.
+  fieldSend: {
+    width: TILE, height: TILE, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon,
+  },
   inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   send: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
   sendOff: { backgroundColor: '#D8C6CF' },

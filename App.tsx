@@ -305,7 +305,7 @@ function useKeyboard(): { visible: boolean; height: number; lift: Animated.Value
       const height = event?.endCoordinates?.height ?? 0;
       setState({ visible: true, height });
       Animated.timing(lift, {
-        toValue: Math.max(0, height - KEYBOARD_REST_OFFSET),
+        toValue: Math.max(0, height - KEYBOARD_REST_OFFSET + KEYBOARD_GAP),
         // iOS hands over the keyboard's own duration, so the two move as one
         // object. Android only fires `Did`, after the keyboard has already
         // finished, so there is nothing to match: 170ms is short enough not to
@@ -315,6 +315,24 @@ function useKeyboard(): { visible: boolean; height: number; lift: Animated.Value
         useNativeDriver: true,
       }).start();
     });
+
+    // Android announces the keyboard once and then grows it: opening the
+    // clipboard strip or switching to a numeric pad changes the height without
+    // always emitting a second `keyboardDidShow`. Two cheap re-measures catch
+    // the case where the first figure was short, which is what left the
+    // composer looking tucked under the keys.
+    const settle = [260, 650].map((after) =>
+      setTimeout(() => {
+        const now = Keyboard.metrics?.()?.height ?? 0;
+        if (now <= 0) return;
+        Animated.timing(lift, {
+          toValue: Math.max(0, now - KEYBOARD_REST_OFFSET + KEYBOARD_GAP),
+          duration: 120,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }).start();
+      }, after)
+    );
 
     const hide = Keyboard.addListener(hideEvt, (event) => {
       Animated.timing(lift, {
@@ -333,6 +351,7 @@ function useKeyboard(): { visible: boolean; height: number; lift: Animated.Value
     return () => {
       show.remove();
       hide.remove();
+      for (const timer of settle) clearTimeout(timer);
     };
   }, [lift]);
 
@@ -347,6 +366,17 @@ function useKeyboard(): { visible: boolean; height: number; lift: Animated.Value
  * `styles.fixedAccessory`.
  */
 const KEYBOARD_REST_OFFSET = 72 + androidNavigationInset;
+
+/**
+ * Clearance between the composer and the top of the keyboard.
+ *
+ * Without it the two are exactly flush — the lift is the keyboard's own
+ * height, so the card's bottom edge lands on the keyboard's top edge. A
+ * rounded card with a shadow, flush against a dark keyboard, reads as a card
+ * that has gone *under* the keyboard: the shadow is clipped and the bottom
+ * corners have nothing to be rounded against.
+ */
+const KEYBOARD_GAP = 10;
 
 function usePullRefresh() {
   const [refreshing, setRefreshing] = useState(false);

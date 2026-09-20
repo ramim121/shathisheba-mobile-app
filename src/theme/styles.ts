@@ -20,7 +20,10 @@ export const styles = StyleSheet.create({
   // While the keyboard is up the bottom nav is hidden, so the accessory no
   // longer has to clear it - and it gives back the padding, because half the
   // screen is gone and every pixel of it should be her conversation.
-  fixedAccessoryLifted: { paddingTop: 4, paddingBottom: 4 },
+  // Tighter at the top, because half the screen is gone and every pixel of it
+  // should be her conversation — but not at the bottom, where the card needs
+  // room for its own shadow above the keys.
+  fixedAccessoryLifted: { paddingTop: 4, paddingBottom: 8 },
   flex: { flex: 1 },
   pressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
   onboarding: {

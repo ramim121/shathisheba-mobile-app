@@ -69,6 +69,12 @@ export function useSpeechProgress(active: boolean): { ratio: number; position: n
  * could only appear *after* the thing it is meant to invite. A stable
  * pseudo-random one is honest about position, which is what she reads it for,
  * and is identical every time the same message is drawn.
+ *
+ * The shape is not uniform noise, though, because uniform noise does not read
+ * as a voice. A spoken sentence starts quietly, rises, and tails off, so the
+ * hash is multiplied by an envelope that does the same and the first few bars
+ * are squeezed down to dots. That is the silhouette of every voice message she
+ * has ever seen, and it is what makes this recognisable as one at a glance.
  */
 function waveform(seed: string, bars: number): number[] {
   let h = 2166136261;
@@ -80,8 +86,16 @@ function waveform(seed: string, bars: number): number[] {
   for (let i = 0; i < bars; i += 1) {
     h = Math.imul(h ^ (h >>> 15), 2246822507);
     h ^= h >>> 13;
-    // 0.3..1: never flat, never all full height, so it reads as speech.
-    out.push(0.3 + (((h >>> 0) % 1000) / 1000) * 0.7);
+    const noise = 0.45 + (((h >>> 0) % 1000) / 1000) * 0.55;
+    const at = bars > 1 ? i / (bars - 1) : 0;
+    // A broad hump rather than a sine: full height across the middle two
+    // thirds, falling away at both ends.
+    const hump = Math.pow(Math.sin(Math.PI * at), 0.45);
+    // The opening two or three bars are dots. In a real waveform that is the
+    // breath before the first word, and leaving them full height is the single
+    // thing that makes a generated one look generated.
+    const lead = Math.min(1, at * 9);
+    out.push(Math.max(0.1, noise * hump * lead));
   }
   return out;
 }
@@ -288,19 +302,28 @@ export function SpeechBar({
   /* --- what it says ----------------------------------------------------- */
 
   const shown = dragRatio ?? ratio;
+  // One number, the way every voice message on her phone shows it: the length
+  // at rest, the position while it plays. Two numbers and a slash needed
+  // seventy pixels of a bubble that is about two hundred and forty wide, and
+  // it took them from the waveform — which is the part she has to hit with a
+  // finger.
   const label = loading
     ? tx('আনা হচ্ছে…', 'Getting it…')
     : duration > 0
       ? dragRatio !== null
         // Her finger's position, not the clip's — she is choosing, not listening.
-        ? clock(dragRatio * duration) + ' / ' + clock(duration)
+        ? clock(dragRatio * duration)
         : active
-          ? clock(position) + ' / ' + clock(duration)
+          ? clock(position)
           : clock(duration)
       : tx('পড়ে শোনান', 'Read aloud');
 
-  const barColour = (heard: boolean) =>
-    loading ? GREY_LINE : heard ? colors.maroon : colors.line;
+  // One colour at two opacities, not two colours. The played part and the rest
+  // of the clip are the same thing at different times, and a second hue reads
+  // as a second kind of thing — which is why the old maroon-against-line
+  // version looked like a progress bar over a ruler rather than like a
+  // waveform being consumed.
+  const barColour = loading ? GREY_LINE : colors.maroon;
 
   return (
     <View style={sheet.row}>
@@ -346,8 +369,11 @@ export function SpeechBar({
         >
           <Ionicons
             name={loading ? 'ellipsis-horizontal' : playing ? 'pause' : 'play'}
-            size={15}
-            color={playing ? '#fff' : loading ? GREY : colors.maroon}
+            size={16}
+            color={loading ? GREY : '#fff'}
+            // A play triangle is visually left-heavy inside a circle; a pixel
+            // and a half of offset centres it by eye.
+            style={playing || loading ? undefined : { marginLeft: 2 }}
           />
         </Pressable>
       </View>
@@ -374,8 +400,8 @@ export function SpeechBar({
               style={[
                 sheet.bar,
                 {
-                  height: Math.max(3, Math.round(h * 20)),
-                  backgroundColor: barColour(heard || partial),
+                  height: Math.max(3, Math.round(h * 22)),
+                  backgroundColor: barColour,
                   opacity: loading
                     ? reduce
                       ? 0.5
@@ -383,8 +409,8 @@ export function SpeechBar({
                     : heard
                       ? 1
                       : partial
-                        ? 0.55
-                        : 0.8,
+                        ? 0.6
+                        : 0.26,
                 },
               ]}
             />
@@ -411,27 +437,36 @@ export function SpeechBar({
   );
 }
 
+const BUTTON = 34;
+
 const sheet = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
-  mainWrap: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
-  glow: { position: 'absolute', width: 30, height: 30, borderRadius: 15, backgroundColor: colors.maroon },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 10 },
+  mainWrap: { width: BUTTON, height: BUTTON, alignItems: 'center', justifyContent: 'center' },
+  glow: {
+    position: 'absolute',
+    width: BUTTON,
+    height: BUTTON,
+    borderRadius: BUTTON / 2,
+    backgroundColor: colors.maroon,
+  },
+  // Filled, not outlined. This is the one control on the row, and an outlined
+  // circle beside a waveform reads as a decoration next to the content rather
+  // than as the thing to press.
   main: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: BUTTON,
+    height: BUTTON,
+    borderRadius: BUTTON / 2,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.rose,
-    borderWidth: 1,
-    borderColor: colors.line,
+    backgroundColor: colors.maroon,
   },
   // Green while playing: the one control whose state has to be readable at a
   // glance, from across a room.
-  mainPlaying: { backgroundColor: colors.green, borderColor: colors.green },
-  mainPaused: { backgroundColor: colors.rose, borderColor: colors.maroon },
+  mainPlaying: { backgroundColor: colors.green },
+  mainPaused: { backgroundColor: colors.maroon },
   // Grey, not dimmed. While the clip is being fetched there is no brand colour
   // anywhere on this row, so "not yet" is legible without reading the label.
-  mainLoading: { backgroundColor: GREY_FILL, borderColor: GREY_LINE },
+  mainLoading: { backgroundColor: GREY_FILL },
   grey: { color: GREY },
   pressed: { opacity: 0.6 },
   wave: {
@@ -441,23 +476,26 @@ const sheet = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  bar: { width: 2.5, borderRadius: 2 },
+  // Rounded caps: a square-ended bar reads as a chart column, a rounded one as
+  // a voice. Three wide rather than two and a half, because the fingertip
+  // landing on it is about forty.
+  bar: { width: 3, borderRadius: 2 },
   thumb: {
     position: 'absolute',
-    width: 12,
-    height: 12,
+    width: 11,
+    height: 11,
     borderRadius: 6,
     backgroundColor: colors.maroon,
     borderWidth: 2,
     borderColor: colors.card,
   },
-  thumbHeld: { transform: [{ scale: 1.25 }] },
-  // Wide enough for "0:07 / 1:24" without wrapping, and tabular so the digits
-  // do not shuffle the layout as they count.
+  thumbHeld: { transform: [{ scale: 1.3 }] },
+  // One number, tabular so the digits do not shuffle the layout as they count.
   caption: {
     color: colors.muted,
-    fontSize: 11,
-    width: 74,
+    fontSize: 11.5,
+    fontWeight: '600',
+    minWidth: 30,
     textAlign: 'right',
     fontVariant: ['tabular-nums'],
   },
