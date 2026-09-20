@@ -84,13 +84,20 @@ export const apa = StyleSheet.create({
     borderRadius: 13, backgroundColor: colors.rose,
   },
   sourceText: { color: colors.maroon, fontSize: 11.5, fontWeight: '700' },
-  // Outline, never filled, so a suggestion never competes with a source chip.
+  /* Outline, never filled, so a suggestion never competes with a source chip.
+
+     A row, not a bare box: each pill now carries a small maroon arrow before
+     its text. The pills and the source chips were the same shape at the same
+     size one under the other, and a tag you cannot press looks exactly like a
+     question you can. The arrow says "this one goes somewhere". */
   suggest: {
-    minHeight: 34, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 17,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    minHeight: 36, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18,
     borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card,
   },
+  suggestPressed: { backgroundColor: colors.rose, borderColor: colors.muted },
   suggestLarge: { minHeight: 42, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 21 },
-  suggestText: { color: colors.maroon, fontSize: 13.5, fontWeight: '600' },
+  suggestText: { color: colors.maroon, fontSize: 13.5, fontWeight: '600', flexShrink: 1 },
 
   starterLabel: { color: colors.muted, fontSize: 12, marginHorizontal: 16, marginBottom: 6, marginTop: 2 },
 
@@ -107,6 +114,26 @@ export const apa = StyleSheet.create({
   speakerTrack: { flex: 1, height: 3, borderRadius: 2, backgroundColor: colors.line, overflow: 'hidden' },
   speakerFill: { height: 3, backgroundColor: colors.maroon },
   speakerHint: { color: colors.muted, fontSize: 11 },
+
+  /* --- the answer's footer ------------------------------------------------
+     Everything under an answer used to be one flat run of rows inside the
+     bubble: the advice, the caution, the source chips, the player, the two
+     thumbs, a label, the suggestion pills and the officer strip, all the same
+     distance apart and all the same weight. Nine things in a column with no
+     grouping reads as a list of nine equally important things, which is why
+     the play button — the control a farmer who cannot read uses most — was
+     the hardest one to find.
+
+     A hairline separates what Apa said from what she can do about it. Below
+     the rule everything is a control; above it everything is content. */
+  answerFoot: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.line },
+  // The label on the left, the two thumbs on the right: one balanced line
+  // instead of two half-empty ones.
+  footRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: 10, minHeight: 28,
+  },
+  footLabel: { color: colors.muted, fontSize: 11.5, fontWeight: '700' },
 
   // Her own clip, at rest inside her bubble.
   clip: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -156,13 +183,26 @@ export const apa = StyleSheet.create({
   // Was two stacked rows — a full-width live pill above the tools — which made
   // this panel about 180px tall and 200px while recording, pushing the answer
   // it belongs under off the screen. One row of four now, about 96px.
+  /* A card that floats, not a strip ruled off with a hairline.
+     Every other surface in this app that sits over content — the bottom
+     sheet, the answer bubbles, the buy panel — is a rounded raised plane, and
+     this was the one square one. It sits inside the shell's own 16px gutter,
+     so all four corners are on cream and all four are rounded. */
   composer: {
-    paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8, gap: 6,
-    backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.line,
+    paddingHorizontal: 8, paddingTop: 8, paddingBottom: 8, gap: 6,
+    backgroundColor: colors.card, borderRadius: 24,
+    borderWidth: 1, borderColor: colors.line,
+    shadowColor: '#2B0B1E', shadowOpacity: 0.07, shadowRadius: 12,
+    shadowOffset: { width: 0, height: 3 }, elevation: 6,
   },
 
-  tools: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 4 },
-  toolSlot: { alignItems: 'center', gap: 3, flex: 1 },
+  // flex-end, not flex-start: the microphone is 60px and the other three are
+  // 46px, so aligning tops put the mic's caption fourteen pixels below the
+  // rest and nothing on the row lined up. Aligned at the bottom, all four
+  // captions sit on one baseline and the mic rises above them, which is
+  // where the emphasis belongs anyway.
+  tools: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 4 },
+  toolSlot: { alignItems: 'center', justifyContent: 'flex-end', gap: 4, flex: 1 },
   toolBtn: {
     width: 46, height: 46, borderRadius: 15, alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.rose,
@@ -208,6 +248,32 @@ export const apa = StyleSheet.create({
     backgroundColor: colors.cream, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 12,
     color: colors.ink, fontSize: 15.5,
   },
+
+  /* One rounded field with its controls inside it.
+     The camera and the microphone used to stay outside as separate pills
+     while a third box appeared between them, so three things moved at once
+     and the panel grew taller at the moment she most needed to see the answer
+     she was replying to. Inside the field they are where they are on every
+     messaging app she already uses: the row keeps one height and only the
+     middle changes width.
+
+     alignItems is flex-end so that a question long enough to wrap grows
+     upward while the two controls stay on the bottom line, beside the last
+     line of her text rather than floating in the middle of the block. */
+  field: {
+    flexDirection: 'row', alignItems: 'flex-end', gap: 2,
+    minHeight: 52, borderRadius: 26, borderWidth: 1, borderColor: colors.line,
+    backgroundColor: colors.cream, paddingHorizontal: 5, paddingVertical: 5,
+  },
+  fieldIcon: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  // maxHeight caps it at about five lines; past that the field would eat the
+  // answer it is a reply to.
+  fieldInput: {
+    flex: 1, minHeight: 42, maxHeight: 120,
+    paddingHorizontal: 6, paddingTop: 11, paddingBottom: 11,
+    color: colors.ink, fontSize: 15.5,
+  },
+  fieldSend: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
   inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   send: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.maroon },
   sendOff: { backgroundColor: '#D8C6CF' },
@@ -361,14 +427,21 @@ export const apa = StyleSheet.create({
 
   camAsk: { padding: 20, paddingBottom: 40, gap: 12, alignItems: 'stretch' },
   camThumb: { width: '100%', height: 220, borderRadius: 16, backgroundColor: '#000' },
-  camChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  /* Compact pills, not buttons.
+     Four 46px-tall full-width-ish buttons pushed the photograph she had just
+     taken off the top of the screen, so she was choosing a question about an
+     image she could no longer see. At 34px they wrap two to a row under the
+     thumbnail and all four are visible with it. They are still 34px tall and
+     ~90px wide, which is well past the 44dp-ish target once the 6px hit slop
+     around a Pressable is counted. */
+  camChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, justifyContent: 'center' },
   camChip: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, minHeight: 46,
-    paddingHorizontal: 15, borderRadius: 23, backgroundColor: colors.card,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, minHeight: 34,
+    paddingHorizontal: 12, borderRadius: 17, backgroundColor: colors.card,
     borderWidth: 1, borderColor: colors.line,
   },
-  camChipBusy: { opacity: 0.6 },
-  camChipText: { color: colors.maroon, fontSize: 14, fontWeight: '700' },
+  camChipBusy: { opacity: 0.6, borderColor: colors.maroon },
+  camChipText: { color: colors.maroon, fontSize: 12.5, fontWeight: '700' },
 
   camPrimary: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -413,4 +486,17 @@ export const apa = StyleSheet.create({
     alignSelf: 'center', minHeight: 26, paddingHorizontal: 10, borderRadius: 13,
   },
   typingBackText: { color: colors.maroon, fontSize: 11.5, fontWeight: '700' },
+
+  // Votes on their own row rather than beside the player: the waveform is
+  // flex:1 and took the width, pushing both thumbs off the right edge.
+  voteRow: { flexDirection: 'row', gap: 6 },
+  voteBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.rose,
+  },
+  voteBtnOn: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
 });

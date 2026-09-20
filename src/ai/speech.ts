@@ -387,6 +387,36 @@ export function speechProgress(): { position: number; duration: number } | null 
 }
 
 /**
+ * Jump to a fraction of the clip, 0..1.
+ *
+ * The progress bar was a read-only indicator, which is the wrong affordance
+ * for something that looks exactly like every other seek bar on her phone: she
+ * will press it. For a spoken answer it is also genuinely useful - the caution
+ * is at the end, and hearing it again should not mean hearing the whole thing
+ * again.
+ *
+ * No re-fetch: the clip is already in memory, so a seek is instant.
+ */
+export async function seekSpeech(ratio: number): Promise<boolean> {
+  if (!player) return false;
+  try {
+    const duration = Number(player.duration ?? 0);
+    if (!Number.isFinite(duration) || duration <= 0) return false;
+    const to = Math.max(0, Math.min(1, ratio)) * duration;
+    await player.seekTo(to);
+    // A seek on a paused clip resumes it: she dragged to a point in order to
+    // hear that point.
+    if (state !== 'playing') {
+      player.play();
+      announce(playingToken, 'playing');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Back to the beginning, without re-fetching anything.
  *
  * `seekTo(0)` rather than stop-and-speak-again: the clip is already in memory,

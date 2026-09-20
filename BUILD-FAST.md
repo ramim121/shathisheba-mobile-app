@@ -13,9 +13,23 @@ on the Gradle build cache and parallel module builds. That is the Pixel 7 Pro
 and every other 64-bit ARM phone, which is effectively every Android handset
 since about 2015.
 
-**Do not pass `--no-daemon`.** The daemon is most of why a rebuild is three
-minutes rather than eighteen; killing it throws away the warm JVM and the
-in-memory caches every time.
+## Measured, because the guesses were wrong
+
+| What changed | Time |
+|---|---|
+| JS or TypeScript only, daemon warm | **17 seconds** |
+| Native config (`gradle.properties`, a new dependency) | ~14 minutes |
+| After `expo prebuild`, or with `--no-daemon` | ~14-18 minutes |
+
+The expensive part is the New Architecture's C++, and almost nothing you do
+day to day should touch it. Two habits cost all of that time:
+
+- **Do not pass `--no-daemon`.** It throws away the warm JVM and every
+  in-memory cache on each run. A build that takes 17 seconds with the daemon
+  takes minutes without it.
+- **Do not run `expo prebuild` for a JS change.** It rewrites the native
+  project, which invalidates the CMake cache and forces a full C++ rebuild.
+  Only run it after changing `app.json`, a config plugin, or a dependency.
 
 The APK lands at `android/app/build/outputs/apk/release/app-release.apk`.
 

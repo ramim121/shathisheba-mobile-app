@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { useLanguage } from '../theme/primitives';
@@ -7,6 +7,7 @@ import {
   isSpeaking, onSpeechChange, speak, speechAvailability, speechState, stopSpeech,
   type SpeechSource, type SpeechState,
 } from './speech';
+import { BrandLoader } from '../theme/BrandLoader';
 
 /**
  * "Read this to me", on anything.
@@ -107,7 +108,7 @@ export function ListenButton({
       style={({ pressed }) => [sheet.button, label ? sheet.withLabel : null, pressed && sheet.pressed, style]}
     >
       {busy ? (
-        <ActivityIndicator size="small" color={colors.maroon} />
+        <BrandLoader size={18} />
       ) : (
         <Ionicons
           name={state === 'playing' ? 'pause-circle' : state === 'paused' ? 'play-circle' : 'volume-high'}

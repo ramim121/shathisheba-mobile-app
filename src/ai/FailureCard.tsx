@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { PressableScale, useLanguage, useReducedMotion } from '../theme/primitives';
 import { retryLine, type Failure } from './errors';
 import { lastFailureDetail } from './report';
+import { BrandLoader } from '../theme/BrandLoader';
 
 /**
  * What a farmer sees when something failed.
@@ -150,7 +151,7 @@ export function FailureCard({
           accessibilityState={{ disabled: !canPress, busy: retrying }}
         >
           {retrying ? (
-            <ActivityIndicator size="small" color={waiting ? colors.muted : colors.maroon} />
+            <BrandLoader size={16} />
           ) : (
             <Ionicons
               name={waiting ? 'time-outline' : 'refresh'}

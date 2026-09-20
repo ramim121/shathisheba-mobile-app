@@ -34,11 +34,22 @@ import { Directory, File, Paths } from 'expo-file-system';
 const DIR_NAME = 'apa-speech';
 
 /**
- * Sixty megabytes is roughly two hundred spoken answers. Past that the oldest
- * go, because a farmer who has asked two hundred questions is not still
- * replaying the first one.
+ * A hundred and fifty megabytes, roughly five hundred spoken answers. Past
+ * that the oldest go, because a farmer who has asked five hundred questions is
+ * not still replaying the first one.
+ *
+ * Raised from sixty when `apa_tts_mode` became `server` and autoplay was turned
+ * off. Those two together changed what accumulates here: every answer she
+ * presses play on is now Gemini audio rather than the handset's own voice, so
+ * clips arrive steadily instead of occasionally — and each one she keeps is a
+ * synthesis nobody pays for twice and a download she never makes again. Evicting
+ * early would be spending money to save disk.
+ *
+ * Still the cache directory rather than documents: Android may reclaim it under
+ * pressure, which is the right behaviour for something that can always be
+ * fetched again.
  */
-const MAX_BYTES = 60 * 1024 * 1024;
+const MAX_BYTES = 150 * 1024 * 1024;
 
 function folder(): Directory {
   const dir = new Directory(Paths.cache, DIR_NAME);

@@ -6,7 +6,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import YoutubePlayer from 'react-native-youtube-iframe';
 import {
-  ActivityIndicator,
   Animated,
   BackHandler,
   Easing,
@@ -64,6 +63,7 @@ import {
   GRADE_COLORS, GRADE_TINTS, financeLabel, resolveActionLink, GUIDANCE_TOPICS,
   REPAYMENT_MODES, PENDING_ACTION_LABEL, parseDigits,
 } from './src/finance/helpers';
+import { BrandLoader } from './src/theme/BrandLoader';
 
 
 
@@ -288,22 +288,65 @@ function useRefreshTick() {
  * before the animation so the move is in step with it; on Android only the
  * `Did` events exist.
  */
-function useKeyboard(): { visible: boolean; height: number } {
+function useKeyboard(): { visible: boolean; height: number; lift: Animated.Value } {
   const [state, setState] = useState({ visible: false, height: 0 });
+  // Animated, and driven natively, because the previous version set `bottom`
+  // from state: the bar was at rest in one frame and at the top of the
+  // keyboard in the next, which is the jump she was seeing. A transform can
+  // run on the UI thread, where a `bottom` change cannot, so the slide holds
+  // up even while the text input is taking focus.
+  const lift = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
     const show = Keyboard.addListener(showEvt, (event) => {
-      setState({ visible: true, height: event?.endCoordinates?.height ?? 0 });
+      const height = event?.endCoordinates?.height ?? 0;
+      setState({ visible: true, height });
+      Animated.timing(lift, {
+        toValue: Math.max(0, height - KEYBOARD_REST_OFFSET),
+        // iOS hands over the keyboard's own duration, so the two move as one
+        // object. Android only fires `Did`, after the keyboard has already
+        // finished, so there is nothing to match: 170ms is short enough not to
+        // read as arriving late and long enough not to read as a snap.
+        duration: Platform.OS === 'ios' ? Math.max(120, event?.duration ?? 250) : 170,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
     });
-    const hide = Keyboard.addListener(hideEvt, () => setState({ visible: false, height: 0 }));
+
+    const hide = Keyboard.addListener(hideEvt, (event) => {
+      Animated.timing(lift, {
+        toValue: 0,
+        duration: Platform.OS === 'ios' ? Math.max(120, event?.duration ?? 250) : 150,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        // Held until the bar has landed. `visible` also re-mounts the bottom
+        // nav, and popping it back in under a bar that is still travelling
+        // down was half of what made the close look worse than the open.
+        if (finished) setState({ visible: false, height: 0 });
+      });
+    });
+
     return () => {
       show.remove();
       hide.remove();
     };
-  }, []);
-  return state;
+  }, [lift]);
+
+  return { ...state, lift };
 }
+
+/**
+ * How far the fixed accessory already sits above the screen bottom at rest.
+ *
+ * It clears the bottom nav, so the distance it still has to travel when the
+ * keyboard opens is the keyboard's height minus this. Keep it in step with
+ * `styles.fixedAccessory`.
+ */
+const KEYBOARD_REST_OFFSET = 72 + androidNavigationInset;
 
 function usePullRefresh() {
   const [refreshing, setRefreshing] = useState(false);
@@ -343,7 +386,10 @@ function GlobalLoader() {
   return (
     <View pointerEvents="none" style={styles.loaderOverlay}>
       <View style={styles.loaderCard}>
-        <ActivityIndicator size="large" color={colors.maroon} />
+        {/* The brand mark rather than the platform spinner: this is the
+            first thing anyone sees on a cold start, and a grey circle is
+            the one moment the app looks like every other app. */}
+        <BrandLoader size={44} />
       </View>
     </View>
   );
@@ -909,7 +955,7 @@ function Shell({
   ];
 
   const { refreshing, onRefresh } = usePullRefresh();
-  const { visible: keyboardVisible, height: keyboardHeight } = useKeyboard();
+  const { visible: keyboardVisible, lift: keyboardLift } = useKeyboard();
   return (
     <View style={styles.shell}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -950,14 +996,15 @@ function Shell({
           up: with half the screen gone the padding that reads as generous at
           rest is just less of her conversation. */}
       {fixedAccessory ? (
-        <View
+        <Animated.View
           style={[
             styles.fixedAccessory,
-            keyboardVisible ? [styles.fixedAccessoryLifted, { bottom: keyboardHeight }] : null,
+            keyboardVisible ? styles.fixedAccessoryLifted : null,
+            { transform: [{ translateY: Animated.multiply(keyboardLift, -1) }] },
           ]}
         >
           {fixedAccessory}
-        </View>
+        </Animated.View>
       ) : null}
       {/* Bottom nav stays pinned at the device bottom; hidden while the keyboard
           is open so it never floats above the keyboard. */}
@@ -1998,7 +2045,7 @@ function GpsGrant({ onContinue, refreshLocation }: { onContinue: () => void; ref
     try { await refreshLocation(); } catch { /* ignore */ } finally { setBusy(false); onContinue(); }
   }
   if (checking) {
-    return <View style={[styles.gpsScreen, { justifyContent: 'center' }]}><ActivityIndicator color={colors.maroon} size="large" /></View>;
+    return <View style={[styles.gpsScreen, { justifyContent: 'center' }]}><BrandLoader size={40} /></View>;
   }
   const points: Array<[string, string]> = [
     ['🏷️', tx('এলাকাভিত্তিক প্রকল্প ও বাজারদর', 'Area-based projects & market rates')],
@@ -4043,7 +4090,7 @@ function OperationalGate({ feature, setScreen, children }: {
   const { user } = useAuth();
   const status = useApiObject<Record<string, OperationalState>>('app/operational-status');
   if (status.loading) {
-    return <View style={{ padding: 28 }}><ActivityIndicator color={colors.maroon} /></View>;
+    return <View style={{ padding: 28 }}><BrandLoader /></View>;
   }
   const s = status.data?.[feature];
   // A loan also needs an address on the profile. Asking here, at the start,
@@ -5623,7 +5670,7 @@ function BuyCheckout({ setScreen, qty, product, onOrdered }: {
           <Text style={ui.barTotal}>{amount(payable, lang)}</Text>
         </View>
         <Pressable disabled={!canPlace} onPress={placeOrder} style={({ pressed }) => [ui.barBtn, !canPlace && ui.barBtnDisabled, pressed && styles.pressed]}>
-          {submitting ? <ActivityIndicator color="#3D2600" /> : <Ionicons name="checkmark-circle" size={19} color="#3D2600" />}
+          {submitting ? <BrandLoader size={18} tone="gold" /> : <Ionicons name="checkmark-circle" size={19} color="#3D2600" />}
           <Text style={ui.barBtnText}>{submitting ? tx('জমা হচ্ছে…', 'Placing…') : tx('অর্ডার করুন', 'Place order')}</Text>
         </Pressable>
       </View>
@@ -5723,7 +5770,7 @@ function BuyCheckout({ setScreen, qty, product, onOrdered }: {
           <View style={ui.divider} />
           <View style={ui.sumLine}>
             <Text style={ui.sumTotalKey}>{tx('পরিশোধযোগ্য', 'To pay')}</Text>
-            {loading && !quote ? <ActivityIndicator color={colors.maroon} /> : <Text style={ui.sumTotalVal}>{amount(payable, lang)}</Text>}
+            {loading && !quote ? <BrandLoader /> : <Text style={ui.sumTotalVal}>{amount(payable, lang)}</Text>}
           </View>
         </View>
       </View>
@@ -5957,7 +6004,7 @@ function TrainingHome({ setScreen, openCategory }: { setScreen: (screen: Screen)
         </Pressable>
       ) : null}
 
-      {loading ? <ActivityIndicator color={colors.maroon} style={{ marginVertical: 18 }} /> : null}
+      {loading ? <View style={{ marginVertical: 18, alignItems: 'center' }}><BrandLoader /></View> : null}
 
       {cats.some((c) => c.preferred) ? (
         <>
@@ -6028,7 +6075,7 @@ function TrainingCategory({ category, setScreen, openModule }: { category: Learn
     <>
       <Header title={category?.name || tx('বিষয়', 'Category')} onBack={() => setScreen('training')} />
       <Text style={styles.pageHint}>{tx('একটি উপ-বিষয় বেছে নিন। লেভেল অনুযায়ী সাজানো।', 'Pick a sub-topic. Ordered by level.')}</Text>
-      {loading ? <ActivityIndicator color={colors.maroon} style={{ marginVertical: 18 }} /> : null}
+      {loading ? <View style={{ marginVertical: 18, alignItems: 'center' }}><BrandLoader /></View> : null}
       <View style={styles.subList}>
         {mods.map((m) => {
           const total = Number(m.content_count ?? 0);
@@ -6096,7 +6143,7 @@ function TrainingModuleScreen({ module, setScreen, openContent }: { module: Lear
   return (
     <>
       <Header title={module?.title || tx('উপ-বিষয়', 'Sub-topic')} onBack={() => setScreen('trainingCategory')} />
-      {loading ? <ActivityIndicator color={colors.maroon} style={{ marginVertical: 18 }} /> : null}
+      {loading ? <View style={{ marginVertical: 18, alignItems: 'center' }}><BrandLoader /></View> : null}
       {articles.length ? (
         <>
           <SectionTitle title={tx('আর্টিকেল', 'Articles')} />
@@ -6160,7 +6207,7 @@ function TrainingArticle({ contentId, setScreen, openQuiz }: { contentId: string
         {content && spoken ? (
           <ListenStrip text={spoken} server={{ source: 'learning', id: String(content.id) }} />
         ) : null}
-        {content ? <MarkdownText text={body || tx('কনটেন্ট নেই।', 'No content.')} style={styles.readerText} strongStyle={styles.readerStrong} /> : <ActivityIndicator color={colors.maroon} />}
+        {content ? <MarkdownText text={body || tx('কনটেন্ট নেই।', 'No content.')} style={styles.readerText} strongStyle={styles.readerStrong} /> : <BrandLoader />}
       </View>
       {content ? (
         <AppButton
@@ -9618,7 +9665,7 @@ function FinanceReadinessQuiz({
       <>
         <Header title={tx('প্রস্তুতি প্রশ্নমালা', 'Readiness questionnaire')} onBack={() => setScreen('financeReadinessIntro')} />
         <View style={{ padding: 24 }}>
-          <ActivityIndicator color={colors.maroon} />
+          <BrandLoader />
         </View>
       </>
     );
@@ -9739,7 +9786,7 @@ function FinanceReadinessQuiz({
 
         {submitting ? (
           <View style={fin.quizSubmitting}>
-            <ActivityIndicator color={colors.maroon} />
+            <BrandLoader />
           </View>
         ) : null}
       </View>
@@ -9833,7 +9880,7 @@ function FinanceReadinessResult({
       <>
         <Header title={tx('আপনার ফলাফল', 'Your result')} onBack={() => setScreen('profile')} />
         {busy ? (
-          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+          <View style={{ padding: 24 }}><BrandLoader /></View>
         ) : (
           <RefreshScroll>
             <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
@@ -10754,7 +10801,7 @@ function LoanApplyDetails({
           </Card>
         ) : (
           <Card style={{ marginHorizontal: 16, padding: 16 }}>
-            {quoting ? <ActivityIndicator color={colors.maroon} /> : (
+            {quoting ? <BrandLoader /> : (
               <Text style={{ color: colors.muted, fontSize: 13.5 }}>
                 {tx('পরিমাণ দিন — কিস্তি এখানে দেখানো হবে।', 'Enter an amount and your instalment appears here.')}
               </Text>
@@ -10811,7 +10858,7 @@ function LoanSchedulePreview({ setScreen, draft }: { setScreen: (screen: Screen)
       <Header title={tx('কিস্তির তালিকা', 'Repayment schedule')} onBack={() => setScreen('loanApplyDetails')} />
       <RefreshScroll>
         <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 16 }}>
-          {loading ? <ActivityIndicator color={colors.maroon} /> : shown.map((r) => (
+          {loading ? <BrandLoader /> : shown.map((r) => (
             <View key={r.installment_no} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10,
               borderBottomWidth: 1, borderBottomColor: colors.line }}>
               <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' }}>
@@ -11213,7 +11260,7 @@ function LoanStatus({ setScreen }: { setScreen: (screen: Screen) => void }) {
     <>
       <Header title={tx('অগ্রগতি', 'Progress')} onBack={() => setScreen('financeHub')} />
       <RefreshScroll>
-        {loading ? <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View> : null}
+        {loading ? <View style={{ padding: 24 }}><BrandLoader /></View> : null}
         {error ? (
           <Card style={{ marginHorizontal: 16, marginTop: 14, padding: 14 }}>
             <Text style={{ color: colors.danger, fontSize: 13.5, lineHeight: 20 }}>{error}</Text>
@@ -11382,7 +11429,7 @@ function LoanResult({
     return (
       <>
         <Header title={tx('আপনার ফাইন্যান্স প্রোফাইল', 'Your finance profile')} onBack={() => setScreen('financeHub')} />
-        <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+        <View style={{ padding: 24 }}><BrandLoader /></View>
       </>
     );
   }
@@ -11671,7 +11718,7 @@ function DevelopmentPlanScreen({
       <Header title={tx('উন্নয়ন পরিকল্পনা', 'Development plan')} onBack={() => setScreen('loanResult')} />
       <RefreshScroll>
         {busy ? (
-          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+          <View style={{ padding: 24 }}><BrandLoader /></View>
         ) : !plan || plan.total === 0 ? (
           <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
             <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '700' }}>
@@ -11954,7 +12001,7 @@ function LoanAccountScreen({ setScreen }: { setScreen: (screen: Screen) => void 
       <Header title={tx('আমার ঋণ', 'My loan')} onBack={() => setScreen('financeHub')} />
       <RefreshScroll>
         {busy ? (
-          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+          <View style={{ padding: 24 }}><BrandLoader /></View>
         ) : !acc ? (
           <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
             <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '700' }}>
@@ -12130,7 +12177,7 @@ function AssessmentHistoryScreen({ setScreen }: { setScreen: (screen: Screen) =>
       <Header title={tx('মূল্যায়নের ইতিহাস', 'Assessment history')} onBack={() => setScreen('loanResult')} />
       <RefreshScroll>
         {busy ? (
-          <View style={{ padding: 24 }}><ActivityIndicator color={colors.maroon} /></View>
+          <View style={{ padding: 24 }}><BrandLoader /></View>
         ) : !history || history.entries.length === 0 ? (
           <Card style={{ marginHorizontal: 16, marginTop: 16, padding: 18 }}>
             <Text style={{ color: colors.muted, fontSize: 13.5, lineHeight: 20 }}>

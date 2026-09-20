@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { useLanguage, useReducedMotion } from '../theme/primitives';
@@ -195,6 +195,90 @@ export function AnswerCallout({
 }
 
 /**
+ * The wait, shown in the shape of the thing being waited for.
+ *
+ * ## Why not a spinner
+ *
+ * A circular spinner in the middle of the screen says "the app is busy" and
+ * takes the answer area hostage while it does: everything she was reading
+ * disappears behind it, and when it goes the layout jumps. It is also the same
+ * animation this app shows for a list of prices loading, so it carries no
+ * information about what is actually happening.
+ *
+ * Three grey lines with a light travelling through them, sitting exactly where
+ * the answer will appear, say three useful things instead: an answer is coming,
+ * it will be about this long, and it will be *here*. When the text arrives it
+ * replaces lines of roughly its own size, so nothing below it moves.
+ *
+ * ## How the shimmer is built
+ *
+ * Each line is fourteen abutting segments of the same colour with a travelling
+ * opacity wave — the bright patch is a phase offset per segment, not a moving
+ * gradient. That matters because `expo-linear-gradient` is not in this project
+ * and adding it for a loader means a native rebuild for every user. Each line
+ * starts its wave slightly later than the one above, so the light runs down the
+ * block as well as across it.
+ *
+ * Under reduce-motion the lines hold at a flat grey. Still a skeleton, still
+ * honest about position and size, just not moving.
+ */
+export function AnswerSkeleton({ label, lines = 3 }: { label: string; lines?: number }) {
+  const reduce = useReducedMotion();
+  const sweep = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (reduce) { sweep.setValue(0); return; }
+    const loop = Animated.loop(
+      Animated.timing(sweep, {
+        toValue: 1,
+        duration: 1500,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reduce, sweep]);
+
+  const SEGMENTS = 14;
+  // Uneven, and never all the same: a block of identical full-width bars reads
+  // as a table loading, not as prose.
+  const WIDTHS = ['100%', '93%', '68%', '88%', '74%'];
+
+  return (
+    <View style={sheet.skeleton}>
+      {Array.from({ length: Math.max(1, lines) }, (_, row) => (
+        <View key={row} style={[sheet.skelLine, { width: WIDTHS[row % WIDTHS.length] as `${number}%` }]}>
+          {Array.from({ length: SEGMENTS }, (__, i) => {
+            // Kept inside 0.05..0.96 so the interpolation window never runs
+            // past the end of the cycle, which would break monotonicity.
+            const at = 0.05 + (i / (SEGMENTS - 1)) * 0.68 + row * 0.07;
+            return (
+              <Animated.View
+                key={i}
+                style={[
+                  sheet.skelSeg,
+                  reduce
+                    ? { opacity: 0.55 }
+                    : {
+                        opacity: sweep.interpolate({
+                          inputRange: [at - 0.16, at, at + 0.16],
+                          outputRange: [0.38, 1, 0.38],
+                          extrapolate: 'clamp',
+                        }),
+                      },
+                ]}
+              />
+            );
+          })}
+        </View>
+      ))}
+      <ThinkingDots label={label} />
+    </View>
+  );
+}
+
+/**
  * The thinking state.
  *
  * Was a stock `ActivityIndicator` beside the word "ভাবছি…", which is the same
@@ -263,6 +347,14 @@ const sheet = StyleSheet.create({
   calloutHead: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   calloutTitle: { color: colors.maroon, fontSize: 12.5, fontWeight: '800' },
   calloutCaveat: { color: '#8A5A06', fontSize: 11.5, lineHeight: 17, fontStyle: 'italic' },
+
+  // The skeleton's own lines, then the label under them — the label last so
+  // that the lines land where the answer's first line will.
+  skeleton: { gap: 8, paddingVertical: 2 },
+  skelLine: { flexDirection: 'row', height: 11, borderRadius: 6, overflow: 'hidden' },
+  // flex:1 with no gap: fourteen segments read as one continuous bar, and the
+  // wave is the only thing that distinguishes them.
+  skelSeg: { flex: 1, backgroundColor: colors.rose },
 
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 4 },
   thinkingDots: { flexDirection: 'row', alignItems: 'center', gap: 4 },
