@@ -8,6 +8,7 @@ import * as Network from 'expo-network';
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { colors } from '../theme/colors';
 import { styles } from '../theme/styles';
+import { maySend, releaseIsEcho, releaseLatches } from './voice';
 import {
   AppButton, Header, MarkdownText, PressableScale, useLanguage, usePulse, useReducedMotion,
 } from '../theme/primitives';
@@ -128,10 +129,37 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
   const trial = entitlement?.trial;
   const locked = entitlement ? !entitlement.features.ask_text : false;
 
+  /**
+   * Stay at the newest answer.
+   *
+   * An effect keyed on `turns.length` alone is not enough, and this is why: at
+   * the moment the count changes the new bubble has not been measured, so
+   * `scrollToEnd` runs against the old content height and stops short. Then
+   * the skeleton appears, then the answer replaces it at a different height,
+   * then the suggestion pills lay out — each one taller than the last, and
+   * each one leaving her further from the bottom. A fixed timeout cannot
+   * cover that because it does not know how long the answer is.
+   *
+   * So the scroll follows the content instead of the state: `stick` says she
+   * is reading the bottom of the conversation, `onContentSizeChange` keeps her
+   * there through every one of those growth steps, and scrolling up by more
+   * than a bubble's worth turns it off so the app never drags her away from
+   * something she went back to read.
+   */
+  const stick = useRef(true);
+
+  const toEnd = useCallback((animated = true) => {
+    scroller.current?.scrollToEnd({ animated });
+  }, []);
+
   useEffect(() => {
-    const timer = setTimeout(() => scroller.current?.scrollToEnd({ animated: true }), 120);
-    return () => clearTimeout(timer);
-  }, [turns.length, busy, wall]);
+    // A new question of her own always returns her to the bottom, whatever she
+    // was reading: she just asked, so the answer is what she wants to see.
+    stick.current = true;
+    toEnd(true);
+  }, [turns.length, toEnd]);
+
+  useEffect(() => { if (stick.current) toEnd(true); }, [busy, wall, toEnd]);
 
   // And again when the keyboard arrives. The composer slides up over the
   // conversation, so without this the last answer — the one she is replying
@@ -139,10 +167,10 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
   useEffect(() => {
     const show = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => { setTimeout(() => scroller.current?.scrollToEnd({ animated: true }), 60); }
+      () => { stick.current = true; setTimeout(() => toEnd(true), 60); }
     );
     return () => show.remove();
-  }, []);
+  }, [toEnd]);
 
   useEffect(() => () => { void stopSpeech(); }, []);
 
@@ -233,7 +261,22 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
         </View>
       ) : null}
 
-      <ScrollView ref={scroller} contentContainerStyle={apa.thread} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        ref={scroller}
+        contentContainerStyle={apa.thread}
+        keyboardShouldPersistTaps="handled"
+        // Every growth step of the answer, not just the arrival of the turn.
+        onContentSizeChange={() => { if (stick.current) toEnd(true); }}
+        // 120px is about one bubble. Below that she is still at the bottom and
+        // the thread should follow; above it she has gone back to read
+        // something and must be left alone.
+        scrollEventThrottle={64}
+        onScroll={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          const fromEnd = contentSize.height - layoutMeasurement.height - contentOffset.y;
+          stick.current = fromEnd < 120;
+        }}
+      >
         <ApaBubble
           turn={{ key: 'greeting', role: 'apa', text: greeting, state: 'done' }}
           playing={speakingKey === 'greeting'}
@@ -323,7 +366,7 @@ function UserBubble({
   // Real position now, so the waveform fills as it plays instead of switching
   // wholesale between dim and solid. The comment below used to say expo-audio
   // could not report this; it can, through speechProgress().
-  const heard = useSpeechProgress(playing);
+  const { ratio: heard } = useSpeechProgress(playing);
   return (
     <View style={apa.turnUser}>
       {turn.imageUri ? (
@@ -509,7 +552,12 @@ function ApaBubble({
             half heard. SpeechBar is all three. */}
         {turn.text ? (
           <View style={apa.answerFoot}>
-            <SpeechBar state={speechState} onToggle={onReplay} seed={turn.key} />
+            <SpeechBar
+              state={speechState}
+              onToggle={onReplay}
+              seed={turn.key}
+              seconds={turn.speechSeconds ?? null}
+            />
 
             {/* The "Ask next" label and the two thumbs share one line.
                 The thumbs used to sit beside the player inside one flex row,
@@ -725,6 +773,34 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
 
   const startedAt = useRef(0);
   const cancelRef = useRef(false);
+  /**
+   * One-shot guards against sending the same recording twice.
+   *
+   * The tap-to-send path fired `finish()` from `onPanResponderGrant`, and then
+   * the release of that very same tap fired it again: by then `latched` had
+   * been cleared, `cancelRef` was false, and `heldFor` was measured from the
+   * *original* start, so it was well past the 450ms tap window and fell
+   * through to the send. Two `askVoice` calls, one recording, and the second
+   * `recorder.stop()` does not always throw — which is why it reached the
+   * server twice rather than failing.
+   *
+   * `sending` closes the window for the duration of the stop, `handledInGrant`
+   * makes the release of a send-tap a no-op, and `sentUri` refuses the same
+   * file a second time however it is reached.
+   */
+  const sending = useRef(false);
+  const handledInGrant = useRef(false);
+  /**
+   * Which recording has already gone.
+   *
+   * Keyed on the moment it started rather than on `recorder.uri`: if the
+   * recorder ever reuses a temporary file name, a uri comparison would refuse
+   * to send the *next* recording, which is a worse bug than the one being
+   * fixed. A start timestamp is unique per recording whatever the file is
+   * called.
+   */
+  const sentAt = useRef(0);
+  const starting = useRef(false);
   // Hold-to-talk is the gesture farmers know from WhatsApp, and it is also the
   // one gesture some of them cannot make — arthritis, a hand carrying a load, a
   // cracked screen that does not track a long press. A quick tap latches the
@@ -741,13 +817,21 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
   // RecordingStatus the listener is handed.
   useEffect(() => {
     if (!recording) return;
+    let frame = 0;
     const timer = setInterval(() => {
       // -160 dB is silence and 0 dB is clipping. Mapped to a bar height so she
       // can see the phone is hearing her, which is this waveform's whole job.
       const db = recorder.getStatus().metering;
-      // Capped at the bar container's height so a loud farmer does not push
-      // the waveform outside the circle.
-      const level = Math.max(3, Math.min(24, (((typeof db === 'number' ? db : -60) + 60) / 60) * 24));
+      frame += 1;
+      const level = typeof db === 'number'
+        // Capped at the bar container's height so a loud farmer does not push
+        // the waveform outside the circle.
+        ? Math.max(3, Math.min(24, ((db + 60) / 60) * 24))
+        // Some handsets report no metering at all, and the previous fallback
+        // was a constant — nine bars of the same height, which is a flat line
+        // and reads as a microphone that is not working. A travelling wave
+        // says "listening" without claiming to be a level.
+        : 6 + Math.abs(Math.sin(frame * 0.55)) * 14;
       setLevels((current) => [...current.slice(1), level]);
     }, 90);
     return () => clearInterval(timer);
@@ -767,12 +851,18 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
 
   const begin = useCallback(async () => {
     if (busy || !canVoice) return;
+    // Two taps inside the time it takes to ask for the permission would
+    // otherwise start two recordings, and the second `prepareToRecordAsync`
+    // throws on a recorder that is already running.
+    if (starting.current || sending.current) return;
+    starting.current = true;
     // The phone must not be reading an answer aloud into its own microphone.
     await stopSpeech();
     const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) {
       // Never a dead button: tapping it opens the ask, and the composer says why.
       setMicDenied(true);
+      starting.current = false;
       return;
     }
     setMicDenied(false);
@@ -785,9 +875,12 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
     setLevels(Array(BAR_COUNT).fill(3));
     setRec(true);
     setRecording(true);
+    starting.current = false;
   }, [busy, canVoice, recorder, setRecording]);
 
   const finish = useCallback(async () => {
+    if (sending.current) return;
+    sending.current = true;
     setRec(false);
     setRecording(false);
     setCancelArmed(false);
@@ -797,15 +890,41 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
     try {
       await recorder.stop();
     } catch {
+      sending.current = false;
       return;
     }
     const uri = recorder.uri;
     // Releasing inside the cancel zone keeps the clip as a replayable draft
     // rather than destroying it — first-time voice users cancel by accident
     // constantly (changed from §4.2).
-    if (cancelRef.current || seconds < 1 || !uri) return;
-    void askVoice(uri, seconds);
+    if (
+      uri &&
+      maySend({
+        cancelled: cancelRef.current,
+        seconds,
+        uri,
+        startedAt: startedAt.current,
+        sentAt: sentAt.current,
+      })
+    ) {
+      sentAt.current = startedAt.current;
+      void askVoice(uri, seconds);
+    }
+    sending.current = false;
   }, [askVoice, recorder, setRecording]);
+
+  /**
+   * Throw the recording away without sending it.
+   *
+   * Swiping up while holding already did this, but the tap-to-talk path had no
+   * way out at all: once a tap had latched the microphone on, the only thing
+   * the next tap could do was send. For anyone who taps rather than holds —
+   * which is most people who cannot hold — there was no cancel.
+   */
+  const discard = useCallback(() => {
+    cancelRef.current = true;
+    void finish();
+  }, [finish]);
 
   const pan = useMemo(
     () =>
@@ -813,7 +932,12 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
         onStartShouldSetPanResponder: () => true,
         onPanResponderGrant: () => {
           // A tap while latched is the send, not the start of a new recording.
-          if (latched.current) { void finish(); return; }
+          if (latched.current) {
+            handledInGrant.current = true;
+            void finish();
+            return;
+          }
+          handledInGrant.current = false;
           void begin();
         },
         onPanResponderMove: (_event, gesture) => {
@@ -822,10 +946,19 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
           setCancelArmed(armed);
         },
         onPanResponderRelease: () => {
+          // The release of a send-tap. Grant already sent it; without this the
+          // same recording went twice.
+          if (releaseIsEcho(handledInGrant.current)) {
+            handledInGrant.current = false;
+            return;
+          }
           // Released almost immediately and not in the cancel zone: she tapped
           // rather than held. Keep recording and wait for the next tap.
-          const heldFor = Date.now() - startedAt.current;
-          if (!latched.current && !cancelRef.current && heldFor < 450) {
+          if (releaseLatches({
+            latched: latched.current,
+            cancelArmed: cancelRef.current,
+            heldForMs: Date.now() - startedAt.current,
+          })) {
             latched.current = true;
             setLatchedOn(true);
             return;
@@ -946,12 +1079,25 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
            They were flush against the panel edges with the row's height set by
            whichever label wrapped, so nothing lined up vertically. */
         <View style={apa.tools}>
-          <ToolButton
-            icon="camera"
-            label={tx('ছবি', 'Photo')}
-            onPress={() => void pickPhoto()}
-            disabled={busy || recording}
-          />
+          {/* While she is recording, the camera is disabled anyway — so the
+              slot carries the way out instead. Swiping up while holding still
+              cancels, but a tap-to-talk recording had no cancel at all, and
+              tapping again was the send. */}
+          {recording ? (
+            <ToolButton
+              icon="trash-outline"
+              label={tx('বাতিল', 'Discard')}
+              onPress={discard}
+              danger
+            />
+          ) : (
+            <ToolButton
+              icon="camera"
+              label={tx('ছবি', 'Photo')}
+              onPress={() => void pickPhoto()}
+              disabled={busy}
+            />
+          )}
 
           {/* Typing is second, where she reaches for it — it was third, past
               the microphone, which is the control she is trying not to use. */}
@@ -1011,7 +1157,7 @@ export function ApaComposer({ setScreen }: { setScreen: (screen: Screen) => void
  * and on some Android builds the keyboard glyph did not render at all.
  */
 function ToolButton({
-  icon, label, onPress, disabled, active, dimmed, badge, compact,
+  icon, label, onPress, disabled, active, dimmed, badge, compact, danger,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
@@ -1023,11 +1169,18 @@ function ToolButton({
   badge?: string | null;
   /** Drops the caption while the input has the row, to make space for it. */
   compact?: boolean;
+  /** Throws something away. Readable as such without reading the caption. */
+  danger?: boolean;
 }) {
   return (
     <View style={[apa.toolSlot, compact && apa.toolSlotCompact]}>
       <PressableScale
-        style={[apa.toolBtn, active && apa.toolBtnActive, (disabled || dimmed) && apa.toolBtnOff]}
+        style={[
+          apa.toolBtn,
+          active && apa.toolBtnActive,
+          danger && apa.toolBtnDanger,
+          (disabled || dimmed) && apa.toolBtnOff,
+        ]}
         onPress={onPress}
         disabled={disabled}
         accessibilityLabel={label}
@@ -1036,7 +1189,7 @@ function ToolButton({
         <Ionicons
           name={icon}
           size={22}
-          color={dimmed ? colors.muted : active ? '#fff' : colors.maroon}
+          color={dimmed ? colors.muted : danger ? colors.danger : active ? '#fff' : colors.maroon}
         />
         {badge ? (
           <View style={apa.toolBadge}>
@@ -1045,7 +1198,10 @@ function ToolButton({
         ) : null}
       </PressableScale>
       {compact ? null : (
-        <Text style={[apa.toolLabel, dimmed && { color: colors.muted }]} numberOfLines={1}>
+        <Text
+          style={[apa.toolLabel, dimmed && { color: colors.muted }, danger && { color: colors.danger }]}
+          numberOfLines={1}
+        >
           {label}
         </Text>
       )}
@@ -1078,6 +1234,29 @@ function MicButton({
   const ringScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.28] });
   const ringOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0] });
 
+  /**
+   * The button grows under her finger.
+   *
+   * A transform, not a width: the footprint used to grow 72 to 92 and re-laid
+   * out the whole row under the finger holding it. A scale changes nothing
+   * about the layout, so the other three controls do not move, and the button
+   * still visibly answers the press — which on a phone that takes a moment to
+   * start recording is the difference between "it heard me" and "it ignored
+   * me".
+   */
+  const press = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(press, {
+      toValue: recording ? 1 : 0,
+      duration: recording ? 140 : 180,
+      easing: recording ? Easing.out(Easing.quad) : Easing.inOut(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [recording, press]);
+  const pressScale = reduce
+    ? 1
+    : press.interpolate({ inputRange: [0, 1], outputRange: [1, 1.14] });
+
   return (
     <View style={apa.micSlot}>
       <View {...pan.panHandlers}>
@@ -1088,12 +1267,13 @@ function MicButton({
               style={[apa.micRing, { transform: [{ scale: ringScale }], opacity: ringOpacity }]}
             />
           ) : null}
-          <View
+          <Animated.View
             style={[
               apa.mic,
               recording && apa.micRecording,
               disabled && apa.micOff,
               cancelArmed && { backgroundColor: APA_END },
+              { transform: [{ scale: pressScale }] },
             ]}
             accessibilityRole="button"
             accessibilityLabel={
@@ -1120,7 +1300,7 @@ function MicButton({
                 <Ionicons name="lock-closed" size={11} color={colors.muted} />
               </View>
             ) : null}
-          </View>
+          </Animated.View>
         </View>
       </View>
       <Text style={apa.toolLabel} numberOfLines={1}>

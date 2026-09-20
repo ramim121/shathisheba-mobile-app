@@ -208,6 +208,10 @@ export const apa = StyleSheet.create({
     backgroundColor: colors.rose,
   },
   toolBtnActive: { backgroundColor: colors.maroon },
+  // Throwing the recording away. Tinted rather than filled red: it sits beside
+  // the microphone she is talking into, and a solid red button next to it
+  // reads as the thing to press.
+  toolBtnDanger: { backgroundColor: '#FDECEC' },
   toolBtnOff: { backgroundColor: '#F4EEF1' },
   toolLabel: { color: colors.maroon, fontSize: 10.5, fontWeight: '700' },
   // The live minutes left, on the button rather than in a sentence beside it.

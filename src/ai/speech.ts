@@ -359,6 +359,31 @@ type Listener = (token: string | null, state: SpeechState) => void;
 const listeners = new Set<Listener>();
 
 /** Subscribe to what is speaking and what it is doing. Returns the unsubscribe. */
+
+/**
+ * The last position and duration the player reported about itself.
+ *
+ * This exists because reading `player.duration` on demand does not work. On
+ * Android the getter answers 0 until the clip has been prepared, and for a WAV
+ * assembled on the phone it can keep answering 0 for the whole of a short
+ * clip — so the progress bar sat at zero for the entire playback while the
+ * audio played correctly. The status event carries the same two numbers and is
+ * emitted by the player itself once they are real, so it is the only source
+ * that can be trusted.
+ */
+let progress: { position: number; duration: number } | null = null;
+
+/** Called from the player's own status listener. */
+function noteProgress(status: { currentTime?: number | null; duration?: number | null }) {
+  const duration = Number(status?.duration ?? 0);
+  const position = Number(status?.currentTime ?? 0);
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  progress = {
+    duration,
+    position: Math.max(0, Math.min(Number.isFinite(position) ? position : 0, duration)),
+  };
+}
+
 /**
  * Where playback has got to, for the progress bar.
  *
@@ -366,15 +391,14 @@ const listeners = new Set<Listener>();
  * and told her nothing. Worse than none: a bar that never moves reads as a
  * stuck download.
  *
- * Read from the player on demand rather than pushed, because a position
- * changes sixty times a second and nothing on screen needs to know that often.
- * The caller samples it a few times a second and animates between samples.
- *
- * Returns null when nothing is playing, which is the signal to hide the bar
- * rather than show an empty one.
+ * Returns the player's last reported figures, falling back to the getters for
+ * the case where a status event has not landed yet. Null means there is
+ * nothing to show, which is the signal to draw the bar at rest rather than to
+ * draw an empty one.
  */
 export function speechProgress(): { position: number; duration: number } | null {
   if (!player) return null;
+  if (progress) return progress;
   try {
     const duration = Number(player.duration ?? 0);
     const position = Number(player.currentTime ?? 0);
@@ -400,9 +424,14 @@ export function speechProgress(): { position: number; duration: number } | null 
 export async function seekSpeech(ratio: number): Promise<boolean> {
   if (!player) return false;
   try {
-    const duration = Number(player.duration ?? 0);
+    // The reported duration first: the getter answers 0 on Android until the
+    // clip is prepared, and a seek against 0 is a seek to the start.
+    const duration = progress?.duration || Number(player.duration ?? 0);
     if (!Number.isFinite(duration) || duration <= 0) return false;
     const to = Math.max(0, Math.min(1, ratio)) * duration;
+    // Moved before the await so the bar lands under her finger immediately
+    // rather than on the next status event, which can be 200ms away.
+    progress = { position: to, duration };
     await player.seekTo(to);
     // A seek on a paused clip resumes it: she dragged to a point in order to
     // hear that point.
@@ -426,6 +455,7 @@ export async function seekSpeech(ratio: number): Promise<boolean> {
 export async function restartSpeech(): Promise<boolean> {
   if (!player) return false;
   try {
+    if (progress) progress = { ...progress, position: 0 };
     await player.seekTo(0);
     if (state !== 'playing') {
       player.play();
@@ -511,6 +541,9 @@ function rememberUrl(where: SpeechSource, url: string) {
 export async function stopSpeech(): Promise<void> {
   generation += 1;
   starting = null;
+  // Cleared with the player: a stale duration from the previous answer would
+  // draw the next one's bar at the wrong length before its first status event.
+  progress = null;
   if (player) {
     const dying = player;
     player = null;
@@ -793,6 +826,7 @@ export async function playClip(input: {
     player = next;
     starting = null;
     next.addListener('playbackStatusUpdate', (status) => {
+      if (player === next) noteProgress(status);
       if (status.didJustFinish && player === next) {
         void stopSpeech().finally(() => input.onEnd?.());
       }
@@ -825,6 +859,7 @@ async function playUrl(url: string, input: SpeakInput, token: string): Promise<v
   player = next;
   starting = null;
   next.addListener('playbackStatusUpdate', (status) => {
+    if (player === next) noteProgress(status);
     if (status.didJustFinish && player === next) {
       void stopSpeech().finally(() => input.onEnd?.());
     }

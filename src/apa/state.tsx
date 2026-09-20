@@ -52,6 +52,16 @@ export type ApaTurn = {
    * which was already being stored anyway.
    */
   speechUrl?: string | null;
+  /**
+   * How long the spoken answer is, in seconds, as the server measured it.
+   *
+   * Carried so the player can show the length before the first listen. The
+   * only other source is the audio player, which does not exist until she has
+   * pressed play — so without this the bar could only say how long the answer
+   * was *after* she had heard it, which is the one moment she no longer needs
+   * to know.
+   */
+  speechSeconds?: number | null;
   messageId?: string | null;
   vote?: 'up' | 'down' | null;
   voteReason?: string | null;
@@ -249,6 +259,7 @@ export function ApaProvider({
         suggestions: result.answer.suggestions,
         officer: result.officer,
         speechUrl: speech && speech.mode === 'server' ? speech.url : null,
+        speechSeconds: speech && speech.mode === 'server' ? speech.seconds : null,
         messageId: result.message_id ? String(result.message_id) : null,
         refused: result.refused,
         askedClarification: result.asked_clarification,
