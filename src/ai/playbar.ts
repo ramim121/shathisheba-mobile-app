@@ -7,62 +7,103 @@
  * sees a grey button twice. Out here they have no imports, so
  * `ShathiShebaAdmin/scripts/test-apa.mjs` lifts this file by source and checks
  * it against the spec's own tables.
+ *
+ * Two rules here are the field test's, and deliberately differ from SPEC.md:
+ *
+ *  - The readout counts **up** while playing — "show how many seconds it is
+ *    playing" — rather than down.
+ *  - The length is shown only once the answer has been heard all the way
+ *    through, and is then kept (on the phone and in the database) so it shows
+ *    from then on. Before that the readout rests at 0:00.
  */
 
 export type SpeechPhase = 'idle' | 'loading' | 'playing' | 'paused';
 export type PlaybarView = 'cold' | 'loading' | 'playing' | 'paused' | 'ended';
 
 /**
+ * How long a load of an already-loaded clip may take before the loading state
+ * is shown for it. A clip already on the phone's disk opens in a few tens of
+ * milliseconds, and flashing grey for two frames reads as a glitch; one that
+ * has to be fetched again takes seconds, and showing nothing for that long
+ * reads as a button that ignored the press. So: grey only if it is slow.
+ */
+export const SLOW_LOAD_MS = 150;
+
+/**
  * §4: which of the six states to draw.
  *
- * `loaded` is the latch from §1 — true once this clip has resolved, and never
- * false again. `bookmarked` means the clip was interrupted rather than
- * finished (§8: "paused, not finished — their positions survive").
+ * `loaded` is the latch from §1. `bookmarked` means interrupted rather than
+ * finished (§8). `slowLoad` is true once a load of an already-loaded clip has
+ * taken longer than SLOW_LOAD_MS.
  */
 export function playbarView(o: {
   speech: SpeechPhase;
   loaded: boolean;
   bookmarked: boolean;
+  slowLoad?: boolean;
 }): PlaybarView {
   if (o.speech === 'loading') {
-    // §8 "Load never repeats": a clip already loaded this session goes
-    // straight to playing — the grey state is never shown twice.
-    return o.loaded ? 'playing' : 'loading';
+    // A first load always shows the loading state. A reload shows it only if
+    // it is genuinely taking time — never as a flash.
+    if (!o.loaded) return 'loading';
+    return o.slowLoad ? 'loading' : 'playing';
   }
   if (o.speech === 'playing') return 'playing';
   if (o.speech === 'paused' || o.bookmarked) return 'paused';
   return o.loaded ? 'ended' : 'cold';
 }
 
-/** §7: `m:ss`, rounded up, so 0.4s left reads 0:01 and 0:00 never comes early. */
-export function playbarClock(seconds: number): string {
-  const s = Math.max(0, Math.ceil(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+/** Whole seconds as `m:ss`. `mode` decides how a fraction is treated. */
+export function playbarClock(seconds: number, mode: 'floor' | 'round' = 'floor'): string {
+  const whole = Math.max(0, mode === 'round' ? Math.round(seconds) : Math.floor(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
 /**
- * §7 readout. Not loaded → 0:00, because the duration is not known and is
- * deliberately not guessed. Loaded, at the start and not playing → the full
- * length. Otherwise the time *remaining*, counting down.
+ * The readout.
+ *
+ * Playing or paused: the seconds heard so far, counting up (floored, so it
+ * ticks to 0:01 after one full second, not at half a second). At rest: the
+ * answer's length if it has been heard in full, otherwise 0:00. During a drag:
+ * the position under her finger.
  */
 export function playbarReadout(o: {
   view: PlaybarView;
-  loaded: boolean;
   failed: boolean;
+  /** Seconds played so far. */
+  elapsed: number;
+  /** The length, once it has been heard in full; null before. */
+  heardSeconds: number | null;
+  /** The clip's length as far as it is known right now, for a drag. */
   duration: number;
-  progress: number;
-  /** Where her finger is during a drag, if it is down. */
   drag?: number | null;
 }): string {
   if (o.failed) return '--:--';
-  if (!o.loaded) return '0:00';
   if (o.drag !== null && o.drag !== undefined && o.duration > 0) {
-    return playbarClock(o.duration * (1 - o.drag));
+    return playbarClock(o.drag * o.duration);
   }
-  if (o.view === 'ended' || (o.progress === 0 && o.view !== 'playing')) {
-    return playbarClock(o.duration);
-  }
-  return playbarClock(o.duration * (1 - o.progress));
+  if (o.view === 'playing' || o.view === 'paused') return playbarClock(o.elapsed);
+  if (o.view === 'loading') return '0:00';
+  return o.heardSeconds && o.heardSeconds > 0 ? playbarClock(o.heardSeconds, 'round') : '0:00';
+}
+
+/** Whether the readout is drawn in the loaded colour rather than the cold one. */
+export function readoutIsLive(o: { view: PlaybarView; failed: boolean; heardSeconds: number | null }): boolean {
+  if (o.failed) return false;
+  if (o.view === 'playing' || o.view === 'paused') return true;
+  if (o.view === 'loading' || o.view === 'cold') return false;
+  return Boolean(o.heardSeconds && o.heardSeconds > 0);
+}
+
+/**
+ * Whether a playback that just ended counts as heard in full.
+ *
+ * Only a clip that reached its end by itself. A pause, an interruption by
+ * another answer, leaving the screen, or starting a recording all end in
+ * "stopped" and must not record a length.
+ */
+export function heardInFull(ending: 'finished' | 'stopped' | null): boolean {
+  return ending === 'finished';
 }
 
 export type PlayAction = 'ignore' | 'load' | 'pause' | 'resume' | 'resume-bookmark' | 'replay';
@@ -74,6 +115,7 @@ export function tapPlay(o: {
   bookmarked: boolean;
 }): PlayAction {
   if (o.view === 'loading') return 'ignore';          // the button is inert
+  if (o.speech === 'loading') return 'ignore';        // a fast reload is still in flight
   if (o.speech === 'playing') return 'pause';          // keep progress
   if (o.speech === 'paused') return 'resume';
   if (o.bookmarked) return 'resume-bookmark';          // interrupted: from where it was
@@ -89,7 +131,7 @@ export type SeekAction = 'queue' | 'seek' | 'load-from';
  */
 export function tapWaveform(o: { view: PlaybarView; speech: SpeechPhase }): SeekAction {
   // During loading the point is remembered and applied when it resolves.
-  if (o.view === 'loading') return 'queue';
+  if (o.view === 'loading' || o.speech === 'loading') return 'queue';
   // A live clip seeks in place (and a paused one resumes).
   if (o.speech === 'playing' || o.speech === 'paused') return 'seek';
   // Cold, finished or bookmarked: start it, from here.

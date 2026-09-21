@@ -156,6 +156,17 @@ export const styles = StyleSheet.create({
   faqQuestion: { color: colors.ink, fontSize: 15, fontWeight: '700', lineHeight: 21 },
   faqAnswer: { color: colors.muted, fontSize: 13.5, lineHeight: 20, marginTop: 8 },
   loaderOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
+  // The slow-request pill: under the header, centred, never over the content.
+  loaderToastWrap: {
+    position: 'absolute', left: 0, right: 0, top: androidStatusBarInset + 84,
+    alignItems: 'center', zIndex: 1000,
+  },
+  loaderToast: {
+    width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.97)', borderWidth: 1, borderColor: colors.line,
+    shadowColor: '#2B0B1E', shadowOpacity: 0.12, shadowRadius: 10, shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
   loaderCard: { width: 76, height: 76, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.96)', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 8, borderWidth: 1, borderColor: colors.line },
   otpResend: { color: colors.maroon, fontSize: 14, fontWeight: '700', textAlign: 'center', marginTop: 14 },
   otpTimer: { color: colors.muted, fontSize: 13, fontWeight: '600', textAlign: 'center', marginTop: 10 },
@@ -478,6 +489,12 @@ export const styles = StyleSheet.create({
   navIconWrapActive: {
     backgroundColor: 'rgba(255,255,255,0.22)',
     borderColor: 'rgba(255,255,255,0.30)',
+  },
+  // The animated highlight behind the active icon (NavTab). Same colours as
+  // navIconWrapActive, as an overlay whose border never changes.
+  navPill: {
+    position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.22)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.30)',
   },
   navIcon: { color: 'rgba(255,255,255,0.85)', fontSize: 23, lineHeight: 28, textAlign: 'center' },
   navIconActive: { color: 'white' },

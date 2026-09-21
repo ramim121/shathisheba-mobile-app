@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
@@ -364,8 +365,83 @@ let player: AudioPlayer | null = null;
 export type ClipMeta = { seconds: number | null; peaks: number[] | null };
 const clipMetas = new Map<string, ClipMeta>();
 
+/**
+ * Lengths heard in full, per clip.
+ *
+ * Answers keep theirs on the message (and in the database). This covers the
+ * clips with no message to keep it on — the greeting — which otherwise went
+ * back to 0:00 on every restart even though she had heard it to the end.
+ */
+const heardLengths = new Map<string, number>();
+
+const META_KEY = 'shathi.speech.meta.v1';
+type StoredMeta = Record<string, { s?: number | null; p?: number[] | null; h?: number | null }>;
+
+/** Bumped whenever the stored clip information changes, so bars redraw. */
+let metaVersion = 0;
+const metaListeners = new Set<() => void>();
+function bumpMeta() {
+  metaVersion += 1;
+  for (const fn of metaListeners) {
+    try { fn(); } catch { /* a listener must not break the store */ }
+  }
+}
+
+function saveMeta() {
+  const out: StoredMeta = {};
+  const tokens = new Set([...clipMetas.keys(), ...heardLengths.keys()]);
+  for (const t of tokens) {
+    const m = clipMetas.get(t);
+    out[t] = { s: m?.seconds ?? null, p: m?.peaks ?? null, h: heardLengths.get(t) ?? null };
+  }
+  // Bounded, oldest first: two hundred is far more than the sixty turns kept.
+  const keys = Object.keys(out);
+  for (const k of keys.slice(0, Math.max(0, keys.length - 200))) delete out[k];
+  AsyncStorage.setItem(META_KEY, JSON.stringify(out)).catch(() => undefined);
+}
+
+async function loadMeta() {
+  try {
+    const raw = await AsyncStorage.getItem(META_KEY);
+    if (!raw) return;
+    const stored = JSON.parse(raw) as StoredMeta;
+    for (const [t, v] of Object.entries(stored)) {
+      if (!clipMetas.has(t) && (v.s || v.p)) clipMetas.set(t, { seconds: v.s ?? null, peaks: v.p ?? null });
+      if (!heardLengths.has(t) && v.h && v.h > 0) heardLengths.set(t, v.h);
+    }
+    bumpMeta();
+  } catch { /* nothing stored, or unreadable: start empty */ }
+}
+
 export function clipMeta(token: string): ClipMeta | null {
   return clipMetas.get(token) ?? null;
+}
+
+function rememberMeta(token: string, meta: ClipMeta) {
+  clipMetas.set(token, meta);
+  saveMeta();
+  bumpMeta();
+}
+
+/** A clip was heard to its end: keep its length, across restarts. */
+export function rememberHeard(token: string, seconds: number) {
+  if (!(seconds > 0)) return;
+  heardLengths.set(token, seconds);
+  saveMeta();
+  bumpMeta();
+}
+
+/**
+ * What is known about one clip, for the bar that draws it. Redraws when that
+ * changes — including when it finishes loading from storage after launch.
+ */
+export function useClipInfo(token: string): { meta: ClipMeta | null; heard: number | null } {
+  useSyncExternalStore(
+    (notify) => { metaListeners.add(notify); return () => { metaListeners.delete(notify); }; },
+    () => metaVersion,
+    () => 0,
+  );
+  return { meta: clipMetas.get(token) ?? null, heard: heardLengths.get(token) ?? null };
 }
 
 /**
@@ -514,7 +590,15 @@ export function onSpeechChange(fn: Listener): () => void {
   return () => { listeners.delete(fn); };
 }
 
+/** When the current state began, in ms since epoch. */
+let stateSince = Date.now();
+
+export function speechSince(): number {
+  return stateSince;
+}
+
 function announce(token: string | null, next: SpeechState) {
+  if (token !== playingToken || next !== state) stateSince = Date.now();
   playingToken = token;
   state = next;
   for (const fn of listeners) {
@@ -530,6 +614,24 @@ export function speechState(token?: string): SpeechState {
   if (!token) return state;
   if (starting === token && state === 'idle') return 'loading';
   return playingToken === token ? state : 'idle';
+}
+
+/**
+ * The live state of one clip, for a component that draws it.
+ *
+ * Subscribes to the speech layer directly rather than receiving the state as
+ * a prop. For five rounds the playbar was handed its state through the chat's
+ * context, whose memoised value left `speakingKey` and `speakingState` out of
+ * its dependency list — so every consumer was told "idle" for ever, and the
+ * bar never drew loading, never showed pause and never moved, however it was
+ * written. A hook reading the source cannot be starved by a memo in between.
+ */
+export function useSpeechFor(token: string): SpeechState {
+  return useSyncExternalStore(
+    (notify) => onSpeechChange(() => notify()),
+    () => speechState(token),
+    () => 'idle' as SpeechState,
+  );
 }
 
 export function isSpeaking(token?: string): boolean {
@@ -554,6 +656,7 @@ const URL_MEMO_KEY = 'shathi.speech.urls.v1';
 let urlMemo: Record<string, string> | null = null;
 
 export async function primeSpeechUrls(): Promise<void> {
+  void loadMeta();
   if (urlMemo) return;
   try {
     const raw = await AsyncStorage.getItem(URL_MEMO_KEY);
@@ -580,7 +683,19 @@ function rememberUrl(where: SpeechSource, url: string) {
 }
 
 /** Stop whatever is speaking, on either path. Safe to call when nothing is. */
-export async function stopSpeech(): Promise<void> {
+/**
+ * Tear down whatever is playing, synchronously.
+ *
+ * Split out of stopSpeech because the press that starts a new clip must be
+ * able to announce "loading" on the same tick as the tap. stopSpeech ends by
+ * awaiting the device engine's `Speech.stop()`, and that call can take a long
+ * time to answer — measured on an emulator with no engine bound, about
+ * twenty-five seconds; on a phone, however long its engine takes to wake. For
+ * all of that time the playbar sat in its cold state looking like a press that
+ * had been ignored, and then jumped straight to playing: the loading state
+ * existed and was never on screen.
+ */
+function release() {
   // Whatever was going and did not finish by itself was stopped.
   if (playingToken && !endings.has(playingToken)) endings.set(playingToken, 'stopped');
   generation += 1;
@@ -594,6 +709,10 @@ export async function stopSpeech(): Promise<void> {
     try { dying.pause(); } catch { /* already stopped */ }
     try { dying.remove(); } catch { /* already released */ }
   }
+}
+
+export async function stopSpeech(): Promise<void> {
+  release();
   try { await Speech.stop(); } catch { /* nothing was speaking */ }
   if (playingToken !== null || state !== 'idle') announce(null, 'idle');
 }
@@ -674,19 +793,22 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
     return 'device';
   }
 
-  await stopSpeech();
-
   const body = speakable(input.text);
   if (!body) {
     input.onEnd?.();
     return 'device';
   }
 
-  // Announced before any await, so the button shows a spinner for the whole
-  // wait rather than staying idle until audio actually starts.
+  // Announced before any await — really, this time. The previous clip is torn
+  // down synchronously and the device engine is told to stop in the
+  // background, so the loading state is on screen on the same tick as the tap
+  // however long anything after it takes. (This used to `await stopSpeech()`
+  // first, whose last step waits on the device engine; see release().)
+  release();
   starting = token;
   endings.delete(token);
   announce(token, 'loading');
+  Speech.stop().catch(() => undefined);
   input.onStart?.();
 
   // Gemini's voice first when that is the configured mode and the caller gave
@@ -838,7 +960,7 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
       seconds: result.seconds ?? null,
       peaks: Array.isArray(result.peaks) && result.peaks.length ? result.peaks : null,
     };
-    clipMetas.set(token, meta);
+    rememberMeta(token, meta);
     input.onClip?.(meta);
     await playUrl(result.url, input, token);
   } catch (error) {
@@ -874,10 +996,14 @@ export async function playClip(input: {
     input.onEnd?.();
     return;
   }
-  await stopSpeech();
 
+  // Synchronous, for the same reason as in speak(): the loading state belongs
+  // on the tap, not after the device engine has finished answering.
+  release();
   starting = token;
+  endings.delete(token);
   announce(token, 'loading');
+  Speech.stop().catch(() => undefined);
   const mine = generation;
   try {
     const next = createAudioPlayer({ uri: input.uri });
@@ -890,6 +1016,7 @@ export async function playClip(input: {
     next.addListener('playbackStatusUpdate', (status) => {
       if (player === next) noteProgress(status);
       if (status.didJustFinish && player === next) {
+        endings.set(token, 'finished');
         void stopSpeech().finally(() => input.onEnd?.());
       }
     });

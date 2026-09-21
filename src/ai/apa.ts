@@ -281,6 +281,19 @@ export async function clearApaHistory() {
   await apiRequest('app/apa/history/clear', { method: 'POST', body: '{}' });
 }
 
+/**
+ * She heard this answer to the end: keep its length, so it shows from now on.
+ * Fire-and-forget — a lost request costs a readout that says 0:00 until the
+ * next full listen, which is not worth an error on screen.
+ */
+export async function recordApaListen(messageId: string | number, seconds: number) {
+  await apiRequest('app/apa/listened', {
+    method: 'POST',
+    body: JSON.stringify({ message_id: messageId, seconds: Math.round(seconds * 100) / 100 }),
+    silent: true,
+  });
+}
+
 export async function sendApaFeedback(messageId: string | number, vote: 'up' | 'down', reason?: string) {
   await apiRequest('app/apa/feedback', {
     method: 'POST',

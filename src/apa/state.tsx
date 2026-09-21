@@ -1,10 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { LayoutAnimation } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   askApaPhoto, askApaText, askApaVoice, friendlyAiError, getApaEntitlement, getApaSpeechConfig,
   sendApaFeedback,
-  type ApaAnswer, type ApaEntitlement, type ApaOfficer, type ApaSource,
-} from '../ai/apa';
+  type ApaAnswer, type ApaEntitlement, type ApaOfficer, type ApaSource, recordApaListen } from '../ai/apa';
 import {
   INTRO_SOURCE, onSpeechChange, playClip, primeDeviceVoice, primeIntroAudio, speak, stopSpeech,
   type SpeechState,
@@ -101,6 +101,8 @@ type ApaValue = {
   speakingKey: string | null;
   /** What that button is doing — idle, loading, playing or paused. */
   speakingState: SpeechState;
+  /** An answer was heard to its end, with its length. */
+  listened: (turn: ApaTurn, seconds: number) => void;
   vote: (turn: ApaTurn, vote: 'up' | 'down', reason?: string) => void;
   clear: () => void;
   navigate: (screen: Screen) => void;
@@ -250,6 +252,11 @@ export function ApaProvider({
   /** Everything an answer changes, in one place so the three paths agree. */
   const land = useCallback(
     (apaKey: string, result: ApaAnswer, autoplay: boolean) => {
+      // The skeleton is replaced by an answer several times its height, then
+      // its pills. As one layout change, the bubble grows into place and the
+      // thread below it moves with it, instead of everything jumping on one
+      // frame.
+      LayoutAnimation.configureNext(LayoutAnimation.create(260, 'easeInEaseOut', 'opacity'));
       setConversationId(result.conversation_id ?? null);
       setEntitlement(result.entitlement);
       const speech = result.speech;
@@ -430,7 +437,7 @@ export function ApaProvider({
           // Kept with the turn, so the real waveform and length survive a
           // restart: the playbar spec says a clip never shows a loading state
           // twice, and neither should its shape change back.
-          onClip: (meta) => patch(turn.key, { speechSeconds: meta.seconds, speechPeaks: meta.peaks }),
+          onClip: (meta) => patch(turn.key, { speechPeaks: meta.peaks }),
         }).catch(() => undefined);
         return;
       }
@@ -443,6 +450,17 @@ export function ApaProvider({
     },
     [entitlement, lang, patch]
   );
+
+  /**
+   * An answer was heard to its end. Its length is kept on the message and in
+   * the database, so the readout shows it from now on — on this phone and on
+   * any other.
+   */
+  const listened = useCallback((turn: ApaTurn, seconds: number) => {
+    if (!(seconds > 0)) return;
+    patch(turn.key, { speechSeconds: seconds });
+    if (turn.messageId) recordApaListen(turn.messageId, seconds).catch(() => undefined);
+  }, [patch]);
 
   const vote = useCallback(
     (turn: ApaTurn, next: 'up' | 'down', reason?: string) => {
@@ -485,9 +503,18 @@ export function ApaProvider({
     () => ({
       entitlement, turns, busy, wall, conversationId, error, reload,
       askText, askVoice, askPhoto, replay, retryTurn, speakingKey, speakingState, vote, clear,
-      navigate: onNavigate, recording, setRecording, justUnlocked, dismissUnlocked,
+      listened, navigate: onNavigate, recording, setRecording, justUnlocked, dismissUnlocked,
     }),
-    [entitlement, turns, busy, wall, conversationId, error, reload, askText, askVoice, askPhoto, replay, vote, clear, onNavigate, recording, justUnlocked, dismissUnlocked]
+    // Every field of the value, and nothing else. `speakingKey` and
+    // `speakingState` were missing from this list from the first commit, so
+    // the context handed every consumer the state as it was when something
+    // else last changed — which for the playbar meant "idle", always. That one
+    // omission is why read-aloud never showed loading, pause or progress.
+    [
+      entitlement, turns, busy, wall, conversationId, error, reload,
+      askText, askVoice, askPhoto, replay, retryTurn, speakingKey, speakingState,
+      vote, clear, listened, onNavigate, recording, setRecording, justUnlocked, dismissUnlocked,
+    ]
   );
 
   return <ApaContext.Provider value={value}>{children}</ApaContext.Provider>;

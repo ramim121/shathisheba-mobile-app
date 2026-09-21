@@ -10,7 +10,7 @@ import { colors } from '../theme/colors';
 import { androidNavigationInset, styles } from '../theme/styles';
 import { maySend, releaseIsEcho, releaseLatches } from './voice';
 import {
-  AppButton, Header, MarkdownText, PressableScale, useLanguage, usePulse, useReducedMotion,
+  AppButton, Appear, Header, MarkdownText, PressableScale, useLanguage, usePulse, useReducedMotion,
 } from '../theme/primitives';
 import { Ionicons } from '@expo/vector-icons';
 import { FailureCard } from '../ai/FailureCard';
@@ -120,7 +120,7 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
   const { tx, lang } = useLanguage();
   const {
     entitlement, turns, busy, wall, error, askText, clear, replay, retryTurn,
-    speakingKey, speakingState, vote, navigate,
+    speakingKey, speakingState, vote, navigate, listened,
   } = useApa();
   const scroller = useRef<ScrollView>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -253,7 +253,15 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
             <Text style={[apa.headPillText, apa.headPillSpentText]}>{tx('প্রশ্ন শেষ', 'Trial over')}</Text>
           </View>
         ) : null}
-        <Pressable onPress={() => setMenuOpen((v) => !v)} style={apa.headKebab} hitSlop={8} accessibilityLabel={tx('আরও', 'More')}>
+        <Pressable
+          onPress={() => {
+            LayoutAnimation.configureNext(LayoutAnimation.create(220, 'easeInEaseOut', 'opacity'));
+            setMenuOpen((v) => !v);
+          }}
+          style={apa.headKebab}
+          hitSlop={8}
+          accessibilityLabel={tx('আরও', 'More')}
+        >
           <Text style={apa.headKebabText}>⋮</Text>
         </Pressable>
       </View>
@@ -357,8 +365,8 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
 
         {turns.map((turn) =>
           turn.role === 'user' ? (
+            <Appear key={turn.key}>
             <UserBubble
-              key={turn.key}
               turn={turn}
               playing={speakingKey === turn.key && speakingState === 'playing'}
               loading={speakingKey === turn.key && speakingState === 'loading'}
@@ -367,12 +375,14 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
               lang={lang}
               tx={tx}
             />
+            </Appear>
           ) : (
+            <Appear key={turn.key}>
             <ApaBubble
-              key={turn.key}
               turn={turn}
               playing={speakingKey === turn.key}
               onReplay={() => replay(turn)}
+              onHeard={(seconds) => listened(turn, seconds)}
               onRetry={() => retryTurn(turn)}
               onSuggestion={askText}
               onVote={(v, reason) => vote(turn, v, reason)}
@@ -380,6 +390,7 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
               lang={lang}
               tx={tx}
             />
+            </Appear>
           )
         )}
 
@@ -496,7 +507,7 @@ function UserBubble({
 /* --- her answer ---------------------------------------------------------- */
 
 function ApaBubble({
-  turn, playing = false, speechState = 'idle', onReplay, onRetry, onSuggestion, onVote, onAction, lang, tx,
+  turn, playing = false, speechState = 'idle', onReplay, onHeard, onRetry, onSuggestion, onVote, onAction, lang, tx,
 }: {
   turn: ApaTurn;
   /** True only for the one bubble actually being read out. */
@@ -507,6 +518,8 @@ function ApaBubble({
    */
   speechState?: SpeechState;
   onReplay: () => void;
+  /** The answer was heard to its end, with its length. */
+  onHeard?: (seconds: number) => void;
   /** Absent where there is nothing to resend — the card then only explains. */
   onRetry?: () => void;
   onSuggestion: (text: string) => void;
@@ -612,12 +625,15 @@ function ApaBubble({
             half heard. SpeechBar is all three. */}
         {turn.text ? (
           <View style={apa.answerFoot}>
+            {/* The bar reads its own state from the speech layer. It used to
+                be handed `speechState` from here, through a context whose memo
+                never updated it — which is why it never left "idle". */}
             <SpeechBar
-              state={speechState}
               onToggle={onReplay}
               seed={turn.key}
-              seconds={turn.speechSeconds ?? null}
+              heardSeconds={turn.speechSeconds ?? null}
               peaks={turn.speechPeaks ?? null}
+              onHeard={onHeard}
             />
 
             {/* The "Ask next" label and the two thumbs share one line.

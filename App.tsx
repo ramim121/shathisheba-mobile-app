@@ -409,18 +409,61 @@ function RefreshScroll({ children, style, contentContainerStyle }: { children: R
   );
 }
 
+/**
+ * The app-wide "something is loading" signal.
+ *
+ * It used to be a 76px card in the middle of the screen, shown for every
+ * request the moment it started — so every tab switch flashed a loader over
+ * an empty page even when the data arrived in a tenth of a second, which is
+ * most of what made moving around the app feel jumpy rather than smooth.
+ *
+ * Now nothing is shown for a request that finishes within 400ms, which is
+ * most of them. A slower one gets a small brand pill that fades in near the
+ * top, out of the way of the content arriving underneath it, and fades out
+ * when the last request settles.
+ */
 function GlobalLoader() {
   const [active, setActive] = useState(loadingStore.active);
   useEffect(() => loadingStore.subscribe(setActive), []);
-  if (active <= 0) return null;
+  const busy = active > 0;
+
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (!busy) { setShown(false); return; }
+    const timer = setTimeout(() => setShown(true), 400);
+    return () => clearTimeout(timer);
+  }, [busy]);
+
+  const fade = useRef(new Animated.Value(0)).current;
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    if (shown) setMounted(true);
+    Animated.timing(fade, {
+      toValue: shown ? 1 : 0,
+      duration: shown ? 180 : 140,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start(({ finished }) => { if (finished && !shown) setMounted(false); });
+  }, [shown, fade]);
+
+  if (!mounted) return null;
   return (
-    <View pointerEvents="none" style={styles.loaderOverlay}>
-      <View style={styles.loaderCard}>
-        {/* The brand mark rather than the platform spinner: this is the
-            first thing anyone sees on a cold start, and a grey circle is
-            the one moment the app looks like every other app. */}
-        <BrandLoader size={44} />
-      </View>
+    <View pointerEvents="none" style={styles.loaderToastWrap}>
+      <Animated.View
+        style={[
+          styles.loaderToast,
+          {
+            opacity: fade,
+            transform: [
+              { translateY: fade.interpolate({ inputRange: [0, 1], outputRange: [-10, 0] }) },
+              { scale: fade.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) },
+            ],
+          },
+        ]}
+      >
+        {/* The brand mark rather than the platform spinner. */}
+        <BrandLoader size={22} />
+      </Animated.View>
     </View>
   );
 }
@@ -936,10 +979,12 @@ function ScreenFade({ screen, children }: { screen: Screen; children: React.Reac
   useEffect(() => {
     if (reduce) { progress.setValue(1); return; }
     progress.setValue(0);
+    // 240ms with a cubic ease-out: long enough to read as one screen settling
+    // in over the last, short enough that nobody waits for it.
     Animated.timing(progress, {
       toValue: 1,
-      duration: 180,
-      easing: Easing.out(Easing.quad),
+      duration: 240,
+      easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start();
   }, [progress, reduce, screen]);
@@ -951,7 +996,7 @@ function ScreenFade({ screen, children }: { screen: Screen; children: React.Reac
       style={{
         flex: 1,
         opacity: progress,
-        transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }],
+        transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) }],
       }}
     >
       {children}
@@ -1058,26 +1103,79 @@ function Shell({
       {keyboardVisible ? null : (
         <View style={styles.navBar}>
           {tabs.map((tab) => (
-            <Pressable
+            <NavTab
               key={tab.id}
+              active={activeTab === tab.id}
+              icon={tab.icon}
+              label={tab.label}
               onPress={() => setScreen(tab.screen)}
-              style={({ pressed }) => [styles.navItem, pressed && { opacity: 0.7 }]}
-              accessibilityRole="tab"
-              accessibilityState={{ selected: activeTab === tab.id }}
-            >
-              <View style={[styles.navIconWrap, activeTab === tab.id && styles.navIconWrapActive]}>
-                <Ionicons
-                  name={activeTab === tab.id ? tab.icon : (`${tab.icon}-outline` as keyof typeof Ionicons.glyphMap)}
-                  size={23}
-                  color={activeTab === tab.id ? '#FFFFFF' : 'rgba(255,255,255,0.78)'}
-                />
-              </View>
-              <Text style={[styles.navLabel, activeTab === tab.id && styles.navLabelActive]}>{tab.label}</Text>
-            </Pressable>
+            />
           ))}
         </View>
       )}
     </View>
+  );
+}
+
+/**
+ * One bottom-nav tab, whose highlight springs into place.
+ *
+ * The pill used to appear and vanish between frames, so switching tabs was a
+ * flicker. Now the new tab's pill grows in from the middle while the old one
+ * fades, which reads as the selection moving rather than being redrawn. The
+ * pill is an overlay whose border and radius never change — only its opacity
+ * and width do — because adding a border to a view after first render drops
+ * its radius on the new architecture (see styles.navIconWrap).
+ */
+function NavTab({
+  active, icon, label, onPress,
+}: {
+  active: boolean;
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
+  const reduce = useReducedMotion();
+  const on = useRef(new Animated.Value(active ? 1 : 0)).current;
+  const press = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (reduce) { on.setValue(active ? 1 : 0); return; }
+    Animated.spring(on, { toValue: active ? 1 : 0, useNativeDriver: true, speed: 16, bounciness: 7 }).start();
+  }, [active, reduce, on]);
+
+  const spring = (to: number) =>
+    Animated.spring(press, { toValue: to, useNativeDriver: true, speed: 40, bounciness: 6 }).start();
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={() => { if (!reduce) spring(0.9); }}
+      onPressOut={() => { if (!reduce) spring(1); }}
+      style={styles.navItem}
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+      accessibilityLabel={label}
+    >
+      <Animated.View style={[styles.navIconWrap, { transform: [{ scale: press }] }]}>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.navPill,
+            {
+              opacity: on,
+              transform: [{ scaleX: on.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }) }],
+            },
+          ]}
+        />
+        <Ionicons
+          name={active ? icon : (`${icon}-outline` as keyof typeof Ionicons.glyphMap)}
+          size={23}
+          color={active ? '#FFFFFF' : 'rgba(255,255,255,0.78)'}
+        />
+      </Animated.View>
+      <Text style={[styles.navLabel, active && styles.navLabelActive]}>{label}</Text>
+    </Pressable>
   );
 }
 

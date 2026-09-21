@@ -42,20 +42,23 @@ export function AppButton({
   variant?: 'primary' | 'gold' | 'outline';
   disabled?: boolean;
 }) {
+  const press = usePressSpring(0.97);
   return (
-    <Pressable
+    <AnimatedPressable
       onPress={onPress}
       disabled={disabled}
-      style={({ pressed }) => [
+      onPressIn={disabled ? undefined : press.in}
+      onPressOut={press.out}
+      style={[
         styles.button,
         variant === 'gold' && styles.goldButton,
         variant === 'outline' && styles.outlineButton,
         disabled && styles.buttonDisabled,
-        pressed && !disabled && styles.pressed,
+        { transform: [{ scale: press.value }] },
       ]}
     >
       <Text style={[styles.buttonText, variant === 'outline' && styles.outlineButtonText, disabled && styles.buttonTextDisabled]}>{title}</Text>
-    </Pressable>
+    </AnimatedPressable>
   );
 }
 
@@ -136,11 +139,133 @@ export function MarkdownText({
   );
 }
 
+/**
+ * A card that arrives, and answers a press.
+ *
+ * Eighty-eight screens' worth of content is built from this one component, so
+ * this is where the app's motion lives. On mount it rises a few pixels and
+ * fades in; cards mounted together arrive a beat apart (see useEntrance), so a
+ * screen of them reads as settling into place rather than appearing all at
+ * once. A pressable card springs down under the finger. Everything runs on the
+ * native thread, and reduce-motion drops it.
+ *
+ * The style stays on the one element that is laid out, animated or not: a
+ * card used as `flex: 1` in a row must keep that on the element the row sees.
+ */
 export function Card({ children, style, onPress }: { children: React.ReactNode; style?: object; onPress?: () => void }) {
+  const enter = useEntrance();
+  const press = usePressSpring(0.98);
+  const motion = {
+    opacity: enter,
+    transform: [
+      { translateY: enter.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) },
+      { scale: press.value },
+    ],
+  };
   if (onPress) {
-    return <Pressable onPress={onPress} style={({ pressed }) => [styles.card, style, pressed && styles.pressed]}>{children}</Pressable>;
+    return (
+      <AnimatedPressable
+        onPress={onPress}
+        onPressIn={press.in}
+        onPressOut={press.out}
+        style={[styles.card, style, motion]}
+      >
+        {children}
+      </AnimatedPressable>
+    );
   }
-  return <View style={[styles.card, style]}>{children}</View>;
+  return <Animated.View style={[styles.card, style, motion]}>{children}</Animated.View>;
+}
+
+/* ---------------------------------------------------------------------------
+   Motion building blocks
+   --------------------------------------------------------------------------- */
+
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+/**
+ * When the current burst of mounting began, and how many have joined it.
+ *
+ * A screen mounts its cards in one render. Each asks for a delay here: the
+ * first gets none, the next 35ms, and so on, capped at eight so a long list
+ * is fully in within about a quarter of a second. A mount more than 250ms
+ * after the last one starts a new burst — so a card added later (an answer
+ * arriving, a list refreshing) arrives on its own, without waiting.
+ */
+let burstAt = 0;
+let burstSize = 0;
+function nextEntranceDelay(): number {
+  const now = Date.now();
+  if (now - burstAt > 250) {
+    burstAt = now;
+    burstSize = 0;
+  }
+  const delay = Math.min(burstSize, 8) * 35;
+  burstSize += 1;
+  return delay;
+}
+
+/**
+ * 0 → 1 once, on mount: rise-and-fade for anything that should arrive rather
+ * than appear. Returns the value; the caller decides what it drives.
+ */
+export function useEntrance(enabled = true): Animated.Value {
+  const reduce = useReducedMotion();
+  const value = useRef(new Animated.Value(enabled ? 0 : 1)).current;
+  useEffect(() => {
+    if (!enabled) return;
+    const anim = Animated.timing(value, {
+      toValue: 1,
+      duration: 280,
+      delay: nextEntranceDelay(),
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [enabled, value]);
+  // Reduce-motion is read asynchronously; the moment it is known, arrive now.
+  useEffect(() => { if (reduce) value.setValue(1); }, [reduce, value]);
+  return value;
+}
+
+/** The same rise-and-fade, as a wrapper, for things that are not Cards. */
+export function Appear({
+  children,
+  style,
+  enabled = true,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+  enabled?: boolean;
+}) {
+  const enter = useEntrance(enabled);
+  return (
+    <Animated.View
+      style={[
+        style,
+        {
+          opacity: enter,
+          transform: [{ translateY: enter.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+/** A spring towards `to` on press-in and back on release. */
+function usePressSpring(to: number) {
+  const reduce = useReducedMotion();
+  const value = useRef(new Animated.Value(1)).current;
+  const spring = (target: number) =>
+    Animated.spring(value, { toValue: target, useNativeDriver: true, speed: 40, bounciness: 5 }).start();
+  return {
+    value,
+    in: () => { if (!reduce) spring(to); },
+    out: () => { if (!reduce) spring(1); },
+  };
 }
 
 /* ---------------------------------------------------------------------------

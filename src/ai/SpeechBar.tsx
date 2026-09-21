@@ -7,36 +7,42 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useLanguage, useReducedMotion } from '../theme/primitives';
 import {
-  clipMeta, pauseSpeech, queueStart, resumeSpeech, seekSpeech, speakingToken, speechEnding,
-  speechProgress, type SpeechState,
+  pauseSpeech, queueStart, rememberHeard, resumeSpeech, seekSpeech, speakingToken, speechEnding,
+  speechProgress, useClipInfo, useSpeechFor,
 } from './speech';
 import {
-  playbarReadout, playbarView, seekRatio, tapPlay as decidePlay, tapWaveform as decideSeek,
-  type PlaybarView,
+  heardInFull, playbarReadout, playbarView, readoutIsLive, seekRatio, SLOW_LOAD_MS,
+  tapPlay as decidePlay, tapWaveform as decideSeek,
 } from './playbar';
 
 /*
  * The voice playbar, built to the handoff in
- * shathiapa-design/Audio Playback Bar Artbook/SPEC.md.
+ * shathiapa-design/Audio Playback Bar Artbook/SPEC.md, with the field test's
+ * two amendments (see src/ai/playbar.ts): the readout counts up, and the
+ * length is kept only once an answer has been heard in full.
  *
- * Section numbers in the comments below refer to that document. Where this
- * departs from it, the comment says so and says why.
+ * WHY IT NEVER WORKED BEFORE. For five rounds this component was handed its
+ * state as a prop, through the chat's context — and that context's memoised
+ * value left `speakingKey` and `speakingState` out of its dependency list. So
+ * every playbar was told "idle" for ever: it never drew loading, never showed
+ * pause, and its progress sampler (which runs only while playing) never ran.
+ * It now reads its own clip's state straight from the speech layer.
  */
 
 /* --- §3 colour tokens, exactly as specified --------------------------------- */
 
 const T = {
-  plumInk: '#5E1D3E',       // play / pause glyph
-  plumFill: '#7C2A52',      // progress fill, loaded readout
-  trackLoaded: '#E0C3D0',   // unplayed bars after load
-  trackCold: '#F1DEE6',     // bars before load
-  trackLoading: '#DDD8DA',  // bars during load
-  trackPeak: '#CDC7CA',     // bar tint at the crest of the loading wave
-  buttonWash: '#F8E7EE',    // button background, enabled
-  buttonDisabled: '#EDEAEC',// button background, loading
-  glyphDisabled: '#B0A3AA', // glyph, loading
-  ring: '#D9C3CE',          // radiating loading rings
-  readoutCold: '#BDAEB5',   // readout before load
+  plumInk: '#5E1D3E',
+  plumFill: '#7C2A52',
+  trackLoaded: '#E0C3D0',
+  trackCold: '#F1DEE6',
+  trackLoading: '#DDD8DA',
+  trackPeak: '#CDC7CA',
+  buttonWash: '#F8E7EE',
+  buttonDisabled: '#EDEAEC',
+  glyphDisabled: '#B0A3AA',
+  ring: '#D9C3CE',
+  readoutCold: '#BDAEB5',
 };
 
 /* --- §2 anatomy ------------------------------------------------------------- */
@@ -44,8 +50,6 @@ const T = {
 const BUTTON = 46;
 const ROW = 44;
 const BARS = 36;
-const SHORT_BARS = 18;
-/** Bar heights span this range inside the 44px row, as the artbook draws them. */
 const MIN_H = 6;
 const MAX_H = 36;
 
@@ -57,37 +61,26 @@ const WAVE_STEP_MS = 32;
 const DARKEN_MS = 420;
 const RESET_FADE_MS = 260;
 const FAIL_MS = 2000;
+/** How often the playing bar samples the player. */
+const SAMPLE_MS = 200;
 
 /* --- session memory (§8) ---------------------------------------------------- */
 
-/**
- * Clips loaded this session. "Load never repeats": once a clip has resolved,
- * its darker track is permanent, and a second press must not show grey again.
- */
+/** Clips loaded this session: their track stays dark (§8 "Load never repeats"). */
 const loadedThisSession = new Set<string>();
-
-/**
- * Where an interrupted clip was. "Starting one clip sends every other to
- * paused, not finished — their positions survive." Our speech layer has one
- * player, so starting another clip tears the first one down; this is what
- * lets its bar come back as a bookmark rather than as a clip that ended.
- */
+/** Interrupted clips and where they were, as a fraction (§8 "One player at a time"). */
 const bookmarks = new Map<string, number>();
-
 /* --- helpers ---------------------------------------------------------------- */
 
 /**
  * A stand-in shape for a clip whose audio does not exist yet.
  *
- * DEPARTURE FROM §2. The spec draws the clip's real envelope in every state,
- * including cold. Here the audio is only synthesised when she presses play —
- * `apa_autoplay_voice` is off because synthesising every answer costs about
- * $0.010 each whether or not anyone listens — so before the first press there
- * is no envelope to draw. This stable per-message shape stands in until then,
- * and the real one replaces it on the same frame the track darkens (§5 C), so
- * the shape changes exactly once, at the moment everything else resolves.
- * After that the real envelope is kept with the message and drawn in every
- * state, as specified.
+ * DEPARTURE FROM §2. The spec draws the real envelope in every state. Audio is
+ * only synthesised when she presses play (autoplay is off: synthesising every
+ * answer costs ~$0.010 whether or not anyone listens), so before the first
+ * press there is no envelope. This stable per-message shape stands in until
+ * then; the real one replaces it on the frame the track darkens, and is kept
+ * with the message after that.
  */
 function standIn(seed: string, bars: number): number[] {
   let h = 2166136261;
@@ -102,20 +95,6 @@ function standIn(seed: string, bars: number): number[] {
   });
 }
 
-/** Down-sample 36 real bars to 18 by taking the louder of each pair. */
-function fold(peaks: number[], bars: number): number[] {
-  if (peaks.length === bars) return peaks;
-  const out: number[] = [];
-  const step = peaks.length / bars;
-  for (let i = 0; i < bars; i += 1) {
-    const from = Math.floor(i * step);
-    const to = Math.max(from + 1, Math.floor((i + 1) * step));
-    out.push(Math.max(...peaks.slice(from, to)));
-  }
-  return out;
-}
-
-/** The gap scales with the room the bubble gives the waveform. */
 function gapFor(width: number): number {
   if (width >= 320) return 6;
   if (width >= 230) return 4;
@@ -126,69 +105,124 @@ function gapFor(width: number): number {
 /* --- the component ---------------------------------------------------------- */
 
 export function SpeechBar({
-  state,
   onToggle,
-  /** This clip's speech token — the turn's key. */
   seed = 'apa',
-  /** Length as the server measured it, kept with the message once known. */
-  seconds = null,
-  /** The real waveform, kept with the message once known. */
+  heardSeconds = null,
   peaks = null,
+  onHeard,
 }: {
-  state: SpeechState;
+  /** Start this clip (load, or replay). Pause and resume are handled here. */
   onToggle: () => void;
+  /** This clip's speech token — the turn's key. */
   seed?: string;
-  seconds?: number | null;
+  /** The answer's length, once it has been heard in full. */
+  heardSeconds?: number | null;
+  /** The real waveform, kept with the message once known. */
   peaks?: number[] | null;
+  /** Called once when the answer has played to its end, with its length. */
+  onHeard?: (seconds: number) => void;
 }) {
   const { tx } = useLanguage();
   const reduce = useReducedMotion();
 
-  // What the server has said about this clip: from the message if it was
-  // loaded in an earlier session, or from this session's speech layer.
-  const meta = clipMeta(seed);
+  // The live state of this clip, from the source.
+  const state = useSpeechFor(seed);
+
+  // Length, waveform and heard-in-full length, persisted across restarts.
+  const info = useClipInfo(seed);
+  const meta = info.meta;
   const realPeaks = peaks ?? meta?.peaks ?? null;
-  const knownSeconds = seconds ?? meta?.seconds ?? null;
+  const heard = heardSeconds ?? info.heard ?? null;
 
-  /* --- §1 state: loaded latches, never goes back ------------------------- */
+  /* --- §1 the loaded latch ------------------------------------------------ */
 
-  const [loaded, setLoaded] = useState(
-    () => loadedThisSession.has(seed) || Boolean(realPeaks && knownSeconds)
-  );
+  const [loaded, setLoaded] = useState(() => loadedThisSession.has(seed) || Boolean(realPeaks));
   useEffect(() => {
     if (state === 'playing' && !loaded) {
       loadedThisSession.add(seed);
       setLoaded(true);
     }
   }, [state, loaded, seed]);
+  // Stored information arrives from storage a moment after launch. A clip whose
+  // real waveform is on record was loaded in an earlier session, so it draws as
+  // loaded (§5 F) rather than cold — but never while a load is in flight.
+  useEffect(() => {
+    if (!loaded && realPeaks && state === 'idle') setLoaded(true);
+  }, [loaded, realPeaks, state]);
+
+  /* --- a reload that is slow enough to show ------------------------------- */
+
+  const [slowLoad, setSlowLoad] = useState(false);
+  useEffect(() => {
+    if (state !== 'loading') { setSlowLoad(false); return; }
+    const timer = setTimeout(() => setSlowLoad(true), SLOW_LOAD_MS);
+    return () => clearTimeout(timer);
+  }, [state]);
+
+  /* --- the clock ------------------------------------------------------------ */
+
+  // Seconds played, run on the wall clock and corrected by the player whenever
+  // it reports. If the player's own figures are late, zero or missing, the
+  // readout and the fill still move — they are never hostage to one source.
+  const clock = useRef({ base: 0, at: 0, running: false });
+  const elapsedNow = () =>
+    clock.current.base + (clock.current.running ? (Date.now() - clock.current.at) / 1000 : 0);
+  const [elapsed, setElapsed] = useState(0);
+  const [duration, setDuration] = useState(meta?.seconds ?? heard ?? 0);
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+  const playerDuration = useRef(0);
 
   /* --- failure, bookmarks and endings (§8) -------------------------------- */
 
   const [failed, setFailed] = useState(false);
   const [bookmark, setBookmark] = useState<number | null>(() => bookmarks.get(seed) ?? null);
   const [endedFade, setEndedFade] = useState(false);
-  const prevState = useRef<SpeechState>(state);
+  const prevState = useRef(state);
   const reachedPlay = useRef(false);
-  const lastP = useRef(0);
 
   useEffect(() => {
     const before = prevState.current;
     prevState.current = state;
 
-    if (state === 'loading') { reachedPlay.current = false; setFailed(false); return; }
-    if (state === 'playing' || state === 'paused') {
-      reachedPlay.current = true;
-      bookmarks.delete(seed);
-      setBookmark(null);
+    if (state === 'loading') {
+      reachedPlay.current = false;
       setFailed(false);
       return;
     }
 
+    if (state === 'playing') {
+      reachedPlay.current = true;
+      bookmarks.delete(seed);
+      setBookmark(null);
+      setFailed(false);
+      if (before === 'paused') {
+        clock.current = { ...clock.current, at: Date.now(), running: true };
+      } else {
+        // A fresh start, a resumed bookmark or a queued seek: the speech layer
+        // has already placed the player, so start the clock where it is.
+        const now = speechProgress();
+        const at = now && now.duration > 0 ? now.position : 0;
+        clock.current = { base: at, at: Date.now(), running: true };
+        if (now && now.duration > 0) playerDuration.current = now.duration;
+      }
+      return;
+    }
+
+    if (state === 'paused') {
+      clock.current = { base: elapsedNow(), at: Date.now(), running: false };
+      setElapsed(clock.current.base);
+      return;
+    }
+
     // state === 'idle' from here.
+    const stoppedAt = elapsedNow();
+    clock.current = { ...clock.current, running: false };
+
     if (before === 'loading' && !reachedPlay.current) {
-      // Loading ended without sound. If another clip took over, that is an
-      // interruption; if nothing did, the fetch failed. §8: rings stop, button
-      // returns to plum, readout "--:--" for two seconds, then back to cold.
+      // Loading ended without sound. Another clip taking over is an
+      // interruption; nothing taking over is a failed fetch. §8: "--:--" for
+      // two seconds, then back to cold.
       const other = speakingToken();
       if (!other || other === seed) {
         setFailed(true);
@@ -199,51 +233,54 @@ export function SpeechBar({
     }
 
     if (before === 'playing' || before === 'paused') {
-      if (speechEnding(seed) === 'finished') {
-        // §5 F: fill fades, clip snaps to 0, readout returns to the length.
+      if (heardInFull(speechEnding(seed))) {
+        // Heard to the end. Keep the length: the player's own measurement if
+        // it gave one, the server's if not, and the wall clock as a last
+        // resort — which after a full play is the length by definition.
+        const length = playerDuration.current || meta?.seconds || stoppedAt;
+        if (length > 0) {
+          rememberHeard(seed, length);
+          onHeard?.(length);
+          setDuration(length);
+        }
         bookmarks.delete(seed);
         setBookmark(null);
         setEndedFade(true);
       } else {
-        // Interrupted — another clip started, she left the screen, or she
-        // began recording. §8: paused, not finished; the position survives.
-        const at = Math.min(0.995, Math.max(0, lastP.current));
+        // Interrupted — another answer started, she left the screen, or she
+        // began recording. Paused, not finished; the position survives.
+        const d = durationRef.current;
+        const at = d > 0 ? Math.min(0.995, Math.max(0, stoppedAt / d)) : 0;
         bookmarks.set(seed, at);
         setBookmark(at);
+        setElapsed(stoppedAt);
       }
     }
-  }, [state, seed]);
+  }, [state, seed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* --- the derived view (§4) ---------------------------------------------- */
 
-  // §4, from src/ai/playbar.ts — tested against the spec's own table.
-  const view: PlaybarView = playbarView({ speech: state, loaded, bookmarked: bookmark !== null });
-
+  const view = playbarView({ speech: state, loaded, bookmarked: bookmark !== null, slowLoad });
   const isLoading = view === 'loading';
   const isPlaying = view === 'playing';
 
   /* --- geometry ------------------------------------------------------------ */
 
   const [width, setWidth] = useState(0);
-  const barCount = knownSeconds !== null && knownSeconds > 0 && knownSeconds < 3 ? SHORT_BARS : BARS;
+  const firstLoad = state === 'loading' && !loaded;
+  const shapePeaks = firstLoad ? null : realPeaks;
   const heights = useMemo(() => {
-    const shape = realPeaks && realPeaks.length ? fold(realPeaks, barCount) : standIn(seed, barCount);
+    const shape = shapePeaks && shapePeaks.length === BARS ? shapePeaks : standIn(seed, BARS);
     return shape.map((v) => Math.round(MIN_H + Math.max(0, Math.min(1, v)) * (MAX_H - MIN_H)));
-  }, [realPeaks, barCount, seed]);
+  }, [shapePeaks, seed]);
   const gap = gapFor(width);
 
-  /* --- progress: one native value, two layers (§7) ------------------------ */
+  /* --- the fill: one native value, two layers ----------------------------- */
 
   const prog = useRef(new Animated.Value(bookmark ?? 0)).current;
   const fillOpacity = useRef(new Animated.Value(1)).current;
   const [p, setP] = useState(bookmark ?? 0);
-  const [duration, setDuration] = useState(knownSeconds ?? 0);
-  useEffect(() => { if (knownSeconds && knownSeconds > 0) setDuration(knownSeconds); }, [knownSeconds]);
-
-  // Where the running animation started, so drift against the player can be
-  // measured without reading a natively-driven value back into JS.
   const anchor = useRef<{ p: number; at: number; dur: number } | null>(null);
-  // True while a finger is dragging the edge.
   const dragging = useRef(false);
 
   const runFrom = useCallback((from: number, dur: number) => {
@@ -251,7 +288,7 @@ export function SpeechBar({
     prog.setValue(from);
     anchor.current = { p: from, at: Date.now(), dur };
     if (dur <= 0) return;
-    // §6: linear, no easing — it is time, not animation.
+    // §6: linear — it is time, not animation.
     Animated.timing(prog, {
       toValue: 1,
       duration: Math.max(0, (1 - from) * dur * 1000),
@@ -260,36 +297,42 @@ export function SpeechBar({
     }).start();
   }, [prog]);
 
-  // While this clip is the one playing: sample the player, drive the readout,
-  // and re-anchor the fill only when it has drifted — restarting it on every
-  // sample would make the edge stutter.
+  // While this clip is live: sample, correct the clock, drive readout and fill.
   useEffect(() => {
     if (state !== 'playing' && state !== 'paused') return;
     const tick = () => {
       const now = speechProgress();
-      if (!now || now.duration <= 0) return;
-      const ratio = Math.max(0, Math.min(1, now.position / now.duration));
-      lastP.current = ratio;
+      if (now && now.duration > 0) {
+        playerDuration.current = now.duration;
+        // The player is the truth when it speaks; the clock only fills gaps.
+        if (Math.abs(now.position - elapsedNow()) > 0.35) {
+          clock.current = { ...clock.current, base: now.position, at: Date.now() };
+        }
+      }
+      const dur = playerDuration.current || meta?.seconds || heard || 0;
+      const secs = dur > 0 ? Math.min(elapsedNow(), dur) : elapsedNow();
+      setElapsed(secs);
+      if (dur > 0) setDuration(dur);
+      if (dur <= 0 || dragging.current) return;
+
+      const ratio = Math.min(1, secs / dur);
       setP(ratio);
-      setDuration(now.duration);
       if (state === 'paused') {
         prog.stopAnimation();
         prog.setValue(ratio);
         anchor.current = null;
         return;
       }
-      // A finger on the waveform owns the edge until it lets go.
-      if (dragging.current) return;
       const a = anchor.current;
       const expected = a ? a.p + (Date.now() - a.at) / 1000 / a.dur : -1;
-      if (!a || Math.abs(expected - ratio) * now.duration > 0.3) runFrom(ratio, now.duration);
+      if (!a || Math.abs(expected - ratio) * dur > 0.3) runFrom(ratio, dur);
     };
     tick();
-    const timer = setInterval(tick, 200);
+    const timer = setInterval(tick, SAMPLE_MS);
     return () => clearInterval(timer);
-  }, [state, prog, runFrom]);
+  }, [state, prog, runFrom]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // §5 E as a bookmark: frozen where it was.
+  // A bookmark is frozen where it was.
   useEffect(() => {
     if (state === 'idle' && bookmark !== null) {
       prog.stopAnimation();
@@ -299,8 +342,7 @@ export function SpeechBar({
     }
   }, [state, bookmark, prog]);
 
-  // §6 reset on finish: the fill fades over 260ms and the clip snaps to 0.
-  // Never a rewind scrub.
+  // §6 reset on finish: fill fades over 260ms and snaps to 0. No rewind.
   useEffect(() => {
     if (!endedFade) return;
     anchor.current = null;
@@ -311,12 +353,13 @@ export function SpeechBar({
       prog.setValue(0);
       fillOpacity.setValue(1);
       setP(0);
-      lastP.current = 0;
+      setElapsed(0);
+      clock.current = { base: 0, at: 0, running: false };
       setEndedFade(false);
     });
   }, [endedFade, prog, fillOpacity]);
 
-  /* --- §6 track darkening, 420ms, the instant load resolves ---------------- */
+  /* --- §6 track darkening -------------------------------------------------- */
 
   const darken = useRef(new Animated.Value(loaded ? 1 : 0)).current;
   useEffect(() => {
@@ -328,36 +371,32 @@ export function SpeechBar({
   }, [loaded, reduce, darken]);
   const trackColour = darken.interpolate({ inputRange: [0, 1], outputRange: [T.trackCold, T.trackLoaded] });
 
-  /* --- §6 loading motion: two rings and a travelling crest ----------------- */
+  /* --- §6 loading motion ---------------------------------------------------- */
 
   const ringA = useRef(new Animated.Value(0)).current;
   const ringB = useRef(new Animated.Value(0)).current;
   const wave = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    // Removed, not faded, on resolve (§5 C).
+    // Removed, not faded, when loading ends (§5 C).
     if (!isLoading || reduce) {
+      ringA.stopAnimation(); ringB.stopAnimation(); wave.stopAnimation();
       ringA.setValue(0); ringB.setValue(0); wave.setValue(0);
       return;
     }
-    const ring = (v: Animated.Value) =>
-      Animated.loop(Animated.timing(v, {
-        toValue: 1, duration: RING_MS, easing: Easing.linear, useNativeDriver: true,
-      }));
-    const a = ring(ringA);
-    const b = ring(ringB);
+    const loop = (v: Animated.Value, ms: number) =>
+      Animated.loop(Animated.timing(v, { toValue: 1, duration: ms, easing: Easing.linear, useNativeDriver: true }));
+    const a = loop(ringA, RING_MS);
+    const b = loop(ringB, RING_MS);
+    const w = loop(wave, WAVE_MS);
     a.start();
+    w.start();
     // "Offset by half a cycle so there is always exactly one in flight."
     const delayed = setTimeout(() => b.start(), RING_MS / 2);
-    const w = Animated.loop(Animated.timing(wave, {
-      toValue: 1, duration: WAVE_MS, easing: Easing.linear, useNativeDriver: true,
-    }));
-    w.start();
     return () => { a.stop(); b.stop(); w.stop(); clearTimeout(delayed); };
   }, [isLoading, reduce, ringA, ringB, wave]);
 
   const ringStyle = (v: Animated.Value) => ({
-    // scale 0.82 → 1.5, opacity 0.55 → 0 by 70%, ease-out.
     transform: [{
       scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.82, 1.5], easing: Easing.out(Easing.quad) }),
     }],
@@ -365,58 +404,53 @@ export function SpeechBar({
   });
 
   /**
-   * Each bar's place in the crest.
+   * Each bar's place in the travelling crest.
    *
-   * CSS gives every bar the same 1.7s loop with a 32ms × index delay. One
-   * shared native value reproduces it without 36 timers: bar i reads the loop
-   * shifted by its own offset, wrapped round with a two-point step in the
-   * input range (Animated accepts a repeated input value, which is what makes
-   * the wrap possible), then maps 0 → 18% → 50% of its cycle to
-   * scale 1 → 1.28 → 1, which is the keyframe in §6.
+   * CSS gives every bar the same 1.7s loop delayed by 32ms × its index. Here one
+   * shared native loop drives all 36: each bar reads it shifted by its own
+   * offset and wrapped with `Animated.modulo`, both of which run on the native
+   * thread. (The previous version wrapped by repeating a point in an
+   * interpolation's input range, which leaves a zero-width segment for the
+   * native driver to divide by.)
    */
-  const crest = useMemo(() => !isLoading ? null : heights.map((_, i) => {
-    const offset = ((i * WAVE_STEP_MS) % WAVE_MS) / WAVE_MS;
-    const local = offset === 0
-      ? wave
-      : wave.interpolate({
-          inputRange: [0, offset, offset, 1],
-          outputRange: [1 - offset, 1, 0, 1 - offset],
-        });
-    return {
-      scale: local.interpolate({
-        inputRange: [0, 0.18, 0.5, 1],
-        outputRange: [1, 1.28, 1, 1],
-        easing: Easing.inOut(Easing.ease),
-      }),
-      tint: local.interpolate({
-        inputRange: [0, 0.18, 0.5, 1],
-        outputRange: [0, 1, 0, 0],
-        easing: Easing.inOut(Easing.ease),
-      }),
-    };
-  }), [isLoading, heights, wave]);
+  const crest = useMemo(() => {
+    if (!isLoading) return null;
+    return heights.map((_, i) => {
+      const offset = ((i * WAVE_STEP_MS) % WAVE_MS) / WAVE_MS;
+      const local = offset === 0 ? wave : Animated.modulo(Animated.add(wave, 1 - offset), 1);
+      return {
+        // 0 → 18% → 50% of the cycle: scale 1 → 1.28 → 1, the keyframe in §6.
+        scale: local.interpolate({
+          inputRange: [0, 0.18, 0.5, 1],
+          outputRange: [1, 1.28, 1, 1],
+          easing: Easing.inOut(Easing.ease),
+        }),
+        tint: local.interpolate({
+          inputRange: [0, 0.18, 0.5, 1],
+          outputRange: [0, 1, 0, 0],
+          easing: Easing.inOut(Easing.ease),
+        }),
+      };
+    });
+  }, [isLoading, heights, wave]);
 
   /* --- §7 tapWaveform, with a drag ---------------------------------------- */
 
   const [drag, setDrag] = useState<number | null>(null);
-  // Mirrors `drag` for the gesture handlers, which must not read state through
-  // an updater: an updater runs during render, and committing a seek from
-  // inside one sets state in other components while React is rendering.
   const dragAt = useRef<number | null>(null);
   const touchedAt = useRef<number | null>(null);
-  const live = useRef({ width, loading: isLoading, loaded, state, bookmark, view });
-  live.current = { width, loading: isLoading, loaded, state, bookmark, view };
+  const live = useRef({ width, view, state, bookmark, p });
+  live.current = { width, view, state, bookmark, p };
 
   const commit = useCallback((ratio: number) => {
     const at = Math.min(0.995, Math.max(0, ratio));
     const now = live.current;
     const action = decideSeek({ view: now.view, speech: now.state });
-    // During loading the tap is remembered and applied when it resolves.
     if (action === 'queue') { queueStart(seed, at); return; }
     if (action === 'seek') {
       // "A seek always plays" — seekSpeech resumes a paused clip.
-      prog.stopAnimation();
-      prog.setValue(at);
+      const d = durationRef.current;
+      if (d > 0) clock.current = { base: at * d, at: Date.now(), running: true };
       anchor.current = null;
       setP(at);
       void seekSpeech(at);
@@ -433,14 +467,9 @@ export function SpeechBar({
 
   const pan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
-    // Horizontal only: this row lives inside the conversation's scroll view,
-    // and a responder that claims every move stops her scrolling.
+    // Horizontal only: this row lives inside the conversation's scroll view.
     onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy),
     onPanResponderTerminationRequest: () => true,
-    // The touch-down point is only remembered. Moving the edge on touch-down
-    // would flash it every time a finger lands on an answer to scroll past
-    // it; a tap commits on release, and a drag moves the edge once it has
-    // shown itself to be horizontal.
     onPanResponderGrant: (e) => {
       const w = live.current.width;
       touchedAt.current = w > 0 ? seekRatio(e.nativeEvent.locationX, w) : null;
@@ -452,9 +481,7 @@ export function SpeechBar({
       dragging.current = true;
       dragAt.current = at;
       setDrag(at);
-      // §5 E: "Progress jumps with no transition so the finger and the edge
-      // stay locked." Not during loading, where the grey never fills in.
-      if (!live.current.loading) { prog.stopAnimation(); prog.setValue(at); }
+      if (live.current.view !== 'loading') { prog.stopAnimation(); prog.setValue(at); }
     },
     onPanResponderRelease: () => {
       const at = dragAt.current ?? touchedAt.current;
@@ -465,23 +492,20 @@ export function SpeechBar({
       if (at !== null) commit(at);
     },
     onPanResponderTerminate: () => {
-      // The scroll view took the gesture. Nothing was chosen, so the edge goes
-      // back to the audio: a stopped animation with a still-valid anchor would
-      // otherwise never be resynced, and the fill would sit frozen under where
-      // her finger had been while the clip played on.
+      // The scroll view took the gesture: nothing was chosen, so hand the
+      // edge back to the clock.
       dragging.current = false;
       dragAt.current = null;
       touchedAt.current = null;
       setDrag(null);
       anchor.current = null;
-      if (live.current.state !== 'playing') prog.setValue(live.current.bookmark ?? lastP.current);
+      if (live.current.state !== 'playing') prog.setValue(live.current.bookmark ?? live.current.p);
     },
   }), [commit, prog]);
 
   /* --- §7 tapPlay ---------------------------------------------------------- */
 
   const tapPlay = useCallback(() => {
-    // §7, from src/ai/playbar.ts.
     const action = decidePlay({ view, speech: state, bookmarked: bookmark !== null });
     if (action === 'ignore') return;
     if (action === 'pause') { void pauseSpeech(); return; }
@@ -491,22 +515,16 @@ export function SpeechBar({
       bookmarks.delete(seed);
       setBookmark(null);
     }
-    onToggle();                                         // load, replay, or resume from the bookmark
+    onToggle();
   }, [view, state, bookmark, seed, onToggle]);
 
-  /* --- the readout (§7) --------------------------------------------------- */
+  /* --- the readout ----------------------------------------------------------- */
 
-  const readout = playbarReadout({ view, loaded, failed, duration, progress: p, drag });
-
-  const a11yLabel = isLoading
-    ? tx('কণ্ঠ আনা হচ্ছে', 'Loading')
-    : isPlaying
-      ? tx('থামান', 'Pause')
-      : tx('পড়ে শোনান', 'Play');
+  const readout = playbarReadout({ view, failed, elapsed, heardSeconds: heard, duration, drag });
+  const readoutLive = readoutIsLive({ view, failed, heardSeconds: heard });
 
   const onA11yAction = (e: AccessibilityActionEvent) => {
-    // ←/→ for ±5s, as the spec asks of the keyboard.
-    if (!loaded || duration <= 0) return;
+    if (duration <= 0) return;
     const step = 5 / duration;
     if (e.nativeEvent.actionName === 'increment') commit(p + step);
     if (e.nativeEvent.actionName === 'decrement') commit(p - step);
@@ -522,8 +540,6 @@ export function SpeechBar({
     () => prog.interpolate({ inputRange: [0, 1], outputRange: [width, 0] }),
     [prog, width]
   );
-
-  const baseColour = isLoading ? T.trackLoading : trackColour;
 
   return (
     <View style={sheet.row}>
@@ -541,19 +557,19 @@ export function SpeechBar({
           style={({ pressed }) => [
             sheet.button,
             { backgroundColor: isLoading ? T.buttonDisabled : T.buttonWash },
-            // §8 reduced motion: a static 60%-opacity button stands in for the rings.
             isLoading && reduce && { opacity: 0.6 },
-            pressed && !isLoading && { opacity: 0.85 },
+            pressed && !isLoading && { opacity: 0.85, transform: [{ scale: 0.96 }] },
           ]}
           accessibilityRole="button"
-          accessibilityLabel={a11yLabel}
+          accessibilityLabel={
+            isLoading ? tx('কণ্ঠ আনা হচ্ছে', 'Loading') : isPlaying ? tx('থামান', 'Pause') : tx('পড়ে শোনান', 'Play')
+          }
           accessibilityState={{ disabled: isLoading, busy: isLoading }}
         >
           <Ionicons
             name={isPlaying ? 'pause' : 'play'}
             size={18}
             color={isLoading ? T.glyphDisabled : T.plumInk}
-            // A play triangle sits left-heavy in a circle; two pixels centre it by eye.
             style={isPlaying ? undefined : { marginLeft: 3 }}
           />
         </Pressable>
@@ -565,55 +581,42 @@ export function SpeechBar({
         accessible
         accessibilityRole="adjustable"
         accessibilityLabel={tx('অবস্থান', 'Seek')}
-        accessibilityValue={{ text: `${readout} ${tx('বাকি', 'remaining')}` }}
+        accessibilityValue={{ text: readout }}
         accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
         onAccessibilityAction={onA11yAction}
         {...pan.panHandlers}
       >
-        {/* Base layer: the track. Drawn once the row has a width, so the
-            bars do not appear at one spacing and jump to another. */}
         {width > 0 ? (
-        <View style={[sheet.layer, { gap }]} pointerEvents="none">
-          {heights.map((h, i) => (
-            <Animated.View
-              key={i}
-              style={[
-                sheet.bar,
-                {
-                  height: h,
-                  backgroundColor: baseColour,
-                  transform: crest && !reduce ? [{ scaleY: crest[i].scale }] : undefined,
-                },
-              ]}
-            >
-              {/* The crest's tint, as an exact overlay rather than a colour
-                  animation, so it can run on the native thread with the
-                  scale. Mounted only while loading: on resolve the loading
-                  motion is removed, not faded (§5 C). */}
-              {crest && !reduce ? (
-                <Animated.View style={[sheet.peak, { opacity: crest[i].tint }]} />
-              ) : null}
-            </Animated.View>
-          ))}
-        </View>
+          <View style={[sheet.layer, { gap }]} pointerEvents="none">
+            {heights.map((h, i) => (
+              <Animated.View
+                key={i}
+                style={[
+                  sheet.bar,
+                  {
+                    height: h,
+                    backgroundColor: isLoading ? T.trackLoading : trackColour,
+                    transform: crest && !reduce ? [{ scaleY: crest[i].scale }] : undefined,
+                  },
+                ]}
+              >
+                {crest && !reduce ? (
+                  <Animated.View style={[sheet.peak, { opacity: crest[i].tint }]} />
+                ) : null}
+              </Animated.View>
+            ))}
+          </View>
         ) : null}
 
-        {/* Fill layer: the same bars in plum, revealed from the left. RN has
-            no clip-path, so the reveal is a window that slides right while its
-            contents slide left by the same amount — both transforms, both on
-            the native thread, and the bars inside never move relative to the
-            track, which is the point of §7's "never width". */}
+        {/* The fill: the same bars in plum, revealed by a window sliding right
+            while its contents slide left by the same amount — so the bars never
+            move relative to the track. RN has no clip-path. */}
         {width > 0 && !isLoading ? (
           <Animated.View
             pointerEvents="none"
-            style={[
-              sheet.window,
-              { width, opacity: fillOpacity, transform: [{ translateX: outerX }] },
-            ]}
+            style={[sheet.window, { width, opacity: fillOpacity, transform: [{ translateX: outerX }] }]}
           >
-            <Animated.View
-              style={[sheet.layer, { width, gap, transform: [{ translateX: innerX }] }]}
-            >
+            <Animated.View style={[sheet.fillRow, { width, gap, transform: [{ translateX: innerX }] }]}>
               {heights.map((h, i) => (
                 <View key={i} style={[sheet.bar, { height: h, backgroundColor: T.plumFill }]} />
               ))}
@@ -622,10 +625,7 @@ export function SpeechBar({
         ) : null}
       </View>
 
-      <Text
-        style={[sheet.readout, { color: loaded && !failed ? T.plumFill : T.readoutCold }]}
-        numberOfLines={1}
-      >
+      <Text style={[sheet.readout, { color: readoutLive ? T.plumFill : T.readoutCold }]} numberOfLines={1}>
         {readout}
       </Text>
     </View>
@@ -662,31 +662,25 @@ export function useSpeechProgress(active: boolean): { ratio: number; position: n
 }
 
 const sheet = StyleSheet.create({
-  // §2 puts 18px between parts; a chat bubble is about a third of the
-  // artbook's width, so the gaps come down with it and the waveform keeps the
-  // room it needs to be hit with a finger.
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 10 },
   buttonWrap: { width: BUTTON, height: BUTTON, alignItems: 'center', justifyContent: 'center' },
-  // "46px circle, never moves or resizes between states."
   button: {
     width: BUTTON, height: BUTTON, borderRadius: BUTTON / 2,
     alignItems: 'center', justifyContent: 'center',
   },
-  // inset: -4px, 2px border.
   ring: {
     position: 'absolute', top: -4, left: -4, right: -4, bottom: -4,
     borderRadius: (BUTTON + 8) / 2, borderWidth: 2, borderColor: T.ring,
   },
-  // "The hit area is the full 44px row, not the bar heights."
   wave: { flex: 1, height: ROW, overflow: 'hidden' },
   layer: {
     position: 'absolute', top: 0, bottom: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center',
   },
+  fillRow: { position: 'absolute', top: 0, bottom: 0, left: 0, flexDirection: 'row', alignItems: 'center' },
   window: { position: 'absolute', top: 0, bottom: 0, left: 0, overflow: 'hidden' },
   bar: { flex: 1, minWidth: 1, borderRadius: 3, overflow: 'hidden' },
   peak: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, backgroundColor: T.trackPeak },
-  // "Mono, 13px, tabular figures, min-width 34px, right aligned."
   readout: {
     fontFamily: 'monospace', fontSize: 13, fontVariant: ['tabular-nums'],
     minWidth: 34, textAlign: 'right',
