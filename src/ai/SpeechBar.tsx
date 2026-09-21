@@ -1,44 +1,645 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, Easing, LayoutChangeEvent, PanResponder, Pressable, StyleSheet, Text, View,
+  AccessibilityActionEvent, Animated, Easing, LayoutChangeEvent, PanResponder, Pressable,
+  StyleSheet, Text, View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-import { colors } from '../theme/colors';
 import { useLanguage, useReducedMotion } from '../theme/primitives';
-import { seekSpeech, speechProgress, type SpeechState } from './speech';
+import {
+  clipMeta, pauseSpeech, queueStart, resumeSpeech, seekSpeech, speakingToken, speechEnding,
+  speechProgress, type SpeechState,
+} from './speech';
+import {
+  playbarReadout, playbarView, seekRatio, tapPlay as decidePlay, tapWaveform as decideSeek,
+  type PlaybarView,
+} from './playbar';
 
-/** How long the "it loaded" pulse runs before the bar settles. */
-const READY_PULSE_MS = 5500;
-
-const BARS = 28;
-
-/**
- * No brand colour anywhere on the row while the clip is being fetched.
+/*
+ * The voice playbar, built to the handoff in
+ * shathiapa-design/Audio Playback Bar Artbook/SPEC.md.
  *
- * Neutral rather than a desaturated rose: the point is that the row reads as
- * switched off at a glance, and a warm grey beside the maroon of every other
- * bubble still reads as part of the palette.
+ * Section numbers in the comments below refer to that document. Where this
+ * departs from it, the comment says so and says why.
  */
-const GREY = '#8E8A8C';
-const GREY_FILL = '#EFEDEE';
-const GREY_LINE = '#C9C4C7';
+
+/* --- §3 colour tokens, exactly as specified --------------------------------- */
+
+const T = {
+  plumInk: '#5E1D3E',       // play / pause glyph
+  plumFill: '#7C2A52',      // progress fill, loaded readout
+  trackLoaded: '#E0C3D0',   // unplayed bars after load
+  trackCold: '#F1DEE6',     // bars before load
+  trackLoading: '#DDD8DA',  // bars during load
+  trackPeak: '#CDC7CA',     // bar tint at the crest of the loading wave
+  buttonWash: '#F8E7EE',    // button background, enabled
+  buttonDisabled: '#EDEAEC',// button background, loading
+  glyphDisabled: '#B0A3AA', // glyph, loading
+  ring: '#D9C3CE',          // radiating loading rings
+  readoutCold: '#BDAEB5',   // readout before load
+};
+
+/* --- §2 anatomy ------------------------------------------------------------- */
+
+const BUTTON = 46;
+const ROW = 44;
+const BARS = 36;
+const SHORT_BARS = 18;
+/** Bar heights span this range inside the 44px row, as the artbook draws them. */
+const MIN_H = 6;
+const MAX_H = 36;
+
+/* --- §6 motion -------------------------------------------------------------- */
+
+const RING_MS = 1900;
+const WAVE_MS = 1700;
+const WAVE_STEP_MS = 32;
+const DARKEN_MS = 420;
+const RESET_FADE_MS = 260;
+const FAIL_MS = 2000;
+
+/* --- session memory (§8) ---------------------------------------------------- */
 
 /**
- * How far through the current clip playback is, 0..1, and how long it is.
+ * Clips loaded this session. "Load never repeats": once a clip has resolved,
+ * its darker track is permanent, and a second press must not show grey again.
+ */
+const loadedThisSession = new Set<string>();
+
+/**
+ * Where an interrupted clip was. "Starting one clip sends every other to
+ * paused, not finished — their positions survive." Our speech layer has one
+ * player, so starting another clip tears the first one down; this is what
+ * lets its bar come back as a bookmark rather than as a clip that ended.
+ */
+const bookmarks = new Map<string, number>();
+
+/* --- helpers ---------------------------------------------------------------- */
+
+/**
+ * A stand-in shape for a clip whose audio does not exist yet.
  *
- * Sampled six times a second rather than subscribed to: position moves sixty
- * times a second and nothing on screen needs to know that often. Stops
- * sampling entirely when this bar is not the one playing — this lives inside a
- * chat list where sixty of them may be mounted.
+ * DEPARTURE FROM §2. The spec draws the clip's real envelope in every state,
+ * including cold. Here the audio is only synthesised when she presses play —
+ * `apa_autoplay_voice` is off because synthesising every answer costs about
+ * $0.010 each whether or not anyone listens — so before the first press there
+ * is no envelope to draw. This stable per-message shape stands in until then,
+ * and the real one replaces it on the same frame the track darkens (§5 C), so
+ * the shape changes exactly once, at the moment everything else resolves.
+ * After that the real envelope is kept with the message and drawn in every
+ * state, as specified.
+ */
+function standIn(seed: string, bars: number): number[] {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Array.from({ length: bars }, () => {
+    h = Math.imul(h ^ (h >>> 15), 2246822507);
+    h ^= h >>> 13;
+    return ((h >>> 0) % 1000) / 1000;
+  });
+}
+
+/** Down-sample 36 real bars to 18 by taking the louder of each pair. */
+function fold(peaks: number[], bars: number): number[] {
+  if (peaks.length === bars) return peaks;
+  const out: number[] = [];
+  const step = peaks.length / bars;
+  for (let i = 0; i < bars; i += 1) {
+    const from = Math.floor(i * step);
+    const to = Math.max(from + 1, Math.floor((i + 1) * step));
+    out.push(Math.max(...peaks.slice(from, to)));
+  }
+  return out;
+}
+
+/** The gap scales with the room the bubble gives the waveform. */
+function gapFor(width: number): number {
+  if (width >= 320) return 6;
+  if (width >= 230) return 4;
+  if (width >= 180) return 3;
+  return 2;
+}
+
+/* --- the component ---------------------------------------------------------- */
+
+export function SpeechBar({
+  state,
+  onToggle,
+  /** This clip's speech token — the turn's key. */
+  seed = 'apa',
+  /** Length as the server measured it, kept with the message once known. */
+  seconds = null,
+  /** The real waveform, kept with the message once known. */
+  peaks = null,
+}: {
+  state: SpeechState;
+  onToggle: () => void;
+  seed?: string;
+  seconds?: number | null;
+  peaks?: number[] | null;
+}) {
+  const { tx } = useLanguage();
+  const reduce = useReducedMotion();
+
+  // What the server has said about this clip: from the message if it was
+  // loaded in an earlier session, or from this session's speech layer.
+  const meta = clipMeta(seed);
+  const realPeaks = peaks ?? meta?.peaks ?? null;
+  const knownSeconds = seconds ?? meta?.seconds ?? null;
+
+  /* --- §1 state: loaded latches, never goes back ------------------------- */
+
+  const [loaded, setLoaded] = useState(
+    () => loadedThisSession.has(seed) || Boolean(realPeaks && knownSeconds)
+  );
+  useEffect(() => {
+    if (state === 'playing' && !loaded) {
+      loadedThisSession.add(seed);
+      setLoaded(true);
+    }
+  }, [state, loaded, seed]);
+
+  /* --- failure, bookmarks and endings (§8) -------------------------------- */
+
+  const [failed, setFailed] = useState(false);
+  const [bookmark, setBookmark] = useState<number | null>(() => bookmarks.get(seed) ?? null);
+  const [endedFade, setEndedFade] = useState(false);
+  const prevState = useRef<SpeechState>(state);
+  const reachedPlay = useRef(false);
+  const lastP = useRef(0);
+
+  useEffect(() => {
+    const before = prevState.current;
+    prevState.current = state;
+
+    if (state === 'loading') { reachedPlay.current = false; setFailed(false); return; }
+    if (state === 'playing' || state === 'paused') {
+      reachedPlay.current = true;
+      bookmarks.delete(seed);
+      setBookmark(null);
+      setFailed(false);
+      return;
+    }
+
+    // state === 'idle' from here.
+    if (before === 'loading' && !reachedPlay.current) {
+      // Loading ended without sound. If another clip took over, that is an
+      // interruption; if nothing did, the fetch failed. §8: rings stop, button
+      // returns to plum, readout "--:--" for two seconds, then back to cold.
+      const other = speakingToken();
+      if (!other || other === seed) {
+        setFailed(true);
+        const timer = setTimeout(() => setFailed(false), FAIL_MS);
+        return () => clearTimeout(timer);
+      }
+      return;
+    }
+
+    if (before === 'playing' || before === 'paused') {
+      if (speechEnding(seed) === 'finished') {
+        // §5 F: fill fades, clip snaps to 0, readout returns to the length.
+        bookmarks.delete(seed);
+        setBookmark(null);
+        setEndedFade(true);
+      } else {
+        // Interrupted — another clip started, she left the screen, or she
+        // began recording. §8: paused, not finished; the position survives.
+        const at = Math.min(0.995, Math.max(0, lastP.current));
+        bookmarks.set(seed, at);
+        setBookmark(at);
+      }
+    }
+  }, [state, seed]);
+
+  /* --- the derived view (§4) ---------------------------------------------- */
+
+  // §4, from src/ai/playbar.ts — tested against the spec's own table.
+  const view: PlaybarView = playbarView({ speech: state, loaded, bookmarked: bookmark !== null });
+
+  const isLoading = view === 'loading';
+  const isPlaying = view === 'playing';
+
+  /* --- geometry ------------------------------------------------------------ */
+
+  const [width, setWidth] = useState(0);
+  const barCount = knownSeconds !== null && knownSeconds > 0 && knownSeconds < 3 ? SHORT_BARS : BARS;
+  const heights = useMemo(() => {
+    const shape = realPeaks && realPeaks.length ? fold(realPeaks, barCount) : standIn(seed, barCount);
+    return shape.map((v) => Math.round(MIN_H + Math.max(0, Math.min(1, v)) * (MAX_H - MIN_H)));
+  }, [realPeaks, barCount, seed]);
+  const gap = gapFor(width);
+
+  /* --- progress: one native value, two layers (§7) ------------------------ */
+
+  const prog = useRef(new Animated.Value(bookmark ?? 0)).current;
+  const fillOpacity = useRef(new Animated.Value(1)).current;
+  const [p, setP] = useState(bookmark ?? 0);
+  const [duration, setDuration] = useState(knownSeconds ?? 0);
+  useEffect(() => { if (knownSeconds && knownSeconds > 0) setDuration(knownSeconds); }, [knownSeconds]);
+
+  // Where the running animation started, so drift against the player can be
+  // measured without reading a natively-driven value back into JS.
+  const anchor = useRef<{ p: number; at: number; dur: number } | null>(null);
+  // True while a finger is dragging the edge.
+  const dragging = useRef(false);
+
+  const runFrom = useCallback((from: number, dur: number) => {
+    prog.stopAnimation();
+    prog.setValue(from);
+    anchor.current = { p: from, at: Date.now(), dur };
+    if (dur <= 0) return;
+    // §6: linear, no easing — it is time, not animation.
+    Animated.timing(prog, {
+      toValue: 1,
+      duration: Math.max(0, (1 - from) * dur * 1000),
+      easing: Easing.linear,
+      useNativeDriver: true,
+    }).start();
+  }, [prog]);
+
+  // While this clip is the one playing: sample the player, drive the readout,
+  // and re-anchor the fill only when it has drifted — restarting it on every
+  // sample would make the edge stutter.
+  useEffect(() => {
+    if (state !== 'playing' && state !== 'paused') return;
+    const tick = () => {
+      const now = speechProgress();
+      if (!now || now.duration <= 0) return;
+      const ratio = Math.max(0, Math.min(1, now.position / now.duration));
+      lastP.current = ratio;
+      setP(ratio);
+      setDuration(now.duration);
+      if (state === 'paused') {
+        prog.stopAnimation();
+        prog.setValue(ratio);
+        anchor.current = null;
+        return;
+      }
+      // A finger on the waveform owns the edge until it lets go.
+      if (dragging.current) return;
+      const a = anchor.current;
+      const expected = a ? a.p + (Date.now() - a.at) / 1000 / a.dur : -1;
+      if (!a || Math.abs(expected - ratio) * now.duration > 0.3) runFrom(ratio, now.duration);
+    };
+    tick();
+    const timer = setInterval(tick, 200);
+    return () => clearInterval(timer);
+  }, [state, prog, runFrom]);
+
+  // §5 E as a bookmark: frozen where it was.
+  useEffect(() => {
+    if (state === 'idle' && bookmark !== null) {
+      prog.stopAnimation();
+      prog.setValue(bookmark);
+      setP(bookmark);
+      anchor.current = null;
+    }
+  }, [state, bookmark, prog]);
+
+  // §6 reset on finish: the fill fades over 260ms and the clip snaps to 0.
+  // Never a rewind scrub.
+  useEffect(() => {
+    if (!endedFade) return;
+    anchor.current = null;
+    prog.stopAnimation();
+    Animated.timing(fillOpacity, {
+      toValue: 0, duration: RESET_FADE_MS, easing: Easing.linear, useNativeDriver: true,
+    }).start(() => {
+      prog.setValue(0);
+      fillOpacity.setValue(1);
+      setP(0);
+      lastP.current = 0;
+      setEndedFade(false);
+    });
+  }, [endedFade, prog, fillOpacity]);
+
+  /* --- §6 track darkening, 420ms, the instant load resolves ---------------- */
+
+  const darken = useRef(new Animated.Value(loaded ? 1 : 0)).current;
+  useEffect(() => {
+    if (!loaded) { darken.setValue(0); return; }
+    Animated.timing(darken, {
+      toValue: 1, duration: reduce ? 0 : DARKEN_MS, easing: Easing.inOut(Easing.ease),
+      useNativeDriver: false,
+    }).start();
+  }, [loaded, reduce, darken]);
+  const trackColour = darken.interpolate({ inputRange: [0, 1], outputRange: [T.trackCold, T.trackLoaded] });
+
+  /* --- §6 loading motion: two rings and a travelling crest ----------------- */
+
+  const ringA = useRef(new Animated.Value(0)).current;
+  const ringB = useRef(new Animated.Value(0)).current;
+  const wave = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Removed, not faded, on resolve (§5 C).
+    if (!isLoading || reduce) {
+      ringA.setValue(0); ringB.setValue(0); wave.setValue(0);
+      return;
+    }
+    const ring = (v: Animated.Value) =>
+      Animated.loop(Animated.timing(v, {
+        toValue: 1, duration: RING_MS, easing: Easing.linear, useNativeDriver: true,
+      }));
+    const a = ring(ringA);
+    const b = ring(ringB);
+    a.start();
+    // "Offset by half a cycle so there is always exactly one in flight."
+    const delayed = setTimeout(() => b.start(), RING_MS / 2);
+    const w = Animated.loop(Animated.timing(wave, {
+      toValue: 1, duration: WAVE_MS, easing: Easing.linear, useNativeDriver: true,
+    }));
+    w.start();
+    return () => { a.stop(); b.stop(); w.stop(); clearTimeout(delayed); };
+  }, [isLoading, reduce, ringA, ringB, wave]);
+
+  const ringStyle = (v: Animated.Value) => ({
+    // scale 0.82 → 1.5, opacity 0.55 → 0 by 70%, ease-out.
+    transform: [{
+      scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.82, 1.5], easing: Easing.out(Easing.quad) }),
+    }],
+    opacity: v.interpolate({ inputRange: [0, 0.7, 1], outputRange: [0.55, 0, 0] }),
+  });
+
+  /**
+   * Each bar's place in the crest.
+   *
+   * CSS gives every bar the same 1.7s loop with a 32ms × index delay. One
+   * shared native value reproduces it without 36 timers: bar i reads the loop
+   * shifted by its own offset, wrapped round with a two-point step in the
+   * input range (Animated accepts a repeated input value, which is what makes
+   * the wrap possible), then maps 0 → 18% → 50% of its cycle to
+   * scale 1 → 1.28 → 1, which is the keyframe in §6.
+   */
+  const crest = useMemo(() => !isLoading ? null : heights.map((_, i) => {
+    const offset = ((i * WAVE_STEP_MS) % WAVE_MS) / WAVE_MS;
+    const local = offset === 0
+      ? wave
+      : wave.interpolate({
+          inputRange: [0, offset, offset, 1],
+          outputRange: [1 - offset, 1, 0, 1 - offset],
+        });
+    return {
+      scale: local.interpolate({
+        inputRange: [0, 0.18, 0.5, 1],
+        outputRange: [1, 1.28, 1, 1],
+        easing: Easing.inOut(Easing.ease),
+      }),
+      tint: local.interpolate({
+        inputRange: [0, 0.18, 0.5, 1],
+        outputRange: [0, 1, 0, 0],
+        easing: Easing.inOut(Easing.ease),
+      }),
+    };
+  }), [isLoading, heights, wave]);
+
+  /* --- §7 tapWaveform, with a drag ---------------------------------------- */
+
+  const [drag, setDrag] = useState<number | null>(null);
+  // Mirrors `drag` for the gesture handlers, which must not read state through
+  // an updater: an updater runs during render, and committing a seek from
+  // inside one sets state in other components while React is rendering.
+  const dragAt = useRef<number | null>(null);
+  const touchedAt = useRef<number | null>(null);
+  const live = useRef({ width, loading: isLoading, loaded, state, bookmark, view });
+  live.current = { width, loading: isLoading, loaded, state, bookmark, view };
+
+  const commit = useCallback((ratio: number) => {
+    const at = Math.min(0.995, Math.max(0, ratio));
+    const now = live.current;
+    const action = decideSeek({ view: now.view, speech: now.state });
+    // During loading the tap is remembered and applied when it resolves.
+    if (action === 'queue') { queueStart(seed, at); return; }
+    if (action === 'seek') {
+      // "A seek always plays" — seekSpeech resumes a paused clip.
+      prog.stopAnimation();
+      prog.setValue(at);
+      anchor.current = null;
+      setP(at);
+      void seekSpeech(at);
+      return;
+    }
+    // Cold, finished or bookmarked: start it, from here.
+    bookmarks.delete(seed);
+    setBookmark(null);
+    prog.setValue(at);
+    setP(at);
+    queueStart(seed, at);
+    onToggle();
+  }, [seed, prog, onToggle]);
+
+  const pan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    // Horizontal only: this row lives inside the conversation's scroll view,
+    // and a responder that claims every move stops her scrolling.
+    onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy),
+    onPanResponderTerminationRequest: () => true,
+    // The touch-down point is only remembered. Moving the edge on touch-down
+    // would flash it every time a finger lands on an answer to scroll past
+    // it; a tap commits on release, and a drag moves the edge once it has
+    // shown itself to be horizontal.
+    onPanResponderGrant: (e) => {
+      const w = live.current.width;
+      touchedAt.current = w > 0 ? seekRatio(e.nativeEvent.locationX, w) : null;
+    },
+    onPanResponderMove: (e, g) => {
+      const w = live.current.width;
+      if (w <= 0 || Math.abs(g.dx) < 6 || Math.abs(g.dx) < Math.abs(g.dy)) return;
+      const at = seekRatio(e.nativeEvent.locationX, w);
+      dragging.current = true;
+      dragAt.current = at;
+      setDrag(at);
+      // §5 E: "Progress jumps with no transition so the finger and the edge
+      // stay locked." Not during loading, where the grey never fills in.
+      if (!live.current.loading) { prog.stopAnimation(); prog.setValue(at); }
+    },
+    onPanResponderRelease: () => {
+      const at = dragAt.current ?? touchedAt.current;
+      dragging.current = false;
+      dragAt.current = null;
+      touchedAt.current = null;
+      setDrag(null);
+      if (at !== null) commit(at);
+    },
+    onPanResponderTerminate: () => {
+      // The scroll view took the gesture. Nothing was chosen, so the edge goes
+      // back to the audio: a stopped animation with a still-valid anchor would
+      // otherwise never be resynced, and the fill would sit frozen under where
+      // her finger had been while the clip played on.
+      dragging.current = false;
+      dragAt.current = null;
+      touchedAt.current = null;
+      setDrag(null);
+      anchor.current = null;
+      if (live.current.state !== 'playing') prog.setValue(live.current.bookmark ?? lastP.current);
+    },
+  }), [commit, prog]);
+
+  /* --- §7 tapPlay ---------------------------------------------------------- */
+
+  const tapPlay = useCallback(() => {
+    // §7, from src/ai/playbar.ts.
+    const action = decidePlay({ view, speech: state, bookmarked: bookmark !== null });
+    if (action === 'ignore') return;
+    if (action === 'pause') { void pauseSpeech(); return; }
+    if (action === 'resume') { void resumeSpeech(); return; }
+    if (action === 'resume-bookmark' && bookmark !== null) {
+      queueStart(seed, bookmark);
+      bookmarks.delete(seed);
+      setBookmark(null);
+    }
+    onToggle();                                         // load, replay, or resume from the bookmark
+  }, [view, state, bookmark, seed, onToggle]);
+
+  /* --- the readout (§7) --------------------------------------------------- */
+
+  const readout = playbarReadout({ view, loaded, failed, duration, progress: p, drag });
+
+  const a11yLabel = isLoading
+    ? tx('কণ্ঠ আনা হচ্ছে', 'Loading')
+    : isPlaying
+      ? tx('থামান', 'Pause')
+      : tx('পড়ে শোনান', 'Play');
+
+  const onA11yAction = (e: AccessibilityActionEvent) => {
+    // ←/→ for ±5s, as the spec asks of the keyboard.
+    if (!loaded || duration <= 0) return;
+    const step = 5 / duration;
+    if (e.nativeEvent.actionName === 'increment') commit(p + step);
+    if (e.nativeEvent.actionName === 'decrement') commit(p - step);
+  };
+
+  /* --- layers --------------------------------------------------------------- */
+
+  const outerX = useMemo(
+    () => prog.interpolate({ inputRange: [0, 1], outputRange: [-width, 0] }),
+    [prog, width]
+  );
+  const innerX = useMemo(
+    () => prog.interpolate({ inputRange: [0, 1], outputRange: [width, 0] }),
+    [prog, width]
+  );
+
+  const baseColour = isLoading ? T.trackLoading : trackColour;
+
+  return (
+    <View style={sheet.row}>
+      <View style={sheet.buttonWrap}>
+        {isLoading && !reduce ? (
+          <>
+            <Animated.View pointerEvents="none" style={[sheet.ring, ringStyle(ringA)]} />
+            <Animated.View pointerEvents="none" style={[sheet.ring, ringStyle(ringB)]} />
+          </>
+        ) : null}
+        <Pressable
+          onPress={tapPlay}
+          disabled={isLoading}
+          hitSlop={6}
+          style={({ pressed }) => [
+            sheet.button,
+            { backgroundColor: isLoading ? T.buttonDisabled : T.buttonWash },
+            // §8 reduced motion: a static 60%-opacity button stands in for the rings.
+            isLoading && reduce && { opacity: 0.6 },
+            pressed && !isLoading && { opacity: 0.85 },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={a11yLabel}
+          accessibilityState={{ disabled: isLoading, busy: isLoading }}
+        >
+          <Ionicons
+            name={isPlaying ? 'pause' : 'play'}
+            size={18}
+            color={isLoading ? T.glyphDisabled : T.plumInk}
+            // A play triangle sits left-heavy in a circle; two pixels centre it by eye.
+            style={isPlaying ? undefined : { marginLeft: 3 }}
+          />
+        </Pressable>
+      </View>
+
+      <View
+        style={sheet.wave}
+        onLayout={(e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width)}
+        accessible
+        accessibilityRole="adjustable"
+        accessibilityLabel={tx('অবস্থান', 'Seek')}
+        accessibilityValue={{ text: `${readout} ${tx('বাকি', 'remaining')}` }}
+        accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+        onAccessibilityAction={onA11yAction}
+        {...pan.panHandlers}
+      >
+        {/* Base layer: the track. Drawn once the row has a width, so the
+            bars do not appear at one spacing and jump to another. */}
+        {width > 0 ? (
+        <View style={[sheet.layer, { gap }]} pointerEvents="none">
+          {heights.map((h, i) => (
+            <Animated.View
+              key={i}
+              style={[
+                sheet.bar,
+                {
+                  height: h,
+                  backgroundColor: baseColour,
+                  transform: crest && !reduce ? [{ scaleY: crest[i].scale }] : undefined,
+                },
+              ]}
+            >
+              {/* The crest's tint, as an exact overlay rather than a colour
+                  animation, so it can run on the native thread with the
+                  scale. Mounted only while loading: on resolve the loading
+                  motion is removed, not faded (§5 C). */}
+              {crest && !reduce ? (
+                <Animated.View style={[sheet.peak, { opacity: crest[i].tint }]} />
+              ) : null}
+            </Animated.View>
+          ))}
+        </View>
+        ) : null}
+
+        {/* Fill layer: the same bars in plum, revealed from the left. RN has
+            no clip-path, so the reveal is a window that slides right while its
+            contents slide left by the same amount — both transforms, both on
+            the native thread, and the bars inside never move relative to the
+            track, which is the point of §7's "never width". */}
+        {width > 0 && !isLoading ? (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              sheet.window,
+              { width, opacity: fillOpacity, transform: [{ translateX: outerX }] },
+            ]}
+          >
+            <Animated.View
+              style={[sheet.layer, { width, gap, transform: [{ translateX: innerX }] }]}
+            >
+              {heights.map((h, i) => (
+                <View key={i} style={[sheet.bar, { height: h, backgroundColor: T.plumFill }]} />
+              ))}
+            </Animated.View>
+          </Animated.View>
+        ) : null}
+      </View>
+
+      <Text
+        style={[sheet.readout, { color: loaded && !failed ? T.plumFill : T.readoutCold }]}
+        numberOfLines={1}
+      >
+        {readout}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * How far through the current clip playback is, 0..1.
  *
- * `duration` is kept after playback stops so the bar can keep showing the
- * clip's length at rest, which is what she reads it for before deciding to
- * press play at all.
+ * For her own recording's bubble, which draws a simpler waveform and only
+ * needs the ratio.
  */
 export function useSpeechProgress(active: boolean): { ratio: number; position: number; duration: number } {
   const [at, setAt] = useState({ ratio: 0, position: 0, duration: 0 });
-
   useEffect(() => {
     if (!active) {
       setAt((prev) => ({ ratio: 0, position: 0, duration: prev.duration }));
@@ -57,446 +658,37 @@ export function useSpeechProgress(active: boolean): { ratio: number; position: n
     const timer = setInterval(tick, 160);
     return () => clearInterval(timer);
   }, [active]);
-
   return at;
 }
 
-/**
- * A stable waveform for one message, derived from its own key.
- *
- * Not the real amplitude envelope: getting that means decoding the clip, and
- * the clip is not on the phone until she presses play — so a real waveform
- * could only appear *after* the thing it is meant to invite. A stable
- * pseudo-random one is honest about position, which is what she reads it for,
- * and is identical every time the same message is drawn.
- *
- * The shape is not uniform noise, though, because uniform noise does not read
- * as a voice. A spoken sentence starts quietly, rises, and tails off, so the
- * hash is multiplied by an envelope that does the same and the first few bars
- * are squeezed down to dots. That is the silhouette of every voice message she
- * has ever seen, and it is what makes this recognisable as one at a glance.
- */
-function waveform(seed: string, bars: number): number[] {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i += 1) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  const out: number[] = [];
-  for (let i = 0; i < bars; i += 1) {
-    h = Math.imul(h ^ (h >>> 15), 2246822507);
-    h ^= h >>> 13;
-    const noise = 0.45 + (((h >>> 0) % 1000) / 1000) * 0.55;
-    const at = bars > 1 ? i / (bars - 1) : 0;
-    // A broad hump rather than a sine: full height across the middle two
-    // thirds, falling away at both ends.
-    const hump = Math.pow(Math.sin(Math.PI * at), 0.45);
-    // The opening two or three bars are dots. In a real waveform that is the
-    // breath before the first word, and leaving them full height is the single
-    // thing that makes a generated one look generated.
-    const lead = Math.min(1, at * 9);
-    out.push(Math.max(0.1, noise * hump * lead));
-  }
-  return out;
-}
-
-/** 0:07 — never 7 seconds, never 0:07.4. */
-function clock(seconds: number): string {
-  const whole = Math.max(0, Math.round(seconds));
-  return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
-}
-
-/**
- * The player under one of Shathi Apa's answers.
- *
- * ## The three states, and what each has to say
- *
- * **Loading.** The whole row goes grey — bars, button and label together, no
- * brand colour anywhere on it. Nothing about it invites a press, because a
- * press cannot do anything yet, and the wait is shown where the progress will
- * appear rather than as a spinner somewhere else.
- *
- * **Just loaded.** A slow glow behind the play button, for five and a half
- * seconds. Its job is to say *the voice arrived* — so it fires once, on the
- * transition out of loading, and then stops. The previous version pulsed
- * whenever a bar was idle, which meant every answer in the history pulsed for
- * ever: a signal that is always on is not a signal.
- *
- * **Playing.** The button is green with a pause glyph, the heard part of the
- * waveform is maroon, a thumb sits at the position, and the clock counts up
- * against the clip's length.
- *
- * ## Seeking
- *
- * The waveform is a seek bar she can tap or drag, at rest as well as during
- * playback. It looks exactly like every other voice message on her phone, so
- * she will try it — and for a spoken answer it earns its place, because the
- * caution is at the end and hearing it again should not mean hearing all of it
- * again. Dragging shows the position immediately and commits on release,
- * rather than firing a seek per pixel.
- *
- * Touching it before the clip exists starts playback and then jumps: the
- * requested point is held and applied as soon as there is something to apply
- * it to.
- */
-export function SpeechBar({
-  state,
-  onToggle,
-  /** Distinguishes one message's waveform from the next. */
-  seed = 'apa',
-  /**
-   * The clip's length as the server measured it, where it is known.
-   *
-   * Without it the bar can only learn the length from the player, which does
-   * not exist until she has pressed play — so "0:23" would appear only after
-   * she had heard the whole thing.
-   */
-  seconds = null,
-}: {
-  state: SpeechState;
-  onToggle: () => void;
-  seed?: string;
-  seconds?: number | null;
-}) {
-  const { tx } = useLanguage();
-  const reduce = useReducedMotion();
-
-  const loading = state === 'loading';
-  const playing = state === 'playing';
-  const paused = state === 'paused';
-  const active = playing || paused;
-
-  const bars = useMemo(() => waveform(seed, BARS), [seed]);
-  const { ratio, position, duration: played } = useSpeechProgress(active);
-  const [width, setWidth] = useState(0);
-
-  // The player's own figure wins once it has one: it is the clip actually on
-  // the phone. The server's is what to show before that.
-  const duration = played > 0 ? played : Number(seconds ?? 0) > 0 ? Number(seconds) : 0;
-
-  /* --- just loaded: one pulse, then quiet ------------------------------- */
-
-  const [ready, setReady] = useState(false);
-  const wasLoading = useRef(false);
-
-  useEffect(() => {
-    // The transition out of loading is the only thing that means "the voice
-    // arrived". A bar that was never loading — every answer already in the
-    // history — never enters this state at all.
-    if (loading) {
-      wasLoading.current = true;
-      setReady(false);
-      return;
-    }
-    if (!wasLoading.current) return;
-    wasLoading.current = false;
-    setReady(true);
-    const timer = setTimeout(() => setReady(false), READY_PULSE_MS);
-    return () => clearTimeout(timer);
-  }, [loading]);
-
-  const glow = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    if (!ready || reduce) {
-      glow.setValue(0);
-      return;
-    }
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(glow, { toValue: 1, duration: 850, easing: Easing.out(Easing.quad), useNativeDriver: true }),
-        Animated.timing(glow, { toValue: 0, duration: 700, easing: Easing.in(Easing.quad), useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [ready, reduce, glow]);
-
-  /* --- loading: the bar is the loader ----------------------------------- */
-
-  const pulse = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    if (!loading || reduce) {
-      pulse.setValue(0);
-      return;
-    }
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 1, duration: 620, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 0, duration: 620, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [loading, reduce, pulse]);
-
-  /* --- seeking ---------------------------------------------------------- */
-
-  // Where her finger is, while it is down. Null the rest of the time, so the
-  // real position takes over the moment she lets go.
-  const [dragRatio, setDragRatio] = useState<number | null>(null);
-  const widthRef = useRef(0);
-  const activeRef = useRef(false);
-  const loadingRef = useRef(false);
-  // A point asked for before there was a clip to apply it to.
-  const pendingSeek = useRef<number | null>(null);
-
-  activeRef.current = active;
-  loadingRef.current = loading;
-  widthRef.current = width;
-
-  const commitSeek = useCallback((next: number) => {
-    const clamped = Math.max(0, Math.min(1, next));
-    if (activeRef.current) {
-      void seekSpeech(clamped);
-      return;
-    }
-    // Nothing is loaded: start it, and hold the point until it exists.
-    pendingSeek.current = clamped;
-    onToggle();
-  }, [onToggle]);
-
-  // Applied once the clip has a duration. Without the hold, a tap on the
-  // waveform of an unplayed answer would start it from the beginning and throw
-  // the one thing she asked for away.
-  useEffect(() => {
-    if (pendingSeek.current === null) return;
-    if (!active || duration <= 0) return;
-    const to = pendingSeek.current;
-    pendingSeek.current = null;
-    void seekSpeech(to);
-  }, [active, duration]);
-
-  const pan = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => !loadingRef.current,
-        // Horizontal only, and only past six pixels. This bar lives inside the
-        // conversation's scroll view, and a responder that claims every move
-        // stops her scrolling the moment she puts a finger on an answer.
-        onMoveShouldSetPanResponder: (_event, gesture) =>
-          !loadingRef.current &&
-          Math.abs(gesture.dx) > 6 &&
-          Math.abs(gesture.dx) > Math.abs(gesture.dy),
-        // And if the scroll view decides the gesture is really a scroll, it can
-        // have it.
-        onPanResponderTerminationRequest: () => true,
-        onPanResponderGrant: (event) => {
-          if (widthRef.current <= 0) return;
-          setDragRatio(Math.max(0, Math.min(1, event.nativeEvent.locationX / widthRef.current)));
-        },
-        onPanResponderMove: (event) => {
-          if (widthRef.current <= 0) return;
-          setDragRatio(Math.max(0, Math.min(1, event.nativeEvent.locationX / widthRef.current)));
-        },
-        onPanResponderRelease: () => {
-          setDragRatio((current) => {
-            if (current !== null) commitSeek(current);
-            return null;
-          });
-        },
-        onPanResponderTerminate: () => setDragRatio(null),
-      }),
-    [commitSeek]
-  );
-
-  /* --- what it says ----------------------------------------------------- */
-
-  const shown = dragRatio ?? ratio;
-  // One number, the way every voice message on her phone shows it: the length
-  // at rest, the position while it plays. Two numbers and a slash needed
-  // seventy pixels of a bubble that is about two hundred and forty wide, and
-  // it took them from the waveform — which is the part she has to hit with a
-  // finger.
-  const label = loading
-    ? tx('আনা হচ্ছে…', 'Getting it…')
-    : duration > 0
-      ? dragRatio !== null
-        // Her finger's position, not the clip's — she is choosing, not listening.
-        ? clock(dragRatio * duration)
-        : active
-          ? clock(position)
-          : clock(duration)
-      : tx('পড়ে শোনান', 'Read aloud');
-
-  // One colour at two opacities, not two colours. The played part and the rest
-  // of the clip are the same thing at different times, and a second hue reads
-  // as a second kind of thing — which is why the old maroon-against-line
-  // version looked like a progress bar over a ruler rather than like a
-  // waveform being consumed.
-  const barColour = loading ? GREY_LINE : colors.maroon;
-
-  return (
-    <View style={sheet.row}>
-      <View style={sheet.mainWrap}>
-        {ready && !reduce ? (
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              sheet.glow,
-              {
-                opacity: glow.interpolate({ inputRange: [0, 1], outputRange: [0, 0.38] }),
-                transform: [{ scale: glow.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1.5] }) }],
-              },
-            ]}
-          />
-        ) : null}
-        <Pressable
-          onPress={() => {
-            // Any press ends the "it arrived" pulse: she has seen it.
-            setReady(false);
-            if (!loading) onToggle();
-          }}
-          disabled={loading}
-          hitSlop={8}
-          style={({ pressed }) => [
-            sheet.main,
-            playing && sheet.mainPlaying,
-            paused && sheet.mainPaused,
-            loading && sheet.mainLoading,
-            pressed && !loading && sheet.pressed,
-          ]}
-          accessibilityRole="button"
-          accessibilityState={{ disabled: loading, busy: loading, selected: playing }}
-          accessibilityLabel={
-            loading
-              ? tx('কণ্ঠ আনা হচ্ছে', 'Getting the voice')
-              : playing
-                ? tx('থামান', 'Pause')
-                : paused
-                  ? tx('আবার চালান', 'Resume')
-                  : tx('পড়ে শোনান', 'Read aloud')
-          }
-        >
-          <Ionicons
-            name={loading ? 'ellipsis-horizontal' : playing ? 'pause' : 'play'}
-            size={16}
-            color={loading ? GREY : '#fff'}
-            // A play triangle is visually left-heavy inside a circle; a pixel
-            // and a half of offset centres it by eye.
-            style={playing || loading ? undefined : { marginLeft: 2 }}
-          />
-        </Pressable>
-      </View>
-
-      {/* Progress, loader and seek bar, in one control. */}
-      <View
-        style={sheet.wave}
-        onLayout={(e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width)}
-        accessibilityRole="adjustable"
-        accessibilityLabel={tx('যেখান থেকে শুনতে চান চাপুন', 'Tap or drag to play from a point')}
-        accessibilityState={{ disabled: loading }}
-        accessibilityValue={{ min: 0, max: 100, now: Math.round(shown * 100) }}
-        {...pan.panHandlers}
-      >
-        {bars.map((h, i) => {
-          // Fractional, so the boundary bar fills partway rather than the fill
-          // jumping a whole bar at a time.
-          const edge = shown * BARS;
-          const heard = i < Math.floor(edge);
-          const partial = i === Math.floor(edge) && edge % 1 > 0.35;
-          return (
-            <Animated.View
-              key={i}
-              style={[
-                sheet.bar,
-                {
-                  height: Math.max(3, Math.round(h * 22)),
-                  backgroundColor: barColour,
-                  opacity: loading
-                    ? reduce
-                      ? 0.5
-                      : pulse.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.75] })
-                    : heard
-                      ? 1
-                      : partial
-                        ? 0.6
-                        : 0.26,
-                },
-              ]}
-            />
-          );
-        })}
-
-        {/* The thumb. Nothing else on the row says "you can move this". */}
-        {!loading && width > 0 && (active || dragRatio !== null || duration > 0) ? (
-          <View
-            pointerEvents="none"
-            style={[
-              sheet.thumb,
-              dragRatio !== null && sheet.thumbHeld,
-              { left: Math.max(0, Math.min(width - 12, shown * width - 6)) },
-            ]}
-          />
-        ) : null}
-      </View>
-
-      <Text style={[sheet.caption, loading && sheet.grey]} numberOfLines={1}>
-        {label}
-      </Text>
-    </View>
-  );
-}
-
-const BUTTON = 34;
-
 const sheet = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 10 },
-  mainWrap: { width: BUTTON, height: BUTTON, alignItems: 'center', justifyContent: 'center' },
-  glow: {
-    position: 'absolute',
-    width: BUTTON,
-    height: BUTTON,
-    borderRadius: BUTTON / 2,
-    backgroundColor: colors.maroon,
+  // §2 puts 18px between parts; a chat bubble is about a third of the
+  // artbook's width, so the gaps come down with it and the waveform keeps the
+  // room it needs to be hit with a finger.
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 10 },
+  buttonWrap: { width: BUTTON, height: BUTTON, alignItems: 'center', justifyContent: 'center' },
+  // "46px circle, never moves or resizes between states."
+  button: {
+    width: BUTTON, height: BUTTON, borderRadius: BUTTON / 2,
+    alignItems: 'center', justifyContent: 'center',
   },
-  // Filled, not outlined. This is the one control on the row, and an outlined
-  // circle beside a waveform reads as a decoration next to the content rather
-  // than as the thing to press.
-  main: {
-    width: BUTTON,
-    height: BUTTON,
-    borderRadius: BUTTON / 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.maroon,
+  // inset: -4px, 2px border.
+  ring: {
+    position: 'absolute', top: -4, left: -4, right: -4, bottom: -4,
+    borderRadius: (BUTTON + 8) / 2, borderWidth: 2, borderColor: T.ring,
   },
-  // Green while playing: the one control whose state has to be readable at a
-  // glance, from across a room.
-  mainPlaying: { backgroundColor: colors.green },
-  mainPaused: { backgroundColor: colors.maroon },
-  // Grey, not dimmed. While the clip is being fetched there is no brand colour
-  // anywhere on this row, so "not yet" is legible without reading the label.
-  mainLoading: { backgroundColor: GREY_FILL },
-  grey: { color: GREY },
-  pressed: { opacity: 0.6 },
-  wave: {
-    flex: 1,
-    height: 26,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  // "The hit area is the full 44px row, not the bar heights."
+  wave: { flex: 1, height: ROW, overflow: 'hidden' },
+  layer: {
+    position: 'absolute', top: 0, bottom: 0, left: 0, right: 0,
+    flexDirection: 'row', alignItems: 'center',
   },
-  // Rounded caps: a square-ended bar reads as a chart column, a rounded one as
-  // a voice. Three wide rather than two and a half, because the fingertip
-  // landing on it is about forty.
-  bar: { width: 3, borderRadius: 2 },
-  thumb: {
-    position: 'absolute',
-    width: 11,
-    height: 11,
-    borderRadius: 6,
-    backgroundColor: colors.maroon,
-    borderWidth: 2,
-    borderColor: colors.card,
-  },
-  thumbHeld: { transform: [{ scale: 1.3 }] },
-  // One number, tabular so the digits do not shuffle the layout as they count.
-  caption: {
-    color: colors.muted,
-    fontSize: 11.5,
-    fontWeight: '600',
-    minWidth: 30,
-    textAlign: 'right',
-    fontVariant: ['tabular-nums'],
+  window: { position: 'absolute', top: 0, bottom: 0, left: 0, overflow: 'hidden' },
+  bar: { flex: 1, minWidth: 1, borderRadius: 3, overflow: 'hidden' },
+  peak: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, backgroundColor: T.trackPeak },
+  // "Mono, 13px, tabular figures, min-width 34px, right aligned."
+  readout: {
+    fontFamily: 'monospace', fontSize: 13, fontVariant: ['tabular-nums'],
+    minWidth: 34, textAlign: 'right',
   },
 });

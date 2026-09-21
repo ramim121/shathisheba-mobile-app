@@ -62,6 +62,8 @@ export type ApaTurn = {
    * to know.
    */
   speechSeconds?: number | null;
+  /** The clip's real 36-bar waveform, 0..1, kept once it has been loaded. */
+  speechPeaks?: number[] | null;
   messageId?: string | null;
   vote?: 'up' | 'down' | null;
   voteReason?: string | null;
@@ -425,6 +427,10 @@ export function ApaProvider({
           rate: entitlementRate(entitlement),
           token: turn.key,
           server: turn.messageId ? { source: 'apa_message', id: turn.messageId } : null,
+          // Kept with the turn, so the real waveform and length survive a
+          // restart: the playbar spec says a clip never shows a loading state
+          // twice, and neither should its shape change back.
+          onClip: (meta) => patch(turn.key, { speechSeconds: meta.seconds, speechPeaks: meta.peaks }),
         }).catch(() => undefined);
         return;
       }
@@ -435,7 +441,7 @@ export function ApaProvider({
         void playClip({ uri: turn.clipUri, token: turn.key }).catch(() => undefined);
       }
     },
-    [entitlement, lang]
+    [entitlement, lang, patch]
   );
 
   const vote = useCallback(

@@ -7,7 +7,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Network from 'expo-network';
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { colors } from '../theme/colors';
-import { styles } from '../theme/styles';
+import { androidNavigationInset, styles } from '../theme/styles';
 import { maySend, releaseIsEcho, releaseLatches } from './voice';
 import {
   AppButton, Header, MarkdownText, PressableScale, useLanguage, usePulse, useReducedMotion,
@@ -132,44 +132,79 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
   /**
    * Stay at the newest answer.
    *
-   * An effect keyed on `turns.length` alone is not enough, and this is why: at
-   * the moment the count changes the new bubble has not been measured, so
-   * `scrollToEnd` runs against the old content height and stops short. Then
-   * the skeleton appears, then the answer replaces it at a different height,
-   * then the suggestion pills lay out — each one taller than the last, and
-   * each one leaving her further from the bottom. A fixed timeout cannot
-   * cover that because it does not know how long the answer is.
+   * Three moments move the thread to the bottom, and each one is forced — it
+   * happens whatever she was looking at:
    *
-   * So the scroll follows the content instead of the state: `stick` says she
-   * is reading the bottom of the conversation, `onContentSizeChange` keeps her
-   * there through every one of those growth steps, and scrolling up by more
-   * than a bubble's worth turns it off so the app never drags her away from
-   * something she went back to read.
+   *  1. Opening the screen. She came here to continue, so she lands on the
+   *     latest answer rather than on the greeting.
+   *  2. Sending anything — typed, spoken or photographed. She just asked, so
+   *     what comes next is what she wants to see.
+   *  3. The answer arriving. The skeleton is replaced by text of a different
+   *     height, then the suggestion pills lay out, and each step used to leave
+   *     her a little further from the end.
+   *
+   * Between those moments the thread follows its own growth only while she is
+   * already at the bottom (`stick`), so scrolling back to re-read something is
+   * never undone by a layout change.
+   *
+   * None of this worked before for a reason outside this component: the chat
+   * sat inside the shell's ScrollView, so this ScrollView was as tall as its
+   * content and never scrolled — `scrollToEnd()` was being called on a view
+   * that could not move. The shell now gives this screen the full height
+   * (`fill`) and this ScrollView is the one that scrolls.
    */
   const stick = useRef(true);
+  // The first scroll on arrival is not animated past a long history: a
+  // sixty-turn conversation animating from the greeting to the end is a
+  // two-second blur of text. It jumps to near the end and animates the last
+  // stretch, which reads as "arriving at the bottom" without the blur.
+  const arrived = useRef(false);
 
   const toEnd = useCallback((animated = true) => {
     scroller.current?.scrollToEnd({ animated });
   }, []);
 
-  useEffect(() => {
-    // A new question of her own always returns her to the bottom, whatever she
-    // was reading: she just asked, so the answer is what she wants to see.
+  // Forcing a scroll has to wait for the layout it is scrolling to. One frame
+  // is not always enough on Android for a bubble with pills, so it runs twice:
+  // once as soon as possible and once after the content has settled.
+  const forceEnd = useCallback(() => {
     stick.current = true;
-    toEnd(true);
-  }, [turns.length, toEnd]);
+    requestAnimationFrame(() => toEnd(true));
+    setTimeout(() => toEnd(true), 260);
+  }, [toEnd]);
+
+  // (2) Anything she sends adds a turn.
+  useEffect(() => { forceEnd(); }, [turns.length, forceEnd]);
+
+  // (3) The answer arriving: the last turn leaves its waiting state.
+  const last = turns[turns.length - 1];
+  const lastSettled = last ? last.state !== 'thinking' && last.state !== 'transcribing' && last.state !== 'sending' : true;
+  useEffect(() => {
+    if (last && lastSettled) forceEnd();
+    // Keyed on the turn and its settledness, not on the text, so a vote or a
+    // replay on the last answer does not yank her back down.
+  }, [last?.key, lastSettled, forceEnd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { if (stick.current) toEnd(true); }, [busy, wall, toEnd]);
 
-  // And again when the keyboard arrives. The composer slides up over the
-  // conversation, so without this the last answer — the one she is replying
-  // to — ends up behind the bar she is typing in.
+  // How much of the screen the keyboard takes. The composer rides up with it,
+  // so the thread needs that much more room underneath or its last answer ends
+  // up behind the bar she is typing in.
+  const [keyboard, setKeyboard] = useState(0);
   useEffect(() => {
     const show = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => { stick.current = true; setTimeout(() => toEnd(true), 60); }
+      (event) => {
+        setKeyboard(event?.endCoordinates?.height ?? 0);
+        stick.current = true;
+        setTimeout(() => toEnd(true), 80);
+      }
     );
-    return () => show.remove();
+    const hide = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboard(0)
+    );
+    return () => { show.remove(); hide.remove(); };
   }, [toEnd]);
 
   useEffect(() => () => { void stopSpeech(); }, []);
@@ -190,7 +225,10 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
         );
 
   return (
-    <>
+    // A flex column, not a fragment: the header stays put and the thread below
+    // it is the only thing that scrolls — so the menu with "new conversation"
+    // is always one tap away, at any depth in the conversation.
+    <View style={apa.screen}>
       <View style={apa.head}>
         <Pressable onPress={() => setScreen('home')} style={apa.headBack} hitSlop={8} accessibilityLabel={tx('পিছনে', 'Back')}>
           <Text style={apa.headBackText}>‹</Text>
@@ -263,10 +301,25 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
 
       <ScrollView
         ref={scroller}
-        contentContainerStyle={apa.thread}
+        style={apa.threadScroll}
+        contentContainerStyle={[
+          apa.thread,
+          // Clears the composer and the tab bar at rest; with the keyboard up
+          // the tab bar is gone and the composer sits on top of the keys.
+          { paddingBottom: keyboard > 0 ? keyboard + 124 : THREAD_CLEARANCE },
+        ]}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
         // Every growth step of the answer, not just the arrival of the turn.
-        onContentSizeChange={() => { if (stick.current) toEnd(true); }}
+        onContentSizeChange={() => {
+          if (!arrived.current) {
+            // (1) Opening the screen: straight to the end, once.
+            arrived.current = true;
+            toEnd(false);
+            return;
+          }
+          if (stick.current) toEnd(true);
+        }}
         // 120px is about one bubble. Below that she is still at the bottom and
         // the thread should follow; above it she has gone back to read
         // something and must be left alone.
@@ -338,9 +391,16 @@ export function ShathiApaScreen({ setScreen }: { setScreen: (screen: Screen) => 
           </View>
         ) : null}
       </ScrollView>
-    </>
+    </View>
   );
 }
+
+/**
+ * Room under the last bubble for the composer card and the tab bar beneath it.
+ * The shell used to supply this as padding on its own ScrollView; now that the
+ * chat scrolls itself, it has to.
+ */
+const THREAD_CLEARANCE = 206 + androidNavigationInset;
 
 /* --- her turn ------------------------------------------------------------ */
 
@@ -557,6 +617,7 @@ function ApaBubble({
               onToggle={onReplay}
               seed={turn.key}
               seconds={turn.speechSeconds ?? null}
+              peaks={turn.speechPeaks ?? null}
             />
 
             {/* The "Ask next" label and the two thumbs share one line.

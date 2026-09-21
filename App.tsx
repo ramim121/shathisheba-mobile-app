@@ -965,6 +965,7 @@ function Shell({
   setScreen,
   fixedAccessory,
   brandBar,
+  fill,
 }: {
   children: React.ReactNode;
   activeTab: MainTab;
@@ -972,6 +973,18 @@ function Shell({
   fixedAccessory?: React.ReactNode;
   /** Show the fixed brand bar. True on the tab screens that used to draw it. */
   brandBar?: boolean;
+  /**
+   * The screen owns its own scrolling and gets the full height instead of
+   * being placed inside the shell's ScrollView.
+   *
+   * For the Shathi Apa chat. Nested inside the shell's ScrollView, the
+   * chat's own ScrollView grew to the full height of its content and never
+   * scrolled at all — the outer one scrolled everything, header included. So
+   * the header and its menu slid away with the conversation, and every
+   * `scrollToEnd()` the chat called went to a view that could not move, which
+   * is why three separate auto-scroll fixes changed nothing on the phone.
+   */
+  fill?: boolean;
 }) {
   const { tx } = useLanguage();
   const { user } = useAuth();
@@ -990,6 +1003,9 @@ function Shell({
     <View style={styles.shell}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <StaleBanner />
+        {fill ? (
+          <View style={styles.flex}>{children}</View>
+        ) : (
         <ScrollView
           contentContainerStyle={[
             styles.shellContent,
@@ -1006,6 +1022,7 @@ function Shell({
         >
           {children}
         </ScrollView>
+        )}
       </KeyboardAvoidingView>
 
       {/* The brand bar, fixed.
@@ -1843,6 +1860,7 @@ export default function App() {
                 // The three screens that used to draw the bar themselves.
                 brandBar={screen === 'home' || screen === 'community' || screen === 'projects'}
                 fixedAccessory={screen === 'shathiApa' ? <ApaComposer setScreen={go} /> : screenAccessory ?? undefined}
+                fill={screen === 'shathiApa'}
               >
                 <ScreenFade screen={screen}>
                   <ErrorBoundary key={screen} onHome={() => go('home')}>{content}</ErrorBoundary>

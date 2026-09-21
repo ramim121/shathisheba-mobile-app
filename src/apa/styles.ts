@@ -54,6 +54,9 @@ export const apa = StyleSheet.create({
 
   // Bottom padding clears the composer above the nav bar. Ten was not
   // enough and the last suggestion chip sat behind the panel.
+  // The chat owns the full height: header on top, thread below it scrolling.
+  screen: { flex: 1, backgroundColor: colors.cream },
+  threadScroll: { flex: 1 },
   thread: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 28, gap: 12 },
 
   turnUser: {

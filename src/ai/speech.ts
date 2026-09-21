@@ -355,6 +355,48 @@ let starting: string | null = null;
 let generation = 0;
 let player: AudioPlayer | null = null;
 
+/**
+ * What the server told us about a clip: its length and its real waveform.
+ *
+ * Kept per token for the session, so a replay from the phone's own disk — which
+ * makes no request and so gets no response to read them from — still has them.
+ */
+export type ClipMeta = { seconds: number | null; peaks: number[] | null };
+const clipMetas = new Map<string, ClipMeta>();
+
+export function clipMeta(token: string): ClipMeta | null {
+  return clipMetas.get(token) ?? null;
+}
+
+/**
+ * Where to start a clip that is about to load, as a fraction.
+ *
+ * The playbar lets her tap the waveform of an answer that has never been
+ * played, or tap it again while it is still loading. Both mean "play from
+ * here", and both happen before there is a player to seek. The point is held
+ * here and applied the moment the clip is ready — before it starts, so she
+ * never hears the first half-second of the answer and then a jump.
+ */
+const startAt = new Map<string, number>();
+
+export function queueStart(token: string, ratio: number) {
+  startAt.set(token, Math.max(0, Math.min(0.995, ratio)));
+}
+
+/**
+ * How the last playback of each clip ended.
+ *
+ * The playbar has to tell a clip that finished (rearm: empty track, full
+ * length) from one that was interrupted because another clip started (pause:
+ * position held). Both reach the listener as the same "idle", so it is
+ * recorded here at the moment it happens rather than guessed afterwards.
+ */
+const endings = new Map<string, 'finished' | 'stopped'>();
+
+export function speechEnding(token: string): 'finished' | 'stopped' | null {
+  return endings.get(token) ?? null;
+}
+
 type Listener = (token: string | null, state: SpeechState) => void;
 const listeners = new Set<Listener>();
 
@@ -539,6 +581,8 @@ function rememberUrl(where: SpeechSource, url: string) {
 
 /** Stop whatever is speaking, on either path. Safe to call when nothing is. */
 export async function stopSpeech(): Promise<void> {
+  // Whatever was going and did not finish by itself was stopped.
+  if (playingToken && !endings.has(playingToken)) endings.set(playingToken, 'stopped');
   generation += 1;
   starting = null;
   // Cleared with the player: a stale duration from the previous answer would
@@ -603,6 +647,8 @@ export type SpeakInput = {
   alwaysServer?: boolean;
   onStart?: () => void;
   onEnd?: () => void;
+  /** The clip's length and real waveform, once the server has said them. */
+  onClip?: (meta: ClipMeta) => void;
 };
 
 /**
@@ -639,6 +685,7 @@ export async function speak(input: SpeakInput): Promise<SpeechMode> {
   // Announced before any await, so the button shows a spinner for the whole
   // wait rather than staying idle until audio actually starts.
   starting = token;
+  endings.delete(token);
   announce(token, 'loading');
   input.onStart?.();
 
@@ -744,13 +791,22 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
     // request would have told us — and the point is not to make it.
     const known = rememberedUrl(where);
     if (known && heldLocally(known)) {
+      const held = clipMetas.get(token);
+      if (held) input.onClip?.(held);
       await playUrl(known, input, token);
       return;
     }
     const json = await apiRequest<{
       result:
         | { mode: 'device'; text: string; language: string; rate: string }
-        | { mode: 'server'; url: string; mime_type: string; sample_rate: number; seconds: number | null }
+        | {
+            mode: 'server';
+            url: string;
+            mime_type: string;
+            sample_rate: number;
+            seconds: number | null;
+            peaks?: number[] | null;
+          }
         | { mode: 'none'; reason: string };
     }>('app/ai/speak', {
       method: 'POST',
@@ -778,6 +834,12 @@ async function speakFromServer(where: SpeechSource, input: SpeakInput, token: st
       return;
     }
     rememberUrl(where, result.url);
+    const meta: ClipMeta = {
+      seconds: result.seconds ?? null,
+      peaks: Array.isArray(result.peaks) && result.peaks.length ? result.peaks : null,
+    };
+    clipMetas.set(token, meta);
+    input.onClip?.(meta);
     await playUrl(result.url, input, token);
   } catch (error) {
     starting = null;
@@ -858,16 +920,47 @@ async function playUrl(url: string, input: SpeakInput, token: string): Promise<v
   }
   player = next;
   starting = null;
+
+  // A start point asked for before the clip existed. Applied before the first
+  // sound, so she hears the part she chose rather than the opening and then a
+  // jump. The seek needs a duration, which the player only knows once it has
+  // loaded, so the start waits for that — with a ceiling, because a clip that
+  // never reports itself loaded should still play rather than hang in grey.
+  const from = startAt.get(token);
+  startAt.delete(token);
+  let begun = false;
+  const begin = async (duration: number) => {
+    if (begun || player !== next) return;
+    begun = true;
+    if (from !== undefined && duration > 0) {
+      try {
+        progress = { position: from * duration, duration };
+        await next.seekTo(from * duration);
+      } catch { /* play from the start rather than not at all */ }
+    }
+    if (player !== next) return;
+    next.play();
+    // Only now is it genuinely playing. Everything before this was the wait the
+    // loading state exists to cover.
+    announce(token, 'playing');
+  };
+
   next.addListener('playbackStatusUpdate', (status) => {
     if (player === next) noteProgress(status);
+    if (!begun && from !== undefined && Number(status?.duration ?? 0) > 0) {
+      void begin(Number(status.duration));
+    }
     if (status.didJustFinish && player === next) {
+      endings.set(token, 'finished');
       void stopSpeech().finally(() => input.onEnd?.());
     }
   });
-  next.play();
-  // Only now is it genuinely playing. Everything before this was the wait the
-  // spinner exists to cover.
-  announce(token, 'playing');
+
+  if (from === undefined) {
+    void begin(0);
+  } else {
+    setTimeout(() => { void begin(Number(next.duration ?? 0)); }, 1500);
+  }
 }
 
 /**
