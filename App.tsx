@@ -2,6 +2,7 @@ import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Ionicons } from '@expo/vector-icons';
 import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import YoutubePlayer from 'react-native-youtube-iframe';
@@ -38,7 +39,7 @@ import type {
   ListingDraft, LocationState, MainTab, PreferenceKey, PreferenceOption, PreferenceSection,
   Screen, TrainingContentKind, TrainingModule, WeatherApiState,
   FinanceGrade, FinanceSummary, ReadinessQuestion, ReadinessResult, ConfidenceSignal,
-  LoanProduct, LoanQuote, LoanDraft, RepaymentMode,
+  LoanProduct, LoanQuote, LoanDraft, RepaymentMode, LoanDisclosure,
   CreditAssessment, AssessmentEnvelope, DevelopmentPlan, DevelopmentTask, AssessmentHistory,
   NarrativeChange, LoanAccountView, LoanArrears, GeoValue, ProfileChangeRequest,
 } from './src/types';
@@ -47,7 +48,7 @@ import {
 } from './src/ai/apa';
 import { stopSpeech } from './src/ai/speech';
 import { ListenButton, ListenStrip } from './src/ai/ListenButton';
-import { optimiseAll, optimiseImage } from './src/media/image';
+import { optimiseAll, optimiseImage, photoLibraryAllowed } from './src/media/image';
 import { ApaProvider, useApa } from './src/apa/state';
 import { useReducedMotion } from './src/theme/primitives';
 import {
@@ -229,17 +230,61 @@ function useAppLocation() {
   return useContext(LocationContext);
 }
 
+// The public pages Google Play requires to be reachable from inside the app.
+// Always the production site, whatever API the build talks to: a page on a
+// laptop's dev server is not one a farmer's phone can open.
+const PUBLIC_SITE_URL = 'https://shathisheba.digigramventures.com';
+type PublicPage = 'privacy' | 'terms' | 'loan-disclosure';
+function openPublicPage(page: PublicPage) {
+  Linking.openURL(`${PUBLIC_SITE_URL}/${page}`).catch(() => {});
+}
+
+/**
+ * The installed build's version for the foot of the Menu — "1.0.0" and the
+ * Android versionCode Play tells builds apart by.
+ *
+ * expo-application reads the real native values. It is installed as a
+ * dependency of expo-notifications rather than one of ours, so it is required
+ * defensively; expo-constants' copy of app.json is the fallback, and the only
+ * source on web and in Expo Go (where the native values are Expo Go's own).
+ */
+function appVersion(): { version: string; build: string } {
+  let version = '';
+  let build = '';
+  if (Constants.executionEnvironment !== ExecutionEnvironment.StoreClient) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const application = require('expo-application') as typeof import('expo-application');
+      version = application.nativeApplicationVersion ?? '';
+      build = application.nativeBuildVersion ?? '';
+    } catch {
+      // No native module in this build: fall back to the config below.
+    }
+  }
+  const config = Constants.expoConfig;
+  if (!version) version = config?.version ?? '';
+  if (!build) {
+    const fromConfig = Platform.OS === 'android' ? config?.android?.versionCode : Platform.OS === 'ios' ? config?.ios?.buildNumber : undefined;
+    if (fromConfig != null) build = String(fromConfig);
+  }
+  return { version, build };
+}
+
 
 
 const AUTH_STORAGE_KEY = 'shathi.auth.v1';
 const LANG_STORAGE_KEY = 'shathi.lang.v1';
+
+/** A line the sign-in screen shows once, about how the last session ended. */
+type AuthNotice = { kind: 'account_deleted'; retentionUntil: string | null };
 
 const AuthContext = createContext<{
   user: AuthUser | null;
   token: string | null;
   signIn: (user: AuthUser, token: string) => Promise<void>;
   updateUser: (patch: Partial<AuthUser>) => Promise<void>;
-  signOut: () => Promise<void>;
+  /** Lands on onboarding unless told otherwise; a deleted account lands on sign-in. */
+  signOut: (landing?: Screen) => Promise<void>;
 }>({
   user: null,
   token: null,
@@ -1344,6 +1389,7 @@ export default function App() {
   });
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -1396,13 +1442,16 @@ export default function App() {
           return next;
         });
       },
-      signOut: async () => {
+      signOut: async (landing: Screen = 'onboarding') => {
         setAuthUser(null);
         setAuthToken(null);
         setApiAuthToken(null);
         await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
         setScreen('onboarding');
         setOnboarding(0);
+        // Through onboarding first, so its emptied history is what back walks
+        // into — never the signed-in screen that started the sign-out.
+        if (landing !== 'onboarding') setScreen(landing);
       },
     }),
     [authUser, authToken],
@@ -1631,7 +1680,7 @@ export default function App() {
   }, [lang, langReady, authToken, authUser?.id]);
 
   // Sub-pages keep their parent tab lit, so the bar says where you are.
-  const menuScreens: Screen[] = ['profile', 'menuPersonal', 'menuBanking', 'menuFarm', 'menuKyc', 'menuFaq'];
+  const menuScreens: Screen[] = ['profile', 'menuPersonal', 'menuBanking', 'menuFarm', 'menuKyc', 'menuFaq', 'deleteAccount'];
   const projectScreens: Screen[] = ['projects', 'myProjects', 'projectProgress', 'kyc', 'regDone'];
   const activeTab: MainTab =
     screen === 'community' || screen === 'officers' ? 'community' : projectScreens.includes(screen) ? 'projects' : menuScreens.includes(screen) ? 'profile' : 'home';
@@ -1651,7 +1700,13 @@ export default function App() {
       apaCamera: <ApaCameraScreen setScreen={go} />,
       apaUnlock: <ApaUnlockScreen setScreen={go} />,
       apaSettings: <ApaSettingsScreen setScreen={go} />,
-      login: <Login onAuthed={(user) => go(routeAfterAuth(user))} />,
+      login: (
+        <Login
+          notice={authNotice}
+          onClearNotice={() => setAuthNotice(null)}
+          onAuthed={(user) => { setAuthNotice(null); go(routeAfterAuth(user)); }}
+        />
+      ),
       personalInfo: (
         <PersonalInfo
           onDone={() => go(authUser?.needs_preferences === false ? 'home' : 'prefAnimal')}
@@ -1737,6 +1792,7 @@ export default function App() {
       menuFarm: <FarmScreen setScreen={(next) => (next === 'profile' ? goBackTo('profile') : go(next))} />,
       menuKyc: <KycScreen setScreen={(next) => (next === 'profile' ? goBackTo('profile') : go(next))} />,
       menuFaq: <FaqScreen setScreen={go} />,
+      deleteAccount: <DeleteAccountScreen setScreen={go} onDeleted={setAuthNotice} />,
       marketUpdates: <MarketUpdates setScreen={go} onSelect={(id) => { setSelectedMarketId(id); go('marketDetail'); }} />,
       marketDetail: <MarketDetail setScreen={go} id={selectedMarketId} />,
       officers: <OfficersScreen setScreen={go} />,
@@ -1918,7 +1974,7 @@ export default function App() {
   // a repayment mode updated the state and re-rendered nothing, and a consent
   // checkbox could be ticked but never cleared. A missing dependency here does
   // not fail loudly — it silently freezes a screen's props.
-  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo, orderDetailId, buyManufacturer, openFromNotification]);
+  }, [screen, onboarding, weight, qty, cattleImage, listingDraft, selectedPreferenceCategories, livestockPrefs, cropPrefs, fishPrefs, vegetablePrefs, fruitPrefs, learnCategory, learnModule, learnContentId, lang, selectedProduct, buyCategory, buyInitialTab, latestOrder, latestListing, latestApplication, selectedProjectId, progressListingId, progressApplicationId, projectsInitialTab, authUser, selectedMarketId, loanDraft, readinessPart, readinessResult, guidanceTopic, loanSubmission, returnTo, orderDetailId, buyManufacturer, openFromNotification, authNotice]);
 
   const authScreens = AUTH_SCREENS;
 
@@ -2024,7 +2080,11 @@ function Onboarding({ step, onNext, onBack }: { step: number; onNext: () => void
   );
 }
 
-function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
+function Login({ onAuthed, notice, onClearNotice }: {
+  onAuthed: (user: AuthUser) => void;
+  notice?: AuthNotice | null;
+  onClearNotice?: () => void;
+}) {
   const { tx, lang } = useLanguage();
   const { signIn } = useAuth();
   const [step, setStep] = useState<'phone' | 'otp'>('phone');
@@ -2058,6 +2118,7 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
     }
     setError('');
     setHint('');
+    onClearNotice?.();
     try {
       const response = await apiRequest<{ result?: { dev_otp?: string } }>('app/auth/request-otp', {
         method: 'POST',
@@ -2104,6 +2165,19 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
       </View>
       <Card style={styles.loginCard}>
         <Text style={styles.loginTitle}>{tx('শাথী সেবায় স্বাগতম', 'Welcome to Shathi Sheba')}</Text>
+        {notice?.kind === 'account_deleted' ? (
+          <View style={ui.authNotice} accessibilityLiveRegion="polite">
+            <Text style={ui.authNoticeTitle}>✓  {tx('আপনার অ্যাকাউন্ট মুছে ফেলা হয়েছে।', 'Your account has been deleted.')}</Text>
+            {notice.retentionUntil ? (
+              <Text style={ui.authNoticeText}>
+                {tx(
+                  `ঋণ, অর্ডার ও পেমেন্টের রেকর্ড পরিচয় ছাড়া ${formatDate(notice.retentionUntil, lang)} পর্যন্ত রাখা হবে।`,
+                  `Loan, order and payment records are kept, anonymised, until ${formatDate(notice.retentionUntil, lang)}.`,
+                )}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
         {step === 'phone' ? (
           <>
             <Text style={styles.loginSub}>{tx('চালিয়ে যেতে মোবাইল নম্বর দিন', 'Enter your mobile number to continue')}</Text>
@@ -2120,6 +2194,15 @@ function Login({ onAuthed }: { onAuthed: (user: AuthUser) => void }) {
             />
             {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
             <AppButton title={tx('কোড পাঠান', 'Send Code')} onPress={sendCode} />
+            {/* Google Play: the terms and the privacy policy, reachable from the
+                screen where using the app begins. */}
+            <Text style={ui.legalNote}>
+              {tx('চালিয়ে গেলে আপনি ', 'By continuing you agree to the ')}
+              <Text style={ui.legalLink} onPress={() => openPublicPage('terms')} accessibilityRole="link">{tx('শর্তাবলি', 'Terms')}</Text>
+              {tx(' ও ', ' and ')}
+              <Text style={ui.legalLink} onPress={() => openPublicPage('privacy')} accessibilityRole="link">{tx('গোপনীয়তা নীতিতে', 'Privacy Policy')}</Text>
+              {tx(' সম্মত হচ্ছেন।', '.')}
+            </Text>
           </>
         ) : (
           <>
@@ -2285,8 +2368,7 @@ function PersonalInfo({ onDone }: { onDone: () => void }) {
   ];
 
   async function pickPhoto() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
+    if (!(await photoLibraryAllowed())) return;
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.7 });
     if (result.canceled) return;
     const uri = result.assets[0].uri;
@@ -4437,8 +4519,7 @@ function MediaDescription({ draft, patchDraft, kind, context }: { draft: Listing
   const [genDone, setGenDone] = useState(false);
 
   async function pickImages() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
+    if (!(await photoLibraryAllowed())) return;
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: 6, quality: 0.72 });
     if (!result.canceled) patchDraft({ images: [...draft.images, ...result.assets.map((a) => a.uri)].slice(0, 6) });
   }
@@ -5114,7 +5195,7 @@ function BuyCategories({ setScreen, onSelectCategory, onOpenOrder, initialTab = 
                     style={({ pressed }) => [styles.catCard, !isActive && styles.catCardInactive, pressed && styles.pressed]}
                   >
                     <Text style={styles.catCardIcon}>{emoji}</Text>
-                    <Text style={styles.catCardTitle} numberOfLines={1}>{rowTitle(cat, lang, tx('বিভাগ', 'Category'))}</Text>
+                    <Text style={styles.catCardTitle} numberOfLines={2}>{rowTitle(cat, lang, tx('বিভাগ', 'Category'))}</Text>
                     {isActive
                       ? <Text style={styles.catCardCount}>{num(count, lang)} {tx('পণ্য', 'items')}</Text>
                       : <Text style={styles.catCardCountMuted}>{tx('এখন কোনো পণ্য নেই', 'No items right now')}</Text>}
@@ -6757,8 +6838,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const postRows = shouldUseFallback(posts) && !localPosts.length ? fallbackCommunityPosts : posts.rows;
 
   async function pickPostImage() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
+    if (!(await photoLibraryAllowed())) return;
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
     if (!result.canceled) setPostImage(result.assets[0].uri);
   }
@@ -7759,8 +7839,8 @@ function ListingProgress({ setScreen, listingId }: { setScreen: (screen: Screen)
                 <View key={s.key} style={ui.ldStat}>
                   <Text style={ui.ldStatIcon}>{s.icon}</Text>
                   <View style={styles.flex}>
-                    <Text style={ui.ldStatLabel} numberOfLines={1}>{s.label}</Text>
-                    <Text style={ui.ldStatValue} numberOfLines={1}>{s.ok ? '✓ ' : ''}{s.value}</Text>
+                    <Text style={ui.ldStatLabel} numberOfLines={2}>{s.label}</Text>
+                    <Text style={ui.ldStatValue} numberOfLines={2}>{s.ok ? '✓ ' : ''}{s.value}</Text>
                   </View>
                 </View>
               ))}
@@ -8159,7 +8239,8 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { user: authedUser, signOut } = useAuth();
   const users = useApiList<ApiRow>('users');
   const user = authedUser || (shouldUseFallback(users) ? fallbackProfileUser : users.rows[0]);
-  const menuRows: Array<{ icon: string; title: string; sub: string; target?: Screen; action?: () => void; pill?: string }> = [
+  type MenuRow = { icon: string; title: string; sub: string; target?: Screen; action?: () => void; pill?: string; external?: boolean; danger?: boolean };
+  const menuRows: MenuRow[] = [
     { icon: '👤', title: tx('ব্যক্তিগত তথ্য', 'Personal Info'), sub: tx('নাম, লিঙ্গ, ছবি', 'Name, gender, photo'), target: 'menuPersonal', pill: user?.profile_change_pending ? tx('পর্যালোচনায়', 'In review') : undefined },
     { icon: '🏦', title: tx('ব্যাংকিং বিবরণ', 'Banking Details'), sub: tx('ব্যাংক, মোবাইল ব্যাংকিং', 'Bank, mobile banking'), target: 'menuBanking' },
     { icon: '🌾', title: tx('খামারের তথ্য', 'Farm Info'), sub: tx('জমি, ফসল, পশুপাখি', 'Land, crops, livestock'), target: 'menuFarm' },
@@ -8173,7 +8254,43 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
     { icon: '🌐', title: tx('ভাষা', 'Language'), sub: tx('ভাষা পরিবর্তন করুন', 'Switch language'), action: toggleLang, pill: lang === 'bn' ? 'BN' : 'EN' },
     { icon: '❓', title: tx('সাহায্য ও FAQ', 'Help & FAQ'), sub: tx('সাধারণ জিজ্ঞাসা', 'Common questions'), target: 'menuFaq' },
   ];
+  // Google Play: the privacy policy, the terms, the loan cost disclosure and
+  // account deletion, each one tap from the Menu.
+  const accountRows: MenuRow[] = [
+    { icon: '🔒', title: tx('গোপনীয়তা নীতি', 'Privacy policy'), sub: tx('কোন তথ্য রাখা হয় ও কেন', 'What we keep and why'), action: () => openPublicPage('privacy'), external: true },
+    { icon: '📄', title: tx('শর্তাবলি', 'Terms'), sub: tx('শাথী সেবা ব্যবহারের শর্ত', 'The terms of using Shathi Sheba'), action: () => openPublicPage('terms'), external: true },
+    { icon: '💳', title: tx('ঋণের শর্ত ও খরচ', 'Loan terms & cost'), sub: tx('সুদ, ফি ও বার্ষিক খরচ (APR)', 'Interest, fees and APR'), action: () => openPublicPage('loan-disclosure'), external: true },
+    { icon: '🗑️', title: tx('অ্যাকাউন্ট মুছে ফেলুন', 'Delete my account'), sub: tx('আপনার তথ্য স্থায়ীভাবে মুছে দিন', 'Erase your data for good'), target: 'deleteAccount', danger: true },
+  ];
   const roleChips = roleLabelsFor(authedUser, tx);
+  const { version, build } = useMemo(appVersion, []);
+  const versionText = version ? `${num(version, lang)}${build ? ` (${num(build, lang)})` : ''}` : '';
+  const renderMenu = (rows: MenuRow[]) => (
+    <Card style={styles.menuCard}>
+      {rows.map((row, index) => (
+        <Pressable
+          key={row.title}
+          onPress={row.action ? row.action : row.target ? () => setScreen(row.target as Screen) : undefined}
+          accessibilityRole={row.external ? 'link' : 'button'}
+          style={({ pressed }) => [styles.menuItem, index === rows.length - 1 && styles.menuItemLast, pressed && styles.menuItemPressed]}
+        >
+          <View style={styles.menuIconWrap}><Text style={[styles.menuIcon, row.danger && ui.menuIconDanger]}>{row.icon}</Text></View>
+          <View style={styles.flex}>
+            <Text style={[styles.menuTitle, row.danger && ui.menuTitleDanger]}>{row.title}</Text>
+            <Text style={styles.menuSub}>{row.sub}</Text>
+          </View>
+          {row.pill ? (
+            <View style={styles.languagePill}>
+              <Text style={styles.languagePillText}>{row.pill}</Text>
+            </View>
+          ) : (
+            // An arrow out of the box: this one opens the web page, not a screen.
+            <Text style={row.external ? ui.menuExternal : styles.chevron}>{row.external ? '↗' : '›'}</Text>
+          )}
+        </Pressable>
+      ))}
+    </Card>
+  );
   return (
     <>
       <View style={styles.profileHead}>
@@ -8195,33 +8312,185 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
         </View>
       </View>
       <SectionTitle title={tx('মেনু', 'Menu')} />
-      <Card style={styles.menuCard}>
-        {menuRows.map((row, index) => (
-          <Pressable
-            key={row.title}
-            onPress={row.action ? row.action : row.target ? () => setScreen(row.target as Screen) : undefined}
-            style={({ pressed }) => [styles.menuItem, index === menuRows.length - 1 && styles.menuItemLast, pressed && styles.menuItemPressed]}
-          >
-            <View style={styles.menuIconWrap}><Text style={styles.menuIcon}>{row.icon}</Text></View>
-            <View style={styles.flex}>
-              <Text style={styles.menuTitle}>{row.title}</Text>
-              <Text style={styles.menuSub}>{row.sub}</Text>
-            </View>
-            {row.pill ? (
-              <View style={styles.languagePill}>
-                <Text style={styles.languagePillText}>{row.pill}</Text>
-              </View>
-            ) : (
-              <Text style={styles.chevron}>›</Text>
-            )}
-          </Pressable>
-        ))}
-      </Card>
+      {renderMenu(menuRows)}
+      <SectionTitle title={tx('গোপনীয়তা ও অ্যাকাউন্ট', 'Privacy & account')} />
+      {renderMenu(accountRows)}
       <Pressable onPress={() => { void signOut(); }} style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]}>
         <Text style={styles.logoutButtonIcon}>↪</Text>
         <Text style={styles.logoutButtonText}>{tx('লগআউট', 'Logout')}</Text>
       </Pressable>
-      <Text style={styles.version}>{tx('Shathi Sheba v1.0 · প্রস্তুতকারী Digigram Ventures Ltd.', 'Shathi Sheba v1.0 · Powered by Digigram Ventures Ltd.')}</Text>
+      <Text style={styles.version}>
+        {tx(
+          `শাথী সেবা${versionText ? ` · সংস্করণ ${versionText}` : ''} · প্রস্তুতকারী Digigram Ventures Ltd.`,
+          `Shathi Sheba${versionText ? ` v${versionText}` : ''} · Powered by Digigram Ventures Ltd.`,
+        )}
+      </Text>
+    </>
+  );
+}
+
+/**
+ * True when what she typed is her own mobile number, or the word — "মুছুন" or
+ * DELETE — in either language. Bangla digits count, and so does +880.
+ */
+function deletionConfirmed(typed: string, phone: unknown): boolean {
+  const value = typed.trim();
+  if (!value) return false;
+  if (/^delete$/i.test(value) || value === 'মুছুন') return true;
+  const normal = (v: string) =>
+    v.replace(/[০-৯]/g, (d) => String(bnDigits.indexOf(d))).replace(/\D/g, '').replace(/^(?:00)?88(?=01\d{9}$)/, '');
+  const mine = normal(String(phone ?? ''));
+  return /^01\d{9}$/.test(mine) && normal(value) === mine;
+}
+
+/**
+ * What a deleted account leaves on the phone besides the session: every cached
+ * API response — her profile, listings, orders, loan — kept for offline use.
+ * Best effort; the server's copy is the one that was erased.
+ */
+async function purgeCachedResponses() {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const cached = keys.filter((key) => key.startsWith(API_CACHE_PREFIX));
+    if (cached.length) await AsyncStorage.multiRemove(cached);
+  } catch {
+    // Nothing to do: an unreadable store is one no screen can read either.
+  }
+}
+
+/**
+ * Delete my account. Google Play requires it inside the app, and a loan
+ * platform cannot make "delete" mean everything — so the screen says plainly
+ * what is erased now and what is kept, stripped of who she is, for five years
+ * of financial record-keeping. The final button stays disabled until she types
+ * her phone number or the word: a stray tap must not be able to erase an
+ * account.
+ */
+function DeleteAccountScreen({ setScreen, onDeleted }: {
+  setScreen: (screen: Screen) => void;
+  onDeleted: (notice: AuthNotice) => void;
+}) {
+  const { tx, lang } = useLanguage();
+  const { user, signOut } = useAuth();
+  const { clear: clearApaConversation } = useApa();
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const confirmed = deletionConfirmed(typed, user?.phone);
+
+  const erased: [string, string][] = [
+    ['👤', tx('নাম', 'Name')],
+    ['📱', tx('মোবাইল নম্বর', 'Phone number')],
+    ['🪪', tx('জাতীয় পরিচয়পত্র (এনআইডি)', 'National ID (NID)')],
+    ['🖼️', tx('ছবি', 'Photos')],
+    ['🏦', tx('ব্যাংকিং তথ্য', 'Banking details')],
+    ['🌾', tx('খামারের তথ্য', 'Farm information')],
+    ['📍', tx('লোকেশন', 'Location')],
+    ['💬', tx('কমিউনিটি পোস্ট', 'Community posts')],
+    ['🔔', tx('নোটিফিকেশন', 'Notifications')],
+  ];
+
+  async function remove() {
+    if (!confirmed || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const res = await apiRequest<{ ok?: boolean; result?: { deleted?: boolean; retention_until?: string | null } }>('app/me/delete', {
+        method: 'POST',
+        body: JSON.stringify({ confirm: 'DELETE' }),
+      });
+      if (res?.result?.deleted === false) {
+        throw new Error(tx('অ্যাকাউন্ট মোছা যায়নি। আবার চেষ্টা করুন।', 'The account could not be deleted. Please try again.'));
+      }
+      // The server revoked every session with the account. Drop the token now,
+      // so a background refresh cannot 401 and race this screen to onboarding.
+      setApiAuthToken(null);
+      await purgeCachedResponses();
+      clearApaConversation();
+      onDeleted({ kind: 'account_deleted', retentionUntil: txt(res?.result?.retention_until) || null });
+      await signOut('login');
+    } catch (e) {
+      setError(serverMessage(e, lang));
+      setBusy(false);
+    }
+  }
+
+  const disabled = !confirmed || busy;
+  return (
+    <>
+      <Header title={tx('অ্যাকাউন্ট মুছে ফেলুন', 'Delete my account')} onBack={() => setScreen('profile')} />
+      <RefreshScroll>
+        <View style={ui.delWarn}>
+          <Text style={ui.delWarnTitle}>⚠  {tx('এটি আর ফেরানো যাবে না', 'This cannot be undone')}</Text>
+          <Text style={ui.delWarnText}>
+            {tx('আপনার শাথী সেবা অ্যাকাউন্ট স্থায়ীভাবে মুছে যাবে, আর সব ফোন থেকে আপনি সাইন আউট হয়ে যাবেন।',
+                'Your Shathi Sheba account is deleted for good, and you are signed out on every phone.')}
+          </Text>
+        </View>
+
+        <View style={ui.dCard}>
+          <Text style={ui.dCardTitle}>{tx('এখনই যা মুছে যাবে', 'Erased now')}</Text>
+          <View style={ui.delGrid}>
+            {erased.map(([icon, label]) => (
+              <View key={label} style={ui.delItem}>
+                <Text style={ui.delItemIcon}>{icon}</Text>
+                <Text style={ui.delItemText}>{label}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+
+        <View style={ui.dCard}>
+          <Text style={ui.dCardTitle}>{tx('৫ বছর রাখা হবে, পরিচয় ছাড়া', 'Kept for 5 years, anonymised')}</Text>
+          <View style={[ui.delItem, ui.delItemWide]}>
+            <Text style={ui.delItemIcon}>🧾</Text>
+            <Text style={ui.delItemText}>{tx('ঋণ, অর্ডার ও পেমেন্টের রেকর্ড', 'Loan, order and payment records')}</Text>
+          </View>
+          <Text style={ui.delNote}>
+            {tx('আর্থিক হিসাব সংরক্ষণের জন্য এগুলো ৫ বছর রাখা হয়। এগুলো থেকে আপনার নাম, ফোন নম্বর ও এনআইডি সরিয়ে ফেলা হয়, তাই এগুলো আর আপনার সাথে মেলানো যায় না।',
+                'They are kept for 5 years for financial record-keeping. Your name, phone number and NID are removed from them, so they can no longer be linked to you.')}
+          </Text>
+        </View>
+
+        <View style={ui.dCard}>
+          <Text style={ui.dCardTitle}>{tx('নিশ্চিত করুন', 'Confirm')}</Text>
+          <Text style={ui.delNote}>
+            {tx('নিশ্চিত করতে আপনার মোবাইল নম্বর অথবা “মুছুন” শব্দটি লিখুন।', 'To confirm, type your mobile number or the word DELETE.')}
+          </Text>
+          <TextInput
+            style={[ui.inputSm, ui.delInput]}
+            value={typed}
+            onChangeText={(value) => { setTyped(value); setError(''); }}
+            placeholder={tx('০১XXXXXXXXX অথবা মুছুন', '01XXXXXXXXX or DELETE')}
+            placeholderTextColor={colors.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!busy}
+            accessibilityLabel={tx('নিশ্চিত করার লেখা', 'Confirmation')}
+          />
+          {error ? <Text style={ui.delError}>{error}</Text> : null}
+          <Pressable
+            onPress={remove}
+            disabled={disabled}
+            accessibilityRole="button"
+            accessibilityState={{ disabled }}
+            style={({ pressed }) => [ui.delBtn, disabled && ui.delBtnOff, pressed && !disabled && styles.pressed]}
+          >
+            <Text style={ui.delBtnText}>
+              {busy ? tx('মুছে ফেলা হচ্ছে…', 'Deleting…') : tx('অ্যাকাউন্ট স্থায়ীভাবে মুছুন', 'Delete my account permanently')}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setScreen('profile')}
+            disabled={busy}
+            accessibilityRole="button"
+            style={({ pressed }) => [ui.delCancel, pressed && styles.pressed]}
+          >
+            <Text style={ui.delCancelText}>{tx('বাতিল', 'Cancel')}</Text>
+          </Pressable>
+        </View>
+        <Text style={ui.delHelp}>{tx('প্রশ্ন থাকলে লিখুন: info@digigramventures.com', 'Questions? Write to info@digigramventures.com')}</Text>
+      </RefreshScroll>
     </>
   );
 }
@@ -8464,8 +8733,7 @@ function KycScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
 
   async function pick() {
     setError('');
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return;
+    if (!(await photoLibraryAllowed())) return;
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 });
     if (!result.canceled) setPickedUri(result.assets[0].uri);
   }
@@ -10411,6 +10679,190 @@ function FinanceGuidanceSheet({ setScreen, topic }: { setScreen: (screen: Screen
 // consent. All evidence is collected by a field officer in the admin console.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Loan cost disclosure (Google Play Financial Services policy)
+// ---------------------------------------------------------------------------
+
+/** A figure from the API, or null. DECIMAL columns arrive as strings, and a
+ *  missing figure must hide its line rather than print "NaN" or "undefined". */
+function finiteOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** "34.29%" — at most two decimals, none when whole; Bangla digits in Bangla. */
+function pctText(value: number, lang: Lang): string {
+  return `${num(Math.round(value * 100) / 100, lang)}%`;
+}
+
+/** "৳50,000 for 12 months: total repayable ৳X, 12 monthly instalments of ৳Y, APR Z%". */
+function representativeExample(rep: LoanDisclosure['representative'], lang: Lang): string | null {
+  if (!rep || typeof rep !== 'object') return null;
+  const principal = finiteOrNull(rep.principal);
+  const months = finiteOrNull(rep.tenure_months);
+  const total = finiteOrNull(rep.total_payable);
+  if (principal == null || months == null || total == null) return null;
+  const count = finiteOrNull(rep.installment_count);
+  const emi = finiteOrNull(rep.emi_amount);
+  const apr = finiteOrNull(rep.apr_pct);
+  const mode = String(rep.repayment_mode ?? '');
+  const parts = [lang === 'bn' ? `মোট পরিশোধ ${amount(total, lang)}` : `total repayable ${amount(total, lang)}`];
+  if (count != null && count > 1 && emi != null) {
+    const bnMode = mode === 'weekly' ? 'সাপ্তাহিক ' : mode === 'monthly' ? 'মাসিক ' : '';
+    const enMode = mode === 'weekly' ? 'weekly ' : mode === 'monthly' ? 'monthly ' : '';
+    parts.push(lang === 'bn'
+      ? `${num(count, lang)}টি ${bnMode}কিস্তি, প্রতিটি ${amount(emi, lang)}`
+      : `${count} ${enMode}instalments of ${amount(emi, lang)}`);
+  } else if (count === 1) {
+    parts.push(lang === 'bn' ? 'এক কিস্তিতে' : 'in one payment');
+  }
+  if (apr != null) parts.push(`APR ${pctText(apr, lang)}`);
+  const head = lang === 'bn' ? `${amount(principal, lang)}, ${num(months, lang)} মাসের জন্য` : `${amount(principal, lang)} for ${months} months`;
+  return `${head}: ${parts.join(', ')}`;
+}
+
+/** The disclosure as display strings, or null when there is nothing to show. */
+function disclosureLines(d: LoanDisclosure | null | undefined, lang: Lang) {
+  if (!d || typeof d !== 'object') return null;
+  const t = (bnText: string, enText: string) => (lang === 'bn' ? bnText : enText);
+  const months = t('মাস', 'months');
+
+  const aprMax = finiteOrNull(d.apr_max_pct);
+
+  const tMin = finiteOrNull(d.tenure_min_months);
+  const tMax = finiteOrNull(d.tenure_max_months);
+  let tenure: string | null = null;
+  if (tMin != null && tMax != null) {
+    tenure = tMin === tMax ? `${num(tMin, lang)} ${months}` : `${num(tMin, lang)}–${num(tMax, lang)} ${months}`;
+  } else if (tMax != null) {
+    tenure = t(`সর্বোচ্চ ${num(tMax, lang)} মাস`, `up to ${tMax} months`);
+  } else if (tMin != null) {
+    tenure = t(`কমপক্ষে ${num(tMin, lang)} মাস`, `at least ${tMin} months`);
+  }
+
+  // The fee is a share of the loan plus a flat amount, either of which may be zero.
+  const feePct = finiteOrNull(d.processing_fee_pct);
+  const feeFlat = finiteOrNull(d.processing_fee_flat);
+  let processingFee: string | null = null;
+  if (feePct != null || feeFlat != null) {
+    const parts: string[] = [];
+    if (feePct != null && feePct > 0) parts.push(t(`ঋণের ${pctText(feePct, lang)}`, `${pctText(feePct, lang)} of the loan`));
+    if (feeFlat != null && feeFlat > 0) parts.push(amount(feeFlat, lang));
+    processingFee = parts.length ? parts.join(' + ') : t('নেই', 'None');
+  }
+
+  const late = finiteOrNull(d.late_penalty_pct);
+  const latePenalty = late != null && late > 0 ? pctText(late, lang) : null;
+
+  const example = representativeExample(d.representative, lang);
+  if (aprMax == null && !tenure && !processingFee && !latePenalty && !example) return null;
+  return { aprMax, tenure, processingFee, latePenalty, example };
+}
+
+/** Said wherever a loan is offered: Shathi Sheba arranges it, a partner lends. */
+function LenderNote({ inset = false }: { inset?: boolean }) {
+  const { tx } = useLanguage();
+  return (
+    <View style={[ui.discLender, inset && ui.discLenderInset]}>
+      <Text style={ui.discLenderIcon}>ⓘ</Text>
+      <View style={styles.flex}>
+        <Text style={ui.discLenderText}>
+          {tx('ঋণ দেয় আমাদের অংশীদার ঋণদাতা প্রতিষ্ঠান; অনুমোদনের নিশ্চয়তা নেই।', 'Partner lenders provide the loans; approval is not guaranteed.')}
+        </Text>
+        <Text style={ui.discLink} onPress={() => openPublicPage('loan-disclosure')} accessibilityRole="link">
+          {tx('ঋণের সব শর্ত ও খরচ দেখুন ↗', 'See full loan terms & cost ↗')}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * What a loan costs — shown where a loan is chosen and again before it is
+ * applied for, as Google Play requires of a loan app.
+ *
+ * The maximum APR leads, labelled for what it is: interest and every fee, per
+ * year. The nominal flat rate shown beside it elsewhere reads as about half the
+ * true cost and must never stand alone. Every figure is the server's (the
+ * product's `disclosure`); a missing one hides its line, and with no disclosure
+ * at all only the lender note remains.
+ *
+ * `compact` is the in-card form for the product lists: a few lines and no
+ * lender note, which the list says once at its foot.
+ */
+function LoanDisclosureBlock({ disclosure, compact = false }: { disclosure?: LoanDisclosure | null; compact?: boolean }) {
+  const { tx, lang } = useLanguage();
+  const lines = disclosureLines(disclosure, lang);
+
+  if (compact) {
+    if (!lines) return null;
+    const terms = [
+      lines.tenure ? `${tx('মেয়াদ', 'Term')} ${lines.tenure}` : '',
+      lines.processingFee ? `${tx('প্রসেসিং ফি', 'Processing fee')} ${lines.processingFee}` : '',
+      lines.latePenalty ? `${tx('দেরিতে পরিশোধের জরিমানা', 'Late payment penalty')} ${lines.latePenalty}` : '',
+    ].filter(Boolean).join('  ·  ');
+    return (
+      <View style={ui.discBox}>
+        {lines.aprMax != null ? (
+          <>
+            <Text style={ui.discCompactApr}>{tx('সর্বোচ্চ বার্ষিক খরচ (APR)', 'Maximum APR')} {pctText(lines.aprMax, lang)}</Text>
+            <Text style={ui.discCompactAprSub}>{tx('সুদ ও সব ফি মিলিয়ে, বছরে', 'Annual rate, including interest and all fees')}</Text>
+          </>
+        ) : null}
+        {terms ? <Text style={ui.discCompactLine}>{terms}</Text> : null}
+        {lines.example ? (
+          <Text style={ui.discCompactLine}>
+            <Text style={ui.discStrong}>{tx('উদাহরণ: ', 'Example: ')}</Text>
+            {lines.example}
+          </Text>
+        ) : null}
+      </View>
+    );
+  }
+
+  if (!lines) return <LenderNote inset />;
+  return (
+    <View style={ui.discCard}>
+      <Text style={ui.discTitle}>{tx('ঋণের খরচ', 'What the loan costs')}</Text>
+      {lines.aprMax != null ? (
+        <View style={ui.discAprRow}>
+          <View style={styles.flex}>
+            <Text style={ui.discAprLabel}>{tx('সর্বোচ্চ বার্ষিক খরচ (APR)', 'Maximum APR')}</Text>
+            <Text style={ui.discAprSub}>{tx('সুদ ও সব ফি মিলিয়ে, বছরে', 'Annual rate, including interest and all fees')}</Text>
+          </View>
+          <Text style={ui.discAprValue}>{pctText(lines.aprMax, lang)}</Text>
+        </View>
+      ) : null}
+      {lines.tenure ? (
+        <View style={ui.discLine}>
+          <Text style={ui.discKey}>{tx('পরিশোধের মেয়াদ', 'Repayment period')}</Text>
+          <Text style={ui.discVal}>{lines.tenure}</Text>
+        </View>
+      ) : null}
+      {lines.processingFee ? (
+        <View style={ui.discLine}>
+          <Text style={ui.discKey}>{tx('প্রসেসিং ফি', 'Processing fee')}</Text>
+          <Text style={ui.discVal}>{lines.processingFee}</Text>
+        </View>
+      ) : null}
+      {lines.latePenalty ? (
+        <View style={ui.discLine}>
+          <Text style={ui.discKey}>{tx('দেরিতে পরিশোধের জরিমানা', 'Late payment penalty')}</Text>
+          <Text style={ui.discVal}>{lines.latePenalty}</Text>
+        </View>
+      ) : null}
+      {lines.example ? (
+        <View style={ui.discExampleBox}>
+          <Text style={ui.discExampleHead}>{tx('উদাহরণ', 'Example')}</Text>
+          <Text style={ui.discExample}>{lines.example}</Text>
+        </View>
+      ) : null}
+      <LenderNote />
+    </View>
+  );
+}
+
 function FinanceHub({
   setScreen, onPickProduct, onSelectProduct,
 }: {
@@ -10588,7 +11040,7 @@ function FinanceHub({
                           {amount(Number(p.min_amount), lang)} – {amount(Number(p.max_amount), lang)}
                         </Text>
                         <Text style={fin.productTerms}>
-                          {num(Number(p.interest_rate_annual), lang)}% {tx('বার্ষিক', 'p.a.')}
+                          {tx('সুদ', 'Interest')} {num(Number(p.interest_rate_annual), lang)}% {tx('বার্ষিক', 'p.a.')}
                           {'  ·  '}
                           {p.allowed_tenures.map((t) => num(t, lang)).join(' / ')} {tx('মাস', 'mo')}
                         </Text>
@@ -10604,10 +11056,12 @@ function FinanceHub({
                     tone={p.is_active ? 'green' : 'gold'}
                   />
                 </View>
+                {p.is_active ? <LoanDisclosureBlock compact disclosure={p.disclosure} /> : null}
               </Card>
             </Pressable>
           );
         })}
+        {products.rows.length ? <LenderNote inset /> : null}
 
         {/* Always present, whatever the state above — it is the screen's job. */}
         <View style={{ paddingHorizontal: 16, marginTop: 18 }}>
@@ -10658,7 +11112,7 @@ function LoanApplyType({
                   </View>
                   {p.is_active ? (
                     <View style={fin.rateBadge}>
-                      <Text style={fin.rateBadgeText}>{num(Number(p.interest_rate_annual), lang)}% {tx('বার্ষিক', 'p.a.')}</Text>
+                      <Text style={fin.rateBadgeText}>{tx('সুদ', 'Interest')} {num(Number(p.interest_rate_annual), lang)}% {tx('বার্ষিক', 'p.a.')}</Text>
                     </View>
                   ) : (
                     <Badge label={tx('শীঘ্রই আসছে', 'Coming soon')} tone="gold" />
@@ -10671,10 +11125,12 @@ function LoanApplyType({
                     {p.allowed_tenures.map((t) => num(t, lang)).join(', ')} {tx('মাস', 'months')}
                   </Text>
                 ) : null}
+                {p.is_active ? <LoanDisclosureBlock compact disclosure={p.disclosure} /> : null}
               </Card>
             </Pressable>
           );
         })}
+        {products.rows.length ? <LenderNote inset /> : null}
         <View style={{ height: 28 }} />
       </RefreshScroll>
     </>
@@ -10954,6 +11410,10 @@ function LoanApplyDetails({
             )}
           </Card>
         )}
+
+        {/* The product's cost disclosure beside her own quote: the instalment
+            above is one case, this is the most the loan can cost. */}
+        <LoanDisclosureBlock disclosure={product.disclosure} />
 
         <View style={{ paddingHorizontal: 16, marginTop: 18, marginBottom: 28 }}>
           <AppButton
@@ -11254,6 +11714,9 @@ function LoanApplyConsent({
             </Pressable>
           );
         })}
+
+        {/* Said again at the last step: what it costs, before she applies. */}
+        <LoanDisclosureBlock disclosure={draft.product?.disclosure} />
 
         {error ? (
           <Card style={{ marginHorizontal: 16, marginTop: 12, padding: 14 }}>

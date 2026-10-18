@@ -26,6 +26,7 @@ import {
   deviceVoiceName, intro as introText, primeDeviceVoice, speechAvailability, speechMode, stopSpeech,
 } from '../ai/speech';
 import { clear as clearAudioCache, stats as audioCacheStats } from '../media/audioCache';
+import { photoLibraryAllowed } from '../media/image';
 import { ListenButton } from '../ai/ListenButton';
 import { APA_AMBER, APA_END, APA_GREEN, apa } from './styles';
 import { bn, clock, screenFromAction, useApa, type ApaTurn } from './state';
@@ -2171,10 +2172,12 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
 
   async function shoot(fromLibrary: boolean) {
     setNotice('');
-    const permission = fromLibrary
-      ? await ImagePicker.requestMediaLibraryPermissionsAsync()
-      : await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
+    // The gallery asks only on iOS — Android's system photo picker needs no
+    // permission, and the one this used to request is blocked for Play.
+    const allowed = fromLibrary
+      ? await photoLibraryAllowed()
+      : (await ImagePicker.requestCameraPermissionsAsync()).granted;
+    if (!allowed) {
       // Said rather than silently doing nothing, which is what happened before.
       setNotice(
         fromLibrary
@@ -2183,9 +2186,22 @@ export function ApaCameraScreen({ setScreen }: { setScreen: (screen: Screen) => 
       );
       return;
     }
-    const result = fromLibrary
-      ? await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.72 })
-      : await ImagePicker.launchCameraAsync({ quality: 0.72 });
+    let result: ImagePicker.ImagePickerResult;
+    try {
+      result = fromLibrary
+        ? await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.72 })
+        : await ImagePicker.launchCameraAsync({ quality: 0.72 });
+    } catch {
+      // On Android 9 and older the camera also wants storage access, which
+      // the Play build no longer declares — so offer the gallery instead of
+      // failing without a word.
+      setNotice(
+        fromLibrary
+          ? tx('গ্যালারি খোলা যায়নি। আবার চেষ্টা করুন।', 'The gallery could not be opened. Please try again.')
+          : tx('ক্যামেরা খোলা যায়নি। গ্যালারি থেকে একটি ছবি বেছে নিন।', 'The camera could not be opened. Pick a photo from the gallery instead.')
+      );
+      return;
+    }
     if (!result.canceled && result.assets?.[0]?.uri) setPhoto(result.assets[0].uri);
   }
 

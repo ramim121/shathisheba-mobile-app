@@ -425,4 +425,63 @@ export const ui = StyleSheet.create({
   ldShareInput: { marginHorizontal: 20, minHeight: 84, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: 'white', padding: 12, color: colors.ink, fontSize: 14.5, textAlignVertical: 'top' },
   ldShareCount: { color: colors.muted, fontSize: 11.5, textAlign: 'right', paddingHorizontal: 20, marginTop: 4 },
   ldShareError: { color: colors.danger, fontSize: 13, lineHeight: 19, paddingHorizontal: 20, marginTop: 8, fontWeight: '600' },
+
+  // ---- Sign-in: the notice after an account is deleted, and the legal line ----
+  authNotice: { marginTop: 14, marginBottom: 12, marginHorizontal: 16, borderRadius: 12, backgroundColor: colors.greenPale, borderWidth: 1, borderColor: '#B7E0C9', paddingHorizontal: 12, paddingVertical: 10 },
+  authNoticeTitle: { color: '#15803D', fontSize: 14, fontWeight: '800', lineHeight: 20 },
+  authNoticeText: { color: '#166534', fontSize: 12.5, lineHeight: 18, marginTop: 3 },
+  legalNote: { color: colors.muted, fontSize: 12, lineHeight: 18, textAlign: 'center', marginTop: 14, marginHorizontal: 8 },
+  legalLink: { color: colors.maroon, fontWeight: '800', textDecorationLine: 'underline' },
+
+  // ---- Menu: rows that open a web page, and the destructive one -------------
+  menuExternal: { color: colors.muted, fontSize: 17, fontWeight: '700' },
+  menuIconDanger: { backgroundColor: '#FEE2E2' },
+  menuTitleDanger: { color: colors.danger },
+
+  // ---- Delete my account --------------------------------------------------------
+  delWarn: { marginHorizontal: 16, marginTop: 12, borderRadius: 14, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', padding: 14 },
+  delWarnTitle: { color: '#991B1B', fontSize: 16, fontWeight: '900' },
+  delWarnText: { color: '#991B1B', fontSize: 13.5, lineHeight: 20, marginTop: 4, fontWeight: '600' },
+  delGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  delItem: {
+    width: '47%', flexGrow: 1, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.cream,
+    borderRadius: 10, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 10, paddingVertical: 9,
+  },
+  delItemWide: { width: '100%' },
+  delItemIcon: { fontSize: 16 },
+  delItemText: { flex: 1, color: colors.ink, fontSize: 13.5, fontWeight: '700' },
+  delNote: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 8 },
+  delInput: { marginTop: 10, fontSize: 16 },
+  delError: { color: colors.danger, fontSize: 13, lineHeight: 19, marginTop: 8, fontWeight: '600' },
+  delBtn: { marginTop: 14, minHeight: 52, borderRadius: 12, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  delBtnOff: { backgroundColor: '#F3B4B4' },
+  delBtnText: { color: 'white', fontSize: 15.5, fontWeight: '900', textAlign: 'center' },
+  delCancel: { marginTop: 10, minHeight: 46, borderRadius: 12, borderWidth: 1.5, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  delCancelText: { color: colors.ink, fontSize: 14.5, fontWeight: '800' },
+  delHelp: { color: colors.muted, fontSize: 12.5, textAlign: 'center', marginTop: 14, marginBottom: 24, paddingHorizontal: 16 },
+
+  // ---- Loan cost disclosure (Google Play Financial Services) -----------------
+  // The APR leads: it is the figure the nominal flat rate understates.
+  discBox: { marginTop: 12, borderRadius: 12, backgroundColor: '#FBF4F7', borderWidth: 1, borderColor: '#F1E1E9', paddingHorizontal: 12, paddingVertical: 10 },
+  discCompactApr: { color: colors.maroon, fontSize: 14, fontWeight: '900', lineHeight: 20 },
+  discCompactAprSub: { color: colors.muted, fontSize: 11.5, fontWeight: '700', marginTop: 1 },
+  discCompactLine: { color: colors.ink, fontSize: 12.5, lineHeight: 18, marginTop: 4 },
+  discStrong: { fontWeight: '800' },
+  discCard: { marginHorizontal: 16, marginTop: 14, backgroundColor: 'white', borderRadius: 14, borderWidth: 1, borderColor: colors.line, padding: 14 },
+  discTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
+  discAprRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 10, marginBottom: 4, borderRadius: 12, backgroundColor: colors.rose, paddingHorizontal: 12, paddingVertical: 10 },
+  discAprLabel: { color: colors.ink, fontSize: 13.5, fontWeight: '800' },
+  discAprSub: { color: colors.muted, fontSize: 11.5, lineHeight: 16, marginTop: 2 },
+  discAprValue: { color: colors.maroon, fontSize: 24, fontWeight: '900' },
+  discLine: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, paddingVertical: 8, borderBottomWidth: 1, borderColor: '#F3E8EE' },
+  discKey: { color: colors.muted, fontSize: 13, flexShrink: 1 },
+  discVal: { color: colors.ink, fontSize: 13, fontWeight: '700', textAlign: 'right', flexShrink: 1 },
+  discExampleBox: { marginTop: 10 },
+  discExampleHead: { color: colors.muted, fontSize: 11.5, fontWeight: '800', letterSpacing: 0.3 },
+  discExample: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 3 },
+  discLender: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', marginTop: 12 },
+  discLenderInset: { marginHorizontal: 16 },
+  discLenderIcon: { color: colors.muted, fontSize: 13, lineHeight: 18 },
+  discLenderText: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  discLink: { color: colors.maroon, fontSize: 12.5, fontWeight: '800', marginTop: 4 },
 });

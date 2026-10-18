@@ -1,4 +1,23 @@
 import { ImageManipulator, SaveFormat, type ImageResult } from 'expo-image-manipulator';
+import * as ImagePicker from 'expo-image-picker';
+import { Platform } from 'react-native';
+
+/**
+ * May the photo library be opened? Call before `launchImageLibraryAsync`.
+ *
+ * Only iOS asks. On Android `launchImageLibraryAsync` opens the system photo
+ * picker, which needs no permission — and this app must not hold one: Google
+ * Play does not allow a loan facilitator READ_MEDIA_IMAGES or the storage
+ * permissions, so the manifest blocks them. Asking for a blocked permission
+ * answers "denied" (on Android 12 and below the request is for
+ * READ/WRITE_EXTERNAL_STORAGE), and every gallery button would go quietly
+ * dead. iOS is unchanged.
+ */
+export async function photoLibraryAllowed(): Promise<boolean> {
+  if (Platform.OS !== 'ios') return true;
+  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  return permission.granted;
+}
 
 /**
  * Shrink a picture before it leaves the phone.

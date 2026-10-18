@@ -63,6 +63,8 @@ export type Screen =
   | 'menuFarm'
   | 'menuKyc'
   | 'menuFaq'
+  // Google Play requires account deletion inside the app.
+  | 'deleteAccount'
   | 'marketUpdates'
   | 'marketDetail'
   | 'officers'
@@ -311,6 +313,39 @@ export type LoanProduct = {
   amount_step: string | number;
   is_active: boolean;
   coming_soon: boolean;
+  /** Absent until the server sends it — the screens hide the block rather than guess. */
+  disclosure?: LoanDisclosure | null;
+};
+
+/**
+ * What a loan costs, in the terms Google Play's Financial Services policy asks
+ * for: the maximum APR (interest and every fee, per year), the repayment period,
+ * the fees, and a worked example. Computed by the server from the product's own
+ * terms. Every field is optional because DECIMAL columns arrive as strings and a
+ * server mid-rollout may send none of them; a missing figure hides its line.
+ */
+export type LoanDisclosure = {
+  nominal_rate_pct?: number | string | null;
+  interest_method?: string | null;
+  apr_min_pct?: number | string | null;
+  /** The effective annual rate including fees — never the nominal flat rate. */
+  apr_max_pct?: number | string | null;
+  tenure_min_months?: number | string | null;
+  tenure_max_months?: number | string | null;
+  processing_fee_pct?: number | string | null;
+  processing_fee_flat?: number | string | null;
+  late_penalty_pct?: number | string | null;
+  representative?: {
+    principal?: number | string | null;
+    tenure_months?: number | string | null;
+    repayment_mode?: string | null;
+    installment_count?: number | string | null;
+    emi_amount?: number | string | null;
+    total_interest?: number | string | null;
+    processing_fee?: number | string | null;
+    total_payable?: number | string | null;
+    apr_pct?: number | string | null;
+  } | null;
 };
 
 export type RepaymentMode = 'weekly' | 'monthly' | 'one_time';
