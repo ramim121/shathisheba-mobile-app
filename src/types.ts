@@ -65,6 +65,7 @@ export type Screen =
   | 'menuFaq'
   // Google Play requires account deletion inside the app.
   | 'deleteAccount'
+  | 'blockedPeople'
   | 'marketUpdates'
   | 'marketDetail'
   | 'officers'

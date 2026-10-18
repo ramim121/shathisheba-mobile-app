@@ -1680,7 +1680,7 @@ export default function App() {
   }, [lang, langReady, authToken, authUser?.id]);
 
   // Sub-pages keep their parent tab lit, so the bar says where you are.
-  const menuScreens: Screen[] = ['profile', 'menuPersonal', 'menuBanking', 'menuFarm', 'menuKyc', 'menuFaq', 'deleteAccount'];
+  const menuScreens: Screen[] = ['profile', 'menuPersonal', 'menuBanking', 'menuFarm', 'menuKyc', 'menuFaq', 'deleteAccount', 'blockedPeople'];
   const projectScreens: Screen[] = ['projects', 'myProjects', 'projectProgress', 'kyc', 'regDone'];
   const activeTab: MainTab =
     screen === 'community' || screen === 'officers' ? 'community' : projectScreens.includes(screen) ? 'projects' : menuScreens.includes(screen) ? 'profile' : 'home';
@@ -1793,6 +1793,7 @@ export default function App() {
       menuKyc: <KycScreen setScreen={(next) => (next === 'profile' ? goBackTo('profile') : go(next))} />,
       menuFaq: <FaqScreen setScreen={go} />,
       deleteAccount: <DeleteAccountScreen setScreen={go} onDeleted={setAuthNotice} />,
+      blockedPeople: <BlockedPeopleScreen setScreen={go} />,
       marketUpdates: <MarketUpdates setScreen={go} onSelect={(id) => { setSelectedMarketId(id); go('marketDetail'); }} />,
       marketDetail: <MarketDetail setScreen={go} id={selectedMarketId} />,
       officers: <OfficersScreen setScreen={go} />,
@@ -6822,10 +6823,13 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const { user } = useAuth();
   const district = user?.district ? `?district=${encodeURIComponent(user.district)}` : '';
   const [feedFilter, setFeedFilter] = useState<'regional' | 'mine' | 'listings' | 'all'>('regional');
+  // Bumped after a block, so the feed is fetched again without that person.
+  const [feedNonce, setFeedNonce] = useState(0);
   const feedQs = [
     user?.district ? `district=${encodeURIComponent(String(user.district))}` : '',
     feedFilter !== 'regional' ? `filter=${feedFilter}` : '',
     feedFilter === 'mine' && user?.id ? `user_id=${encodeURIComponent(String(user.id))}` : '',
+    feedNonce ? `r=${feedNonce}` : '',
   ].filter(Boolean).join('&');
   const posts = useApiList<ApiRow>(`community/posts${feedQs ? '?' + feedQs : ''}`);
   const officers = useApiList<ApiRow>(`community/officers${district}`);
@@ -6834,6 +6838,16 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState('');
   const [localPosts, setLocalPosts] = useState<ApiRow[]>([]);
+  // Reporting and blocking (Google Play's user-generated content policy). A
+  // reported post leaves her feed at once and goes to staff in the console's
+  // moderation queue; blocking someone drops their posts from her feed.
+  const [hiddenIds, setHiddenIds] = useState<string[]>([]);
+  const [menuPost, setMenuPost] = useState<ApiRow | null>(null);
+  const [sheetMode, setSheetMode] = useState<'menu' | 'report' | 'block'>('menu');
+  const [reportReason, setReportReason] = useState('');
+  const [sheetBusy, setSheetBusy] = useState(false);
+  const [sheetError, setSheetError] = useState('');
+  const [feedNotice, setFeedNotice] = useState('');
   const officerRows = shouldUseFallback(officers) ? fallbackOfficers : officers.rows;
   const postRows = shouldUseFallback(posts) && !localPosts.length ? fallbackCommunityPosts : posts.rows;
 
@@ -6868,7 +6882,61 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
       setPosting(false);
     }
   }
-  const visiblePosts = [...localPosts, ...postRows];
+  // Only another person's real post can be reported or its author blocked: not
+  // her own, not a staff notice, not a sale listing, not the offline samples.
+  const canReport = (post: ApiRow) => {
+    const id = String(post.id ?? '');
+    return /^\d+$/.test(id)
+      && Number(post.is_official ?? 0) !== 1
+      && Number(post.is_listing ?? 0) !== 1
+      && Number(post.is_mine ?? 0) !== 1;
+  };
+  function openPostMenu(post: ApiRow) {
+    setMenuPost(post);
+    setSheetMode('menu');
+    setReportReason('');
+    setSheetError('');
+  }
+  function closeSheet() {
+    if (!sheetBusy) setMenuPost(null);
+  }
+  async function sendReport() {
+    if (!menuPost || !reportReason) return;
+    setSheetBusy(true);
+    setSheetError('');
+    try {
+      await apiRequest('app/community/report', { method: 'POST', body: JSON.stringify({ post_id: String(menuPost.id), reason: reportReason }) });
+      setHiddenIds((ids) => [...ids, String(menuPost.id)]);
+      setFeedNotice(tx('ধন্যবাদ। আমাদের দল পোস্টটি দেখবে; ততক্ষণ এটি আপনার ফিডে দেখাবে না।', 'Thank you. Our team will review this post; it is hidden from your feed meanwhile.'));
+      setMenuPost(null);
+    } catch (error) {
+      setSheetError(serverMessage(error, lang));
+    } finally {
+      setSheetBusy(false);
+    }
+  }
+  async function blockAuthor() {
+    if (!menuPost) return;
+    setSheetBusy(true);
+    setSheetError('');
+    try {
+      await apiRequest('app/community/block', { method: 'POST', body: JSON.stringify({ post_id: String(menuPost.id) }) });
+      const who = String(menuPost.farmer_name || '');
+      setHiddenIds((ids) => [...ids, String(menuPost.id)]);
+      setFeedNotice(tx(
+        `${who || 'এই ব্যক্তি'}-কে ব্লক করা হয়েছে। মেনু → ব্লক করা ব্যক্তি থেকে আনব্লক করতে পারবেন।`,
+        `${who || 'This person'} is blocked. You can unblock them from Menu → Blocked people.`,
+      ));
+      setMenuPost(null);
+      setFeedNonce((n) => n + 1);
+    } catch (error) {
+      setSheetError(serverMessage(error, lang));
+    } finally {
+      setSheetBusy(false);
+    }
+  }
+  const menuName = String(menuPost?.farmer_name || menuPost?.user_name || tx('এই ব্যক্তি', 'this person'));
+  const visiblePosts = [...localPosts, ...postRows].filter((post) => !hiddenIds.includes(String(post.id ?? '')));
   return (
     <>
       <View style={styles.communityHero}>
@@ -6930,6 +6998,7 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
         ))}
       </View>
       {posts.loading ? <ApiStatus state={posts} empty={tx('এখন কোনো কমিউনিটি পোস্ট নেই।', 'No community posts are available right now.')} /> : null}
+      {feedNotice ? <Text style={styles.feedNotice}>{feedNotice}</Text> : null}
       {visiblePosts.map((post, index) => (
         <Post
           key={String(post.id ?? `local-${index}`)}
@@ -6942,8 +7011,150 @@ function Community({ setScreen }: { setScreen: (screen: Screen) => void }) {
           comments={num(post.comment_count || 0, lang)}
           meta={[formatDate(post.created_at, lang), lang === 'bn' ? post.district_bn || post.upazila_bn || post.district || post.upazila : post.district || post.upazila].filter(Boolean).join(' · ')}
           highlight={Number(post.is_listing ?? 0) === 1}
+          onMenu={canReport(post) ? () => openPostMenu(post) : undefined}
         />
       ))}
+
+      <Modal visible={!!menuPost} transparent animationType="slide" onRequestClose={closeSheet}>
+        <Pressable style={styles.dropdownBackdrop} onPress={closeSheet}>
+          <Pressable style={styles.dropdownCard} onPress={() => {}}>
+            <View style={styles.dropdownHandle} />
+            <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
+            {sheetMode === 'menu' ? (
+              <>
+                <Text style={styles.dropdownSheetTitle}>{menuName}</Text>
+                <Pressable style={({ pressed }) => [ui.sheetRow, pressed && styles.pressed]} onPress={() => setSheetMode('report')} accessibilityRole="button">
+                  <Ionicons name="flag-outline" size={20} color={colors.maroon} />
+                  <View style={styles.flex}>
+                    <Text style={ui.sheetRowText}>{tx('পোস্টটি রিপোর্ট করুন', 'Report post')}</Text>
+                    <Text style={ui.sheetRowSub}>{tx('আপত্তিকর, ভুল বা প্রতারণামূলক হলে জানান', 'Tell us if it is offensive, false or a scam')}</Text>
+                  </View>
+                </Pressable>
+                <Pressable style={({ pressed }) => [ui.sheetRow, pressed && styles.pressed]} onPress={() => setSheetMode('block')} accessibilityRole="button">
+                  <Ionicons name="ban-outline" size={20} color={colors.danger} />
+                  <View style={styles.flex}>
+                    <Text style={ui.sheetRowText}>{tx('এই ব্যক্তিকে ব্লক করুন', 'Block this person')}</Text>
+                    <Text style={ui.sheetRowSub}>{tx('তাঁর পোস্ট আর আপনার ফিডে দেখাবে না', 'Their posts will no longer appear in your feed')}</Text>
+                  </View>
+                </Pressable>
+                <AppButton title={tx('বাতিল', 'Cancel')} variant="outline" onPress={closeSheet} />
+              </>
+            ) : sheetMode === 'report' ? (
+              <>
+                <Text style={[ui.sheetTitle, styles.sheetQuestion]}>{tx('কেন রিপোর্ট করছেন?', 'Why are you reporting this post?')}</Text>
+                {REPORT_REASONS.map(([key, bn, en]) => (
+                  <Pressable
+                    key={key}
+                    style={({ pressed }) => [ui.sheetRow, reportReason === key && ui.sheetRowActive, pressed && styles.pressed]}
+                    onPress={() => setReportReason(key)}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: reportReason === key }}
+                  >
+                    <Ionicons name={reportReason === key ? 'radio-button-on' : 'radio-button-off'} size={20} color={colors.maroon} />
+                    <Text style={[ui.sheetRowText, reportReason === key && ui.sheetRowTextActive]}>{tx(bn, en)}</Text>
+                  </Pressable>
+                ))}
+                {sheetError ? <Text style={styles.apiNotice}>{sheetError}</Text> : null}
+                <AppButton title={sheetBusy ? tx('পাঠানো হচ্ছে...', 'Sending...') : tx('রিপোর্ট পাঠান', 'Send report')} onPress={() => { void sendReport(); }} disabled={sheetBusy || !reportReason} />
+                <AppButton title={tx('পেছনে', 'Back')} variant="outline" onPress={() => setSheetMode('menu')} />
+              </>
+            ) : (
+              <>
+                <Text style={[ui.sheetTitle, styles.sheetQuestion]}>{tx(`${menuName}-কে ব্লক করবেন?`, `Block ${menuName}?`)}</Text>
+                <Text style={ui.ldShareHint}>
+                  {tx(
+                    'তাঁর পোস্ট আর আপনার কমিউনিটি ফিডে দেখাবে না। তিনি জানতে পারবেন না। পরে মেনু → ব্লক করা ব্যক্তি থেকে আনব্লক করতে পারবেন।',
+                    "Their posts will no longer appear in your Community feed. They won't be told. You can unblock them later from Menu → Blocked people.",
+                  )}
+                </Text>
+                {sheetError ? <Text style={styles.apiNotice}>{sheetError}</Text> : null}
+                <AppButton title={sheetBusy ? tx('ব্লক করা হচ্ছে...', 'Blocking...') : tx('ব্লক করুন', 'Block')} onPress={() => { void blockAuthor(); }} disabled={sheetBusy} />
+                <AppButton title={tx('পেছনে', 'Back')} variant="outline" onPress={() => setSheetMode('menu')} />
+              </>
+            )}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
+
+/** Why a community post is being reported: [server key, Bangla, English]. */
+const REPORT_REASONS: Array<[string, string, string]> = [
+  ['spam', 'স্প্যাম বা বিজ্ঞাপন', 'Spam or advertising'],
+  ['abusive', 'গালিগালাজ বা হয়রানি', 'Abuse or harassment'],
+  ['sexual', 'অশ্লীল বা যৌন বিষয়', 'Sexual or indecent content'],
+  ['violence', 'সহিংসতা বা ক্ষতিকর বিষয়', 'Violence or harmful content'],
+  ['false_info', 'ভুল বা বিভ্রান্তিকর তথ্য', 'False or misleading information'],
+  ['scam', 'প্রতারণা', 'Scam or fraud'],
+  ['other', 'অন্য কিছু', 'Something else'],
+];
+
+/** Menu → Blocked people: the people she has blocked in Community, each with Unblock. */
+function BlockedPeopleScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+  const { tx, lang } = useLanguage();
+  const [nonce, setNonce] = useState(0);
+  const blocks = useApiList<ApiRow>(`app/community/blocks${nonce ? `?r=${nonce}` : ''}`);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  async function unblock(id: string) {
+    setBusyId(id);
+    setError('');
+    try {
+      await apiRequest('app/community/unblock', { method: 'POST', body: JSON.stringify({ blocked_user_id: id }) });
+      setNonce((n) => n + 1);
+    } catch (failure) {
+      setError(serverMessage(failure, lang));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <>
+      <Header title={tx('ব্লক করা ব্যক্তি', 'Blocked people')} onBack={() => setScreen('profile')} />
+      <RefreshScroll>
+        <Text style={styles.blockedHint}>
+          {tx(
+            'যাঁদের ব্লক করেছেন তাঁদের পোস্ট আপনার কমিউনিটি ফিডে দেখায় না। তাঁরা তা জানেন না।',
+            "Posts from people you have blocked don't appear in your Community feed. They are not told.",
+          )}
+        </Text>
+        {blocks.loading ? <ApiStatus state={blocks} empty="" /> : null}
+        {!blocks.loading && !blocks.rows.length ? (
+          <Text style={ui.sheetEmpty}>{tx('আপনি কাউকে ব্লক করেননি।', "You haven't blocked anyone.")}</Text>
+        ) : null}
+        {blocks.rows.length ? (
+          <Card>
+            {blocks.rows.map((row) => {
+              const id = String(row.blocked_user_id ?? '');
+              const name = String(row.name || tx('শাথী ব্যবহারকারী', 'Shathi user'));
+              return (
+                <View key={id} style={ui.sheetRow}>
+                  <View style={styles.avatar}>
+                    <Text style={styles.avatarText}>{name.slice(0, 1)}</Text>
+                  </View>
+                  <View style={styles.flex}>
+                    <Text style={ui.sheetRowText}>{name}</Text>
+                    {row.created_at ? <Text style={ui.sheetRowSub}>{tx('ব্লক করেছেন', 'Blocked')} · {formatDate(row.created_at, lang)}</Text> : null}
+                  </View>
+                  <Pressable
+                    onPress={() => { void unblock(id); }}
+                    disabled={busyId === id}
+                    style={({ pressed }) => [styles.unblockBtn, pressed && styles.pressed]}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.unblockText}>{busyId === id ? '...' : tx('আনব্লক', 'Unblock')}</Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </Card>
+        ) : null}
+        {error ? <Text style={styles.apiNotice}>{error}</Text> : null}
+      </RefreshScroll>
     </>
   );
 }
@@ -6969,7 +7180,7 @@ function Officer({ name, role, phone }: { name: string; role: string; phone?: st
   );
 }
 
-function Post({ name, tag, text, likes, comments, meta, image, official, highlight }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean; highlight?: boolean }) {
+function Post({ name, tag, text, likes, comments, meta, image, official, highlight, onMenu }: { name: string; tag: string; text: string; likes: string; comments: string; meta?: string; image?: string; official?: boolean; highlight?: boolean; onMenu?: () => void }) {
   const { tx } = useLanguage();
   return (
     <Card style={[styles.postCard, official && styles.officialCard, highlight && styles.listingPostCard]}>
@@ -6987,6 +7198,17 @@ function Post({ name, tag, text, likes, comments, meta, image, official, highlig
           <Text style={styles.productSub}>{meta || ''}</Text>
         </View>
         <Badge label={tag} tone={official ? 'rose' : tag === 'প্রশ্ন' || tag === 'Question' ? 'gold' : 'green'} />
+        {onMenu ? (
+          <Pressable
+            onPress={onMenu}
+            hitSlop={10}
+            style={({ pressed }) => [styles.postMenuBtn, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel={tx('পোস্টের অপশন: রিপোর্ট বা ব্লক', 'Post options: report or block')}
+          >
+            <Ionicons name="ellipsis-vertical" size={18} color={colors.muted} />
+          </Pressable>
+        ) : null}
       </View>
       {text ? <Text style={styles.postText}>{text}</Text> : null}
       {image ? <Image source={{ uri: image }} style={styles.postImage} /> : null}
@@ -8260,6 +8482,7 @@ function Profile({ setScreen }: { setScreen: (screen: Screen) => void }) {
     { icon: '🔒', title: tx('গোপনীয়তা নীতি', 'Privacy policy'), sub: tx('কোন তথ্য রাখা হয় ও কেন', 'What we keep and why'), action: () => openPublicPage('privacy'), external: true },
     { icon: '📄', title: tx('শর্তাবলি', 'Terms'), sub: tx('শাথী সেবা ব্যবহারের শর্ত', 'The terms of using Shathi Sheba'), action: () => openPublicPage('terms'), external: true },
     { icon: '💳', title: tx('ঋণের শর্ত ও খরচ', 'Loan terms & cost'), sub: tx('সুদ, ফি ও বার্ষিক খরচ (APR)', 'Interest, fees and APR'), action: () => openPublicPage('loan-disclosure'), external: true },
+    { icon: '🚫', title: tx('ব্লক করা ব্যক্তি', 'Blocked people'), sub: tx('কমিউনিটিতে যাঁদের ব্লক করেছেন', 'People you blocked in Community'), target: 'blockedPeople' },
     { icon: '🗑️', title: tx('অ্যাকাউন্ট মুছে ফেলুন', 'Delete my account'), sub: tx('আপনার তথ্য স্থায়ীভাবে মুছে দিন', 'Erase your data for good'), target: 'deleteAccount', danger: true },
   ];
   const roleChips = roleLabelsFor(authedUser, tx);
